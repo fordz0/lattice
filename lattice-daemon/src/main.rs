@@ -10,11 +10,14 @@ use lattice_daemon::rpc::{self, GetSiteResponse, NodeInfoResponse, PublishSiteOk
 use lattice_daemon::transport;
 use lattice_site::manifest::{hash_bytes, verify_manifest, SiteManifest};
 use lattice_site::publisher as site_publisher;
+use libp2p::autonat;
+use libp2p::dcutr;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub;
 use libp2p::identify;
 use libp2p::kad;
 use libp2p::mdns;
+use libp2p::relay;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, Swarm};
 use std::collections::HashMap;
@@ -30,6 +33,9 @@ struct LatticeBehaviour {
     mdns: mdns::tokio::Behaviour,
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
+    autonat: autonat::Behaviour,
+    relay: relay::Behaviour,
+    dcutr: dcutr::Behaviour,
 }
 
 struct PublishTask {
@@ -92,12 +98,18 @@ async fn main() -> Result<()> {
             "/lattice/0.1.0".to_string(),
             key.public(),
         ));
+        let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
+        let relay = relay::Behaviour::new(peer_id, relay::Config::default());
+        let dcutr = dcutr::Behaviour::new(peer_id);
 
         Ok(LatticeBehaviour {
             kademlia,
             mdns,
             gossipsub,
             identify,
+            autonat,
+            relay,
+            dcutr,
         })
     })?;
 
@@ -372,6 +384,18 @@ fn handle_swarm_event(
             }
         }
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Identify(_)) => {}
+        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Autonat(event)) => {
+            info!(event = ?event, "autonat event");
+            if let autonat::Event::StatusChanged { new, .. } = &event {
+                info!(status = ?new, "NAT status changed");
+            }
+        }
+        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Relay(event)) => {
+            info!(event = ?event, "relay event");
+        }
+        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Dcutr(event)) => {
+            info!(event = ?event, "dcutr event");
+        }
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Gossipsub(event)) => {
             info!(event = ?event, "gossipsub event");
         }
