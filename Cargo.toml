@@ -1,0 +1,3 @@
+[workspace]
+members = ["lattice-daemon", "loom", "lattice-cli"]
+resolver = "2"

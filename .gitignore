@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+
+# Local runtime data and generated keys
+/.lattice/
+**/identity.key
+**/named_keys/
+
+# Environment files
+.env
+.env.*
+
+# Editor/OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
