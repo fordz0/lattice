@@ -82,4 +82,23 @@ impl RpcClient {
     pub async fn get_record(&self, key: &str) -> Result<Value> {
         self.call("get_record", json!({ "key": key })).await
     }
+
+    pub async fn publish_site(&self, name: &str, site_dir: &str) -> Result<Value> {
+        self.call(
+            "publish_site",
+            json!({
+                "name": name,
+                "site_dir": site_dir,
+            }),
+        )
+        .await
+    }
+
+    pub async fn get_site_manifest(&self, name: &str) -> Result<Value> {
+        self.call("get_site_manifest", json!({ "name": name })).await
+    }
+
+    pub async fn get_block(&self, hash: &str) -> Result<Value> {
+        self.call("get_block", json!({ "hash": hash })).await
+    }
 }

@@ -12,6 +12,12 @@ pub struct NodeInfoResponse {
     pub listen_addrs: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PublishSiteOk {
+    pub version: u64,
+    pub file_count: u32,
+}
+
 pub enum RpcCommand {
     NodeInfo {
         respond_to: oneshot::Sender<NodeInfoResponse>,
@@ -23,6 +29,19 @@ pub enum RpcCommand {
     },
     GetRecord {
         key: String,
+        respond_to: oneshot::Sender<Option<String>>,
+    },
+    PublishSite {
+        name: String,
+        site_dir: String,
+        respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
+    },
+    GetSiteManifest {
+        name: String,
+        respond_to: oneshot::Sender<Option<String>>,
+    },
+    GetBlock {
+        hash: String,
         respond_to: oneshot::Sender<Option<String>>,
     },
 }
@@ -38,9 +57,33 @@ struct GetRecordParams {
     key: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublishSiteParams {
+    name: String,
+    site_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetSiteManifestParams {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetBlockParams {
+    hash: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct PutRecordResponse {
     status: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PublishSiteResponse {
+    status: String,
+    version: Option<u64>,
+    file_count: Option<u32>,
     error: Option<String>,
 }
 
@@ -108,6 +151,72 @@ pub async fn start_rpc_server(port: u16, command_tx: mpsc::Sender<RpcCommand>) -
         resp_rx
             .await
             .map_err(|e| internal_error(format!("get_record response dropped: {e}")))
+    })?;
+
+    module.register_async_method("publish_site", |params, ctx, _| async move {
+        let PublishSiteParams { name, site_dir } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        ctx.send(RpcCommand::PublishSite {
+            name,
+            site_dir,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch publish_site: {e}")))?;
+
+        let result = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("publish_site response dropped: {e}")))?;
+
+        let response = match result {
+            Ok(ok) => PublishSiteResponse {
+                status: "ok".to_string(),
+                version: Some(ok.version),
+                file_count: Some(ok.file_count),
+                error: None,
+            },
+            Err(err) => PublishSiteResponse {
+                status: "err".to_string(),
+                version: None,
+                file_count: None,
+                error: Some(err),
+            },
+        };
+
+        Ok::<_, ErrorObjectOwned>(response)
+    })?;
+
+    module.register_async_method("get_site_manifest", |params, ctx, _| async move {
+        let GetSiteManifestParams { name } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        ctx.send(RpcCommand::GetSiteManifest {
+            name,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch get_site_manifest: {e}")))?;
+
+        resp_rx
+            .await
+            .map_err(|e| internal_error(format!("get_site_manifest response dropped: {e}")))
+    })?;
+
+    module.register_async_method("get_block", |params, ctx, _| async move {
+        let GetBlockParams { hash } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        ctx.send(RpcCommand::GetBlock {
+            hash,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch get_block: {e}")))?;
+
+        resp_rx
+            .await
+            .map_err(|e| internal_error(format!("get_block response dropped: {e}")))
     })?;
 
     let handle = server.start(module);

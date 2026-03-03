@@ -4,10 +4,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use directories::BaseDirs;
 use ed25519_dalek::SigningKey;
+use lattice_site::manifest::{hash_bytes, hash_file, verify_manifest, FileEntry, SiteManifest};
+use lattice_site::publisher as site_publisher;
 use rpc::{DaemonNotRunning, RpcClient};
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -32,6 +34,21 @@ enum Command {
         #[command(subcommand)]
         command: NameCommand,
     },
+    Init {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "general")]
+        rating: String,
+    },
+    Publish {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    Fetch {
+        name: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -46,9 +63,7 @@ async fn main() {
         Ok(()) => 0,
         Err(err) => {
             if err.downcast_ref::<DaemonNotRunning>().is_some() {
-                eprintln!(
-                    "lattice daemon is not running. Start it with: lattice-daemon"
-                );
+                eprintln!("lattice daemon is not running. Start it with: lattice-daemon");
             } else {
                 eprintln!("{err:#}");
             }
@@ -98,9 +113,7 @@ async fn run() -> Result<()> {
             NameCommand::Claim { name } => {
                 let client = RpcClient::new(cli.rpc_port);
                 let owner_key = load_identity_public_key_hex()?;
-                let result = client
-                    .put_record(&format!("name:{name}"), &owner_key)
-                    .await?;
+                let result = client.put_record(&format!("name:{name}"), &owner_key).await?;
 
                 let status = result.get("status").and_then(Value::as_str).unwrap_or("err");
                 if status == "ok" {
@@ -128,6 +141,95 @@ async fn run() -> Result<()> {
                 println!("Owner key: {owner}");
             }
         },
+        Command::Init { name, rating } => {
+            init_site(name, &rating)?;
+        }
+        Command::Publish { dir } => {
+            let site_dir = dir.unwrap_or(std::env::current_dir().context("failed to get current directory")?);
+            let canonical_dir = site_dir
+                .canonicalize()
+                .with_context(|| format!("failed to resolve {}", site_dir.display()))?;
+            let name = site_name_for_dir(&canonical_dir)?;
+            let _publisher_key = load_identity_public_key_hex()?;
+
+            println!("Publishing {name}.lat...");
+
+            let client = RpcClient::new(cli.rpc_port);
+            let result = client
+                .publish_site(&name, &canonical_dir.to_string_lossy())
+                .await?;
+
+            let status = result.get("status").and_then(Value::as_str).unwrap_or("err");
+            if status != "ok" {
+                let error = result
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("publish_site failed");
+                bail!("{error}");
+            }
+
+            let file_count = result
+                .get("file_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let version = result.get("version").and_then(Value::as_u64).unwrap_or(0);
+
+            println!("Hashed {file_count} files");
+            println!("Stored to DHT");
+            println!("Version: {version}");
+        }
+        Command::Fetch { name, out } => {
+            let out_dir = out.unwrap_or_else(|| PathBuf::from(&name));
+            let client = RpcClient::new(cli.rpc_port);
+
+            let manifest_result = client.get_site_manifest(&name).await?;
+            let manifest_json = manifest_result
+                .as_str()
+                .ok_or_else(|| anyhow!("site {}.lat not found", name))?;
+
+            let manifest: SiteManifest = serde_json::from_str(manifest_json)
+                .with_context(|| format!("failed to parse site manifest for {}.lat", name))?;
+
+            verify_manifest(&manifest)?;
+            fs::create_dir_all(&out_dir)
+                .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
+
+            for file in &manifest.files {
+                let block_result = client.get_block(&file.hash).await?;
+                let hex_contents = block_result.as_str().ok_or_else(|| {
+                    anyhow!("missing content block {} for {}", file.hash, file.path)
+                })?;
+                let contents = decode_hex(hex_contents)
+                    .with_context(|| format!("invalid block hex for {}", file.path))?;
+
+                let actual_hash = hash_bytes(&contents);
+                if actual_hash != file.hash {
+                    bail!(
+                        "hash mismatch for {}: expected {}, got {}",
+                        file.path,
+                        file.hash,
+                        actual_hash
+                    );
+                }
+
+                let output_path = out_dir.join(&file.path);
+                if let Some(parent) = output_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                fs::write(&output_path, &contents)
+                    .with_context(|| format!("failed to write {}", output_path.display()))?;
+
+                println!("Fetched {}", file.path);
+            }
+
+            println!(
+                "Fetched {}.lat v{} — {} files",
+                name,
+                manifest.version,
+                manifest.files.len()
+            );
+        }
     }
 
     Ok(())
@@ -212,6 +314,64 @@ fn keygen() -> Result<()> {
     Ok(())
 }
 
+fn init_site(name: Option<String>, rating: &str) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let site_name = match name {
+        Some(name) => name,
+        None => cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow!("failed to derive site name from current directory"))?
+            .to_string(),
+    };
+
+    let index_path = cwd.join("index.html");
+    let index_html = format!(
+        "<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>{0}.lat</title>\n</head>\n<body>\n  <h1>Welcome to {0}.lat - powered by Lattice</h1>\n</body>\n</html>\n",
+        site_name
+    );
+    fs::write(&index_path, index_html)
+        .with_context(|| format!("failed to write {}", index_path.display()))?;
+
+    let publisher_key = load_identity_public_key_hex().unwrap_or_default();
+    let file_hash = hash_file(&index_path)?;
+    let file_size = fs::metadata(&index_path)
+        .with_context(|| format!("failed to read metadata for {}", index_path.display()))?
+        .len();
+
+    let manifest = SiteManifest {
+        name: site_name.clone(),
+        version: 0,
+        publisher_key,
+        rating: rating.to_string(),
+        files: vec![FileEntry {
+            path: "index.html".to_string(),
+            hash: file_hash,
+            size: file_size,
+        }],
+        signature: String::new(),
+    };
+
+    site_publisher::save_manifest(&manifest, &cwd)?;
+    println!("Initialised {}.lat in current directory", site_name);
+
+    Ok(())
+}
+
+fn site_name_for_dir(site_dir: &Path) -> Result<String> {
+    if let Ok(manifest) = site_publisher::load_manifest(site_dir) {
+        if !manifest.name.trim().is_empty() {
+            return Ok(manifest.name);
+        }
+    }
+
+    site_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("failed to derive site name from {}", site_dir.display()))
+}
+
 fn load_identity_public_key_hex() -> Result<String> {
     let identity_path = lattice_data_dir()?.join("identity.key");
     let bytes = fs::read(&identity_path)
@@ -232,6 +392,10 @@ fn load_identity_public_key_hex() -> Result<String> {
 }
 
 fn lattice_data_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("LATTICE_DATA_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+
     let base_dirs = BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
     Ok(base_dirs.home_dir().join(".lattice"))
 }
@@ -244,4 +408,28 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>> {
+    if input.len() % 2 != 0 {
+        bail!("hex input length must be even");
+    }
+
+    let mut out = Vec::with_capacity(input.len() / 2);
+    let bytes = input.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = hex_nibble(bytes[i])?;
+        let lo = hex_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("invalid hex character: {}", byte as char),
+    }
 }
