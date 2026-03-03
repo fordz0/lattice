@@ -1,0 +1,25 @@
+{
+  "manifest_version": 2,
+  "name": "Lattice",
+  "version": "0.1.0",
+  "description": "Access .lat sites on the Lattice P2P network",
+  "permissions": [
+    "proxy",
+    "<all_urls>",
+    "tabs"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "web_accessible_resources": ["setup.html", "setup.js"],
+  "icons": {
+    "48": "icons/icon48.png",
+    "96": "icons/icon96.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "lattice@fordz0",
+      "strict_min_version": "91.1.0"
+    }
+  }
+}

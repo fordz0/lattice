@@ -1,11 +1,14 @@
 use anyhow::{bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use ed25519_dalek::SigningKey;
 use lattice_daemon::config::load_or_create_config;
 use lattice_daemon::dht;
+use lattice_daemon::http_server;
 use lattice_daemon::node::load_or_create_identity;
-use lattice_daemon::rpc::{self, NodeInfoResponse, PublishSiteOk, RpcCommand};
+use lattice_daemon::rpc::{self, GetSiteResponse, NodeInfoResponse, PublishSiteOk, RpcCommand, SiteFile};
 use lattice_daemon::transport;
-use lattice_site::manifest::{hash_bytes, verify_manifest};
+use lattice_site::manifest::{hash_bytes, verify_manifest, SiteManifest};
 use lattice_site::publisher as site_publisher;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub;
@@ -35,6 +38,24 @@ struct PublishTask {
     failed: Option<String>,
     version: u64,
     file_count: u32,
+}
+
+struct GetSiteTask {
+    respond_to: oneshot::Sender<Result<GetSiteResponse, String>>,
+    manifest: Option<SiteManifest>,
+    next_index: usize,
+    files: Vec<SiteFile>,
+}
+
+enum GetSiteQuery {
+    Manifest {
+        task_id: u64,
+    },
+    Block {
+        task_id: u64,
+        hash: String,
+        path: String,
+    },
 }
 
 struct PreparedPublish {
@@ -88,6 +109,13 @@ async fn main() -> Result<()> {
 
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcCommand>(64);
     let _rpc_server = rpc::start_rpc_server(config.rpc_port, rpc_tx.clone()).await?;
+    let http_rpc_tx = rpc_tx.clone();
+    let _http_server = tokio::spawn(async move {
+        if let Err(err) = http_server::start_http_server(7781, http_rpc_tx).await {
+            error!(error = %err, "http server exited");
+        }
+    });
+    info!("HTTP server listening on port 7781");
 
     info!(peer_id = %peer_id, "lattice daemon started");
     info!(port = config.listen_port, rpc_port = config.rpc_port, "listening and RPC configured");
@@ -99,6 +127,10 @@ async fn main() -> Result<()> {
     let mut publish_tasks: HashMap<u64, PublishTask> = HashMap::new();
     let mut publish_query_to_task: HashMap<kad::QueryId, u64> = HashMap::new();
     let mut next_publish_task_id: u64 = 1;
+
+    let mut get_site_tasks: HashMap<u64, GetSiteTask> = HashMap::new();
+    let mut get_site_queries: HashMap<kad::QueryId, GetSiteQuery> = HashMap::new();
+    let mut next_get_site_task_id: u64 = 1;
 
     loop {
         tokio::select! {
@@ -181,6 +213,21 @@ async fn main() -> Result<()> {
                             let query_id = dht::get_record_bytes(&mut swarm.behaviour_mut().kademlia, format!("block:{hash}"));
                             pending_get_block.insert(query_id, respond_to);
                         }
+                        RpcCommand::GetSite { name, respond_to } => {
+                            let task_id = next_get_site_task_id;
+                            next_get_site_task_id = next_get_site_task_id.saturating_add(1);
+
+                            let task = GetSiteTask {
+                                respond_to,
+                                manifest: None,
+                                next_index: 0,
+                                files: Vec::new(),
+                            };
+
+                            let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, format!("site:{name}"));
+                            get_site_queries.insert(query_id, GetSiteQuery::Manifest { task_id });
+                            get_site_tasks.insert(task_id, task);
+                        }
                     }
                 }
             }
@@ -193,6 +240,8 @@ async fn main() -> Result<()> {
                     &mut pending_get_block,
                     &mut publish_tasks,
                     &mut publish_query_to_task,
+                    &mut get_site_tasks,
+                    &mut get_site_queries,
                 );
             }
         }
@@ -207,6 +256,8 @@ fn handle_swarm_event(
     pending_get_block: &mut HashMap<kad::QueryId, oneshot::Sender<Option<String>>>,
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
+    get_site_tasks: &mut HashMap<u64, GetSiteTask>,
+    get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
 ) {
     match event {
         libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
@@ -305,6 +356,8 @@ fn handle_swarm_event(
                                 let _ = ch.send(None);
                             }
                         }
+                    } else if let Some(query) = get_site_queries.remove(&id) {
+                        handle_get_site_query_result(query, result, swarm, get_site_tasks, get_site_queries);
                     }
                 }
                 _ => {}
@@ -332,6 +385,176 @@ fn handle_swarm_event(
             error!(error = %error, "listener error");
         }
         _ => {}
+    }
+}
+
+fn handle_get_site_query_result(
+    query: GetSiteQuery,
+    result: Result<kad::GetRecordOk, kad::GetRecordError>,
+    swarm: &mut Swarm<LatticeBehaviour>,
+    get_site_tasks: &mut HashMap<u64, GetSiteTask>,
+    get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
+) {
+    match query {
+        GetSiteQuery::Manifest { task_id } => {
+            let mut task = if let Some(task) = get_site_tasks.remove(&task_id) {
+                task
+            } else {
+                return;
+            };
+
+            let manifest = match result {
+                Ok(kad::GetRecordOk::FoundRecord(record)) => {
+                    match String::from_utf8(record.record.value)
+                        .ok()
+                        .and_then(|json| serde_json::from_str::<SiteManifest>(&json).ok())
+                    {
+                        Some(manifest) => manifest,
+                        None => {
+                            let _ = task.respond_to.send(Err("invalid site manifest".to_string()));
+                            return;
+                        }
+                    }
+                }
+                _ => {
+                    let _ = task.respond_to.send(Err("site not found".to_string()));
+                    return;
+                }
+            };
+
+            if manifest.files.is_empty() {
+                let response = GetSiteResponse {
+                    name: manifest.name,
+                    version: manifest.version,
+                    files: Vec::new(),
+                };
+                let _ = task.respond_to.send(Ok(response));
+                return;
+            }
+
+            let first = manifest.files[0].clone();
+            task.manifest = Some(manifest);
+            task.next_index = 1;
+
+            let query_id = dht::get_record_bytes(
+                &mut swarm.behaviour_mut().kademlia,
+                format!("block:{}", first.hash),
+            );
+            get_site_queries.insert(
+                query_id,
+                GetSiteQuery::Block {
+                    task_id,
+                    hash: first.hash,
+                    path: first.path,
+                },
+            );
+            get_site_tasks.insert(task_id, task);
+        }
+        GetSiteQuery::Block { task_id, hash, path } => {
+            let mut task = if let Some(task) = get_site_tasks.remove(&task_id) {
+                task
+            } else {
+                return;
+            };
+
+            let stored = match result {
+                Ok(kad::GetRecordOk::FoundRecord(record)) => record.record.value,
+                _ => {
+                    let _ = task.respond_to.send(Err(format!("block missing: {hash}")));
+                    return;
+                }
+            };
+
+            let raw_bytes = decode_block_storage(&stored).unwrap_or(stored);
+            task.files.push(SiteFile {
+                path: path.clone(),
+                contents: BASE64_STANDARD.encode(raw_bytes),
+                mime_type: infer_mime_type(&path).to_string(),
+            });
+
+            let manifest = match task.manifest.as_ref() {
+                Some(manifest) => manifest,
+                None => {
+                    let _ = task.respond_to.send(Err("site task missing manifest".to_string()));
+                    return;
+                }
+            };
+
+            if task.next_index >= manifest.files.len() {
+                let response = GetSiteResponse {
+                    name: manifest.name.clone(),
+                    version: manifest.version,
+                    files: task.files,
+                };
+                let _ = task.respond_to.send(Ok(response));
+                return;
+            }
+
+            let next_file = manifest.files[task.next_index].clone();
+            task.next_index += 1;
+
+            let query_id = dht::get_record_bytes(
+                &mut swarm.behaviour_mut().kademlia,
+                format!("block:{}", next_file.hash),
+            );
+            get_site_queries.insert(
+                query_id,
+                GetSiteQuery::Block {
+                    task_id,
+                    hash: next_file.hash,
+                    path: next_file.path,
+                },
+            );
+            get_site_tasks.insert(task_id, task);
+        }
+    }
+}
+
+fn infer_mime_type(path: &str) -> &'static str {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    match ext.as_deref() {
+        Some("html") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "application/javascript",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+fn decode_block_storage(stored: &[u8]) -> Option<Vec<u8>> {
+    let hex = std::str::from_utf8(stored).ok()?.trim();
+    decode_hex(hex).ok()
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>> {
+    if input.len() % 2 != 0 {
+        bail!("hex input length must be even");
+    }
+
+    let mut out = Vec::with_capacity(input.len() / 2);
+    let bytes = input.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = hex_nibble(bytes[i])?;
+        let lo = hex_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("invalid hex character"),
     }
 }
 

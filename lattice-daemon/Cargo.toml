@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+axum = "0.7"
+base64 = "0.22"
 directories = "5"
 ed25519-dalek = "2"
 jsonrpsee = { version = "0.24", features = ["server"] }
@@ -14,5 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 toml = "1"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

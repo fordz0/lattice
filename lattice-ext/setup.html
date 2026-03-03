@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="script-src 'self'; object-src 'none';">
+  <title>Lattice Setup</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --text: #e6edf3;
+      --muted: #9ca3af;
+      --accent: #2D6A4F;
+      --panel: #111827;
+      --border: #1f2937;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at top, #111827 0%, var(--bg) 50%);
+      color: var(--text);
+      font-family: system-ui, sans-serif;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 600px;
+      padding: 48px;
+      background: color-mix(in oklab, var(--panel) 90%, black);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 2rem;
+      letter-spacing: 0.01em;
+      color: var(--accent);
+    }
+
+    .subtitle {
+      margin-top: 12px;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    h2 {
+      margin-top: 0;
+      margin-bottom: 12px;
+      font-size: 1.1rem;
+    }
+
+    p, li {
+      line-height: 1.55;
+      color: var(--text);
+    }
+
+    ol {
+      margin-top: 8px;
+      margin-bottom: 20px;
+      padding-left: 20px;
+    }
+
+    pre {
+      margin: 12px 0;
+      padding: 12px;
+      background: #0b1220;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: #dbeafe;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 11px 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.08s ease, opacity 0.2s ease;
+    }
+
+    button:hover { opacity: 0.95; }
+    button:active { transform: translateY(1px); }
+
+    .primary {
+      background: var(--accent);
+      color: #f8fafc;
+    }
+
+    .secondary {
+      background: transparent;
+      border-color: var(--border);
+      color: var(--text);
+    }
+
+    footer {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Lattice</h1>
+    <p class="subtitle">Decentralised web. No censorship. No registrar.</p>
+
+    <section>
+      <h2>Setup required</h2>
+      <p>Firefox needs to know <code>.lat</code> is a real address, not a search query. This is a one-time step.</p>
+
+      <ol>
+        <li>Click the button below to open <code>about:config</code>.</li>
+        <li>Search for this preference:</li>
+      </ol>
+
+      <pre id="pref-key">browser.fixup.domainsuffixwhitelist.lat</pre>
+
+      <div class="actions">
+        <button class="secondary" id="copy-pref">Copy key</button>
+      </div>
+
+      <ol start="3">
+        <li>Click the <strong>+</strong> button on the right to add it (defaults to <code>true</code>).</li>
+        <li>Come back here and click <strong>Done</strong>.</li>
+      </ol>
+
+      <div class="actions">
+        <button class="primary" id="open-config">Open about:config</button>
+        <button class="secondary" id="done-test">Done — take me to benjf.lat</button>
+      </div>
+    </section>
+
+    <footer>Make sure lattice-daemon is running before browsing.</footer>
+  </main>
+
+  <script src="setup.js"></script>
+</body>
+</html>

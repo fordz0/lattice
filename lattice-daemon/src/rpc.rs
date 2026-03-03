@@ -18,6 +18,20 @@ pub struct PublishSiteOk {
     pub file_count: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SiteFile {
+    pub path: String,
+    pub contents: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GetSiteResponse {
+    pub name: String,
+    pub version: u64,
+    pub files: Vec<SiteFile>,
+}
+
 pub enum RpcCommand {
     NodeInfo {
         respond_to: oneshot::Sender<NodeInfoResponse>,
@@ -43,6 +57,10 @@ pub enum RpcCommand {
     GetBlock {
         hash: String,
         respond_to: oneshot::Sender<Option<String>>,
+    },
+    GetSite {
+        name: String,
+        respond_to: oneshot::Sender<Result<GetSiteResponse, String>>,
     },
 }
 
@@ -71,6 +89,11 @@ struct GetSiteManifestParams {
 #[derive(Debug, Deserialize)]
 struct GetBlockParams {
     hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetSiteParams {
+    name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,6 +240,27 @@ pub async fn start_rpc_server(port: u16, command_tx: mpsc::Sender<RpcCommand>) -
         resp_rx
             .await
             .map_err(|e| internal_error(format!("get_block response dropped: {e}")))
+    })?;
+
+    module.register_async_method("get_site", |params, ctx, _| async move {
+        let GetSiteParams { name } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        ctx.send(RpcCommand::GetSite {
+            name,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch get_site: {e}")))?;
+
+        let result = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("get_site response dropped: {e}")))?;
+
+        match result {
+            Ok(response) => Ok::<_, ErrorObjectOwned>(response),
+            Err(err) => Err(internal_error(err)),
+        }
     })?;
 
     let handle = server.start(module);
