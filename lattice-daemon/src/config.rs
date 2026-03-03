@@ -22,8 +22,16 @@ impl Default for Config {
             listen_port: 7779,
             rpc_port: 7780,
             data_dir,
-            bootstrap_peers: Vec::new(),
+            bootstrap_peers: Config::default_bootstrap_peers(),
         }
+    }
+}
+
+impl Config {
+    pub fn default_bootstrap_peers() -> Vec<String> {
+        vec![
+            "/ip4/188.245.245.179/tcp/7779/p2p/12D3KooWQQw51zoUZuVKoraBuAqkts7gX8qe2yQ1ZgTAoFVfCQFD".to_string(),
+        ]
     }
 }
 
@@ -60,6 +68,10 @@ pub fn load_or_create_config() -> Result<Config> {
                 config.data_dir.display()
             )
         })?;
+    }
+
+    if config.bootstrap_peers.is_empty() {
+        config.bootstrap_peers = Config::default_bootstrap_peers();
     }
 
     fs::create_dir_all(&config.data_dir)
