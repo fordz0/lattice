@@ -11,6 +11,11 @@ pub struct Config {
     pub rpc_port: u16,
     #[serde(default = "default_http_port")]
     pub http_port: u16,
+    /// IP address to listen on.  Defaults to 0.0.0.0 (all interfaces).
+    /// Set to a specific IP (e.g. the public IP on a VPS) to prevent
+    /// loopback/private addresses from being advertised to the network.
+    #[serde(default = "default_listen_address")]
+    pub listen_address: String,
     pub data_dir: PathBuf,
     pub bootstrap_peers: Vec<String>,
 }
@@ -30,6 +35,7 @@ impl Default for Config {
             listen_port: 7779,
             rpc_port: 7780,
             http_port: default_http_port(),
+            listen_address: default_listen_address(),
             data_dir,
             bootstrap_peers: Config::default_bootstrap_peers(),
         }
@@ -109,4 +115,8 @@ pub fn load_or_create_config() -> Result<Config> {
 
 fn default_http_port() -> u16 {
     7781
+}
+
+fn default_listen_address() -> String {
+    "0.0.0.0".to_string()
 }

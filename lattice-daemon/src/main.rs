@@ -211,11 +211,11 @@ async fn main() -> Result<()> {
     )?;
 
     let listen_addr: Multiaddr =
-        Multiaddr::from_str(&format!("/ip4/0.0.0.0/tcp/{}", config.listen_port))?;
+        Multiaddr::from_str(&format!("/ip4/{}/tcp/{}", config.listen_address, config.listen_port))?;
     swarm.listen_on(listen_addr)?;
 
     let quic_addr: Multiaddr =
-        Multiaddr::from_str(&format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port))?;
+        Multiaddr::from_str(&format!("/ip4/{}/udp/{}/quic-v1", config.listen_address, config.listen_port))?;
     swarm.listen_on(quic_addr)?;
 
     let bootstrap_peer_ids = build_bootstrap_peer_ids(&config.bootstrap_peers);
