@@ -10,7 +10,7 @@ Run two local instances to test mDNS peer discovery:
 cargo run -p lattice-daemon
 
 # Terminal 2 — different port
-LATTICE_PORT=7781 LATTICE_RPC_PORT=7782 cargo run -p lattice-daemon
+LATTICE_PORT=7782 LATTICE_RPC_PORT=7783 LATTICE_HTTP_PORT=7784 cargo run -p lattice-daemon
 
 # You should see both nodes discover each other via mDNS and log the connection.
 ```

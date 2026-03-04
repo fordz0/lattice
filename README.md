@@ -35,13 +35,16 @@ Open a terminal and keep it running:
 
 This connects you to the Lattice network automatically via the
 default bootstrap node. Leave it running while you use Lattice.
+One daemon is enough for normal use; running multiple local nodes is
+optional and mainly useful for advanced testing/operator workflows.
 
 ### Basic commands
 ```bash
 # check your node status
 ./target/release/lattice-cli status
 
-# claim a .lat name (first come first served — yours as long as you keep serving)
+# optionally claim a .lat name up front
+# (publish auto-claims if the name is currently unclaimed)
 ./target/release/lattice-cli name claim yourname
 
 # create a new site in the current directory
@@ -57,8 +60,8 @@ mkdir mysite && cd mysite
 
 ### Visit .lat sites in Firefox
 
-> Firefox extension coming soon. For now use `lattice-cli fetch` to
-> retrieve site content locally.
+- Firefox extension install steps: [lattice-ext/INSTALL.md](lattice-ext/INSTALL.md)
+- You can also use `lattice-cli fetch` to retrieve site content locally.
 
 ---
 
@@ -77,8 +80,7 @@ See [BOOTSTRAP.md](BOOTSTRAP.md).
 - **Content** is chunked, SHA-256 hashed, and served directly from
   the publisher's machine. Peers cache blocks they've fetched,
   providing organic resilience.
-- **Traffic** is wrapped in TLS 1.3 and indistinguishable from HTTPS
-  at the packet level.
+- **Traffic** uses encrypted libp2p transports (Noise over TCP and QUIC).
 - **No hidden services** — Lattice is a privacy layer for the normal
   open web, not a dark web.
 
@@ -98,9 +100,9 @@ See [BOOTSTRAP.md](BOOTSTRAP.md).
 - [x] CLI — status, peers, put, get, name claim/info, init, publish, fetch
 - [x] Site publishing with Ed25519 manifest signing
 - [x] Firefox extension
+- [x] Relay-assisted NAT reachability
+- [x] Name heartbeat and expiry enforcement
 - [ ] Loom chat protocol
-- [ ] NAT traversal
-- [ ] Heartbeat / proof-of-use name expiry
 
 ---
 
