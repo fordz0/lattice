@@ -12,9 +12,11 @@ const MAX_KAD_PACKET_BYTES: usize = 2 * 1024 * 1024;
 const KAD_SUBSTREAM_TIMEOUT_SECS: u64 = 30;
 
 pub fn new_kademlia(local_peer_id: PeerId) -> Behaviour<MemoryStore> {
-    let mut store_config = kad::store::MemoryStoreConfig::default();
     // Allow block records up to 1 MiB (default 65 KiB is too small for site files).
-    store_config.max_value_bytes = MAX_RECORD_VALUE_BYTES;
+    let store_config = kad::store::MemoryStoreConfig {
+        max_value_bytes: MAX_RECORD_VALUE_BYTES,
+        ..kad::store::MemoryStoreConfig::default()
+    };
     let store = MemoryStore::with_config(local_peer_id, store_config);
     let mut config = kad::Config::default();
     config.set_record_ttl(Some(Duration::from_secs(48 * 60 * 60)));

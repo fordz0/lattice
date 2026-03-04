@@ -29,10 +29,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
@@ -44,7 +44,10 @@ const MAX_GET_SITE_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 const PUBLISH_OWNERSHIP_PROBES: u32 = 3;
 const PUBLISH_OWNERSHIP_PROBE_DELAY_SECS: u64 = 5;
 const RELAY_RESERVATION_RETRY_SECS: u64 = 60;
-const LOCAL_RECORDS_FILE: &str = "records.json";
+const GET_RECORD_MAX_ATTEMPTS: u8 = 3;
+const LOCAL_RECORDS_DB_DIR: &str = "records_db";
+const LOCAL_RECORD_GC_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60;
+const LOCAL_RECORD_GC_MAX_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(NetworkBehaviour)]
 struct LatticeBehaviour {
@@ -114,6 +117,14 @@ struct PreparedPublish {
 
 struct PendingTextQuery {
     key: String,
+    attempts: u8,
+    respond_to: oneshot::Sender<Option<String>>,
+}
+
+struct PendingBlockQuery {
+    key: String,
+    hash: String,
+    attempts: u8,
     respond_to: oneshot::Sender<Option<String>>,
 }
 
@@ -163,8 +174,21 @@ struct PendingPublishClaimPut {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedLocalRecords {
-    records: HashMap<String, String>,
+struct RecordMeta {
+    pinned: bool,
+    updated_at: u64,
+}
+
+#[derive(Debug, Default)]
+struct LocalRecordGcStats {
+    removed_records: usize,
+    removed_bytes: usize,
+}
+
+struct LocalRecordStore {
+    db: sled::Db,
+    records: sled::Tree,
+    meta: sled::Tree,
 }
 
 #[tokio::main]
@@ -186,8 +210,18 @@ async fn main() -> Result<()> {
     info!("site signing key loaded from site_signing.key");
     info!("your publisher key is: {}", local_pubkey_hex);
     let owned_names: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let local_records_path = config.data_dir.join(LOCAL_RECORDS_FILE);
-    let mut local_records = load_local_records(&local_records_path);
+    let local_records_path = config.data_dir.join(LOCAL_RECORDS_DB_DIR);
+    let local_record_store = LocalRecordStore::open(&local_records_path)?;
+    let gc_stats =
+        local_record_store.gc_unpinned(LOCAL_RECORD_GC_MAX_AGE_SECS, LOCAL_RECORD_GC_MAX_BYTES)?;
+    if gc_stats.removed_records > 0 {
+        info!(
+            removed_records = gc_stats.removed_records,
+            removed_bytes = gc_stats.removed_bytes,
+            "local record GC removed stale records"
+        );
+    }
+    let mut local_records = local_record_store.load_records()?;
 
     let peer_id = node_identity.peer_id;
 
@@ -349,8 +383,7 @@ async fn main() -> Result<()> {
 
     let mut pending_put: HashMap<kad::QueryId, PendingPut> = HashMap::new();
     let mut pending_get_text: HashMap<kad::QueryId, PendingTextQuery> = HashMap::new();
-    let mut pending_get_block: HashMap<kad::QueryId, oneshot::Sender<Option<String>>> =
-        HashMap::new();
+    let mut pending_get_block: HashMap<kad::QueryId, PendingBlockQuery> = HashMap::new();
     let mut pending_claim_put: HashMap<kad::QueryId, PendingClaimPut> = HashMap::new();
     let mut pending_name_probes: HashMap<kad::QueryId, PendingNameProbe> = HashMap::new();
     let mut pending_publish_checks: HashMap<kad::QueryId, PendingPublishOwnershipCheck> =
@@ -384,8 +417,8 @@ async fn main() -> Result<()> {
                         RpcCommand::PutRecord { key, value, respond_to } => {
                             let value_bytes = value.into_bytes();
                             remember_local_record(
+                                &local_record_store,
                                 &mut local_records,
-                                &local_records_path,
                                 key.clone(),
                                 value_bytes.clone(),
                             );
@@ -410,11 +443,19 @@ async fn main() -> Result<()> {
                             }
                         }
                         RpcCommand::GetRecord { key, respond_to } => {
+                            if let Some(value) = local_record_value(&mut swarm, &key)
+                                .and_then(|bytes| String::from_utf8(bytes).ok())
+                                .and_then(|value| normalize_get_record_value(&key, value))
+                            {
+                                let _ = respond_to.send(Some(value));
+                                continue;
+                            }
                             let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, key.clone());
                             pending_get_text.insert(
                                 query_id,
                                 PendingTextQuery {
                                     key,
+                                    attempts: 1,
                                     respond_to,
                                 },
                             );
@@ -457,18 +498,38 @@ async fn main() -> Result<()> {
                         }
                         RpcCommand::GetSiteManifest { name, respond_to } => {
                             let key = format!("site:{name}");
+                            if let Some(value) = local_record_value(&mut swarm, &key)
+                                .and_then(|bytes| String::from_utf8(bytes).ok())
+                            {
+                                let _ = respond_to.send(Some(value));
+                                continue;
+                            }
                             let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, key.clone());
                             pending_get_text.insert(
                                 query_id,
                                 PendingTextQuery {
                                     key,
+                                    attempts: 1,
                                     respond_to,
                                 },
                             );
                         }
                         RpcCommand::GetBlock { hash, respond_to } => {
-                            let query_id = dht::get_record_bytes(&mut swarm.behaviour_mut().kademlia, format!("block:{hash}"));
-                            pending_get_block.insert(query_id, respond_to);
+                            let key = format!("block:{hash}");
+                            if let Some(value) = local_record_value(&mut swarm, &key) {
+                                let _ = respond_to.send(Some(hex_encode(&value)));
+                                continue;
+                            }
+                            let query_id = dht::get_record_bytes(&mut swarm.behaviour_mut().kademlia, key.clone());
+                            pending_get_block.insert(
+                                query_id,
+                                PendingBlockQuery {
+                                    key,
+                                    hash,
+                                    attempts: 1,
+                                    respond_to,
+                                },
+                            );
                         }
                         RpcCommand::GetSite { name, respond_to } => {
                             if get_site_tasks.len() >= MAX_CONCURRENT_GET_SITE {
@@ -661,20 +722,21 @@ async fn main() -> Result<()> {
                     &rpc_tx,
                     &site_signing_key,
                     &local_pubkey_hex,
+                    &local_record_store,
                     &mut local_records,
-                    &local_records_path,
                 );
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_swarm_event(
     event: libp2p::swarm::SwarmEvent<LatticeBehaviourEvent>,
     swarm: &mut Swarm<LatticeBehaviour>,
     pending_put: &mut HashMap<kad::QueryId, PendingPut>,
     pending_get_text: &mut HashMap<kad::QueryId, PendingTextQuery>,
-    pending_get_block: &mut HashMap<kad::QueryId, oneshot::Sender<Option<String>>>,
+    pending_get_block: &mut HashMap<kad::QueryId, PendingBlockQuery>,
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
     pending_name_probes: &mut HashMap<kad::QueryId, PendingNameProbe>,
     pending_publish_checks: &mut HashMap<kad::QueryId, PendingPublishOwnershipCheck>,
@@ -693,8 +755,8 @@ fn handle_swarm_event(
     rpc_tx: &mpsc::Sender<RpcCommand>,
     site_signing_key: &SigningKey,
     local_pubkey_hex: &str,
+    local_record_store: &LocalRecordStore,
     local_records: &mut HashMap<String, Vec<u8>>,
-    local_records_path: &Path,
 ) {
     match event {
         libp2p::swarm::SwarmEvent::ConnectionEstablished {
@@ -702,7 +764,7 @@ fn handle_swarm_event(
         } => {
             info!(peer = %peer_id, address = ?endpoint.get_remote_address(), "new peer connected");
             if bootstrap_peer_ids.contains(&peer_id) {
-                let count = relay_connection_counts.entry(peer_id.clone()).or_insert(0);
+                let count = relay_connection_counts.entry(peer_id).or_insert(0);
                 *count = count.saturating_add(1);
 
                 if !relay_reservations.contains(&peer_id) {
@@ -715,13 +777,11 @@ fn handle_swarm_event(
                     };
 
                     if should_request {
-                        let relay_addr = build_relay_reservation_addr(
-                            endpoint.get_remote_address(),
-                            peer_id.clone(),
-                        );
+                        let relay_addr =
+                            build_relay_reservation_addr(endpoint.get_remote_address(), peer_id);
                         match swarm.listen_on(relay_addr.clone()) {
                             Ok(_) => {
-                                relay_reservation_requests.insert(peer_id.clone(), Instant::now());
+                                relay_reservation_requests.insert(peer_id, Instant::now());
                                 info!(relay = %peer_id, relay_addr = %relay_addr, "requested relay reservation");
                             }
                             Err(err) => {
@@ -776,8 +836,8 @@ fn handle_swarm_event(
                         Ok(ok) => {
                             info!(key = ?ok.key, "kademlia put_record succeeded");
                             remember_local_record(
+                                local_record_store,
                                 local_records,
-                                local_records_path,
                                 pending.key,
                                 pending.value,
                             );
@@ -968,7 +1028,7 @@ fn handle_swarm_event(
                 }
             }
             kad::QueryResult::GetRecord(result) => {
-                if let Some(pending) = pending_get_text.remove(&id) {
+                if let Some(mut pending) = pending_get_text.remove(&id) {
                     match result {
                         Ok(kad::GetRecordOk::FoundRecord(record)) => {
                             let value = String::from_utf8(record.record.value)
@@ -983,28 +1043,79 @@ fn handle_swarm_event(
                             let _ = pending.respond_to.send(value);
                         }
                         Ok(_) => {
-                            info!("kademlia get_record finished without record");
-                            let _ = pending.respond_to.send(None);
+                            if pending.attempts < GET_RECORD_MAX_ATTEMPTS {
+                                pending.attempts = pending.attempts.saturating_add(1);
+                                let query_id = dht::get_record(
+                                    &mut swarm.behaviour_mut().kademlia,
+                                    pending.key.clone(),
+                                );
+                                pending_get_text.insert(query_id, pending);
+                            } else {
+                                info!("kademlia get_record finished without record");
+                                let _ = pending.respond_to.send(None);
+                            }
                         }
                         Err(err) => {
-                            warn!(error = %err, "kademlia get_record failed");
-                            let _ = pending.respond_to.send(None);
+                            if pending.attempts < GET_RECORD_MAX_ATTEMPTS {
+                                warn!(
+                                    error = %err,
+                                    key = %pending.key,
+                                    attempt = pending.attempts,
+                                    "kademlia get_record failed; retrying"
+                                );
+                                pending.attempts = pending.attempts.saturating_add(1);
+                                let query_id = dht::get_record(
+                                    &mut swarm.behaviour_mut().kademlia,
+                                    pending.key.clone(),
+                                );
+                                pending_get_text.insert(query_id, pending);
+                            } else {
+                                warn!(error = %err, "kademlia get_record failed");
+                                let _ = pending.respond_to.send(None);
+                            }
                         }
                     }
-                } else if let Some(ch) = pending_get_block.remove(&id) {
+                } else if let Some(mut pending) = pending_get_block.remove(&id) {
                     match result {
                         Ok(kad::GetRecordOk::FoundRecord(record)) => {
                             let value = hex_encode(&record.record.value);
                             info!(key = ?record.record.key, bytes = record.record.value.len(), "kademlia get_block result");
-                            let _ = ch.send(Some(value));
+                            let _ = pending.respond_to.send(Some(value));
                         }
                         Ok(_) => {
-                            info!("kademlia get_block finished without record");
-                            let _ = ch.send(None);
+                            if pending.attempts < GET_RECORD_MAX_ATTEMPTS {
+                                pending.attempts = pending.attempts.saturating_add(1);
+                                let query_id = dht::get_record_bytes(
+                                    &mut swarm.behaviour_mut().kademlia,
+                                    pending.key.clone(),
+                                );
+                                pending_get_block.insert(query_id, pending);
+                            } else {
+                                info!(
+                                    hash = %pending.hash,
+                                    "kademlia get_block finished without record"
+                                );
+                                let _ = pending.respond_to.send(None);
+                            }
                         }
                         Err(err) => {
-                            warn!(error = %err, "kademlia get_block failed");
-                            let _ = ch.send(None);
+                            if pending.attempts < GET_RECORD_MAX_ATTEMPTS {
+                                warn!(
+                                    error = %err,
+                                    hash = %pending.hash,
+                                    attempt = pending.attempts,
+                                    "kademlia get_block failed; retrying"
+                                );
+                                pending.attempts = pending.attempts.saturating_add(1);
+                                let query_id = dht::get_record_bytes(
+                                    &mut swarm.behaviour_mut().kademlia,
+                                    pending.key.clone(),
+                                );
+                                pending_get_block.insert(query_id, pending);
+                            } else {
+                                warn!(error = %err, hash = %pending.hash, "kademlia get_block failed");
+                                let _ = pending.respond_to.send(None);
+                            }
                         }
                     }
                 } else if let Some(pending) = pending_publish_checks.remove(&id) {
@@ -1030,8 +1141,8 @@ fn handle_swarm_event(
                             if let Ok(payload) = serde_json::to_vec(&refreshed) {
                                 let key = format!("name:{}", pending.name);
                                 remember_local_record(
+                                    local_record_store,
                                     local_records,
-                                    local_records_path,
                                     key.clone(),
                                     payload.clone(),
                                 );
@@ -1099,8 +1210,8 @@ fn handle_swarm_event(
                                 let key = format!("name:{}", pending.name);
                                 let payload_bytes = payload.into_bytes();
                                 remember_local_record(
+                                    local_record_store,
                                     local_records,
-                                    local_records_path,
                                     key.clone(),
                                     payload_bytes.clone(),
                                 );
@@ -1159,8 +1270,8 @@ fn handle_swarm_event(
                                                 publish_tasks,
                                                 publish_query_to_task,
                                                 next_publish_task_id,
+                                                local_record_store,
                                                 local_records,
-                                                local_records_path,
                                             );
                                         }
                                     } else {
@@ -1172,8 +1283,8 @@ fn handle_swarm_event(
                                             publish_tasks,
                                             publish_query_to_task,
                                             next_publish_task_id,
+                                            local_record_store,
                                             local_records,
-                                            local_records_path,
                                         );
                                     }
                                 }
@@ -1237,8 +1348,8 @@ fn handle_swarm_event(
                             swarm,
                             pending_claim_put,
                             site_signing_key,
+                            local_record_store,
                             local_records,
-                            local_records_path,
                         );
                     } else {
                         let rpc_tx_for_retry = rpc_tx.clone();
@@ -1292,53 +1403,50 @@ fn handle_swarm_event(
         }
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::RelayClient(event)) => {
             info!(event = ?event, "relay client event");
-            match event {
-                relay::client::Event::ReservationReqAccepted { relay_peer_id, .. } => {
-                    relay_reservations.insert(relay_peer_id);
-                    relay_reservation_requests.remove(&relay_peer_id);
-                    info!(
-                        relay = %relay_peer_id,
-                        "relay reservation accepted — node reachable via relay"
-                    );
+            if let relay::client::Event::ReservationReqAccepted { relay_peer_id, .. } = event {
+                relay_reservations.insert(relay_peer_id);
+                relay_reservation_requests.remove(&relay_peer_id);
+                info!(
+                    relay = %relay_peer_id,
+                    "relay reservation accepted — node reachable via relay"
+                );
 
-                    let names = {
-                        let guard = match owned_names.lock() {
-                            Ok(guard) => guard,
-                            Err(poisoned) => {
-                                error!("owned_names mutex poisoned — recovering");
-                                poisoned.into_inner()
-                            }
-                        };
-                        guard.iter().cloned().collect::<Vec<_>>()
+                let names = {
+                    let guard = match owned_names.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => {
+                            error!("owned_names mutex poisoned — recovering");
+                            poisoned.into_inner()
+                        }
                     };
+                    guard.iter().cloned().collect::<Vec<_>>()
+                };
 
-                    if !names.is_empty() {
-                        let rpc_tx_for_refresh = rpc_tx.clone();
-                        tokio::spawn(async move {
-                            for name in names {
-                                let (tx, _rx) = oneshot::channel();
-                                let _ = rpc_tx_for_refresh
-                                    .send(RpcCommand::ClaimName {
-                                        name,
-                                        pubkey_hex: String::new(),
-                                        respond_to: tx,
-                                    })
-                                    .await;
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            }
-                        });
-                    }
-
-                    // Re-push all locally stored records now that we have a relay address.
-                    // This ensures blocks and manifests published before the relay was ready
-                    // get replicated to the DHT and are reachable by other peers.
-                    info!(relay = %relay_peer_id, "relay reservation accepted — scheduling DHT record re-push");
-                    let rpc_tx_relay = rpc_tx.clone();
+                if !names.is_empty() {
+                    let rpc_tx_for_refresh = rpc_tx.clone();
                     tokio::spawn(async move {
-                        let _ = rpc_tx_relay.send(RpcCommand::RepublishLocalRecords).await;
+                        for name in names {
+                            let (tx, _rx) = oneshot::channel();
+                            let _ = rpc_tx_for_refresh
+                                .send(RpcCommand::ClaimName {
+                                    name,
+                                    pubkey_hex: String::new(),
+                                    respond_to: tx,
+                                })
+                                .await;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
                     });
                 }
-                _ => {}
+
+                // Re-push all locally stored records now that we have a relay address.
+                // This ensures blocks and manifests published before the relay was ready
+                // get replicated to the DHT and are reachable by other peers.
+                info!(relay = %relay_peer_id, "relay reservation accepted — scheduling DHT record re-push");
+                let rpc_tx_relay = rpc_tx.clone();
+                tokio::spawn(async move {
+                    let _ = rpc_tx_relay.send(RpcCommand::RepublishLocalRecords).await;
+                });
             }
         }
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Dcutr(event)) => {
@@ -1352,14 +1460,14 @@ fn handle_swarm_event(
         }
         libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             if let Some(peer_id) = peer_id {
-                if bootstrap_peer_ids.contains(&peer_id) {
-                    if relay_reservation_requests.remove(&peer_id).is_some() {
-                        warn!(
-                            relay = %peer_id,
-                            error = %error,
-                            "relay reservation failed"
-                        );
-                    }
+                if bootstrap_peer_ids.contains(&peer_id)
+                    && relay_reservation_requests.remove(&peer_id).is_some()
+                {
+                    warn!(
+                        relay = %peer_id,
+                        error = %error,
+                        "relay reservation failed"
+                    );
                 }
             }
             warn!(peer = ?peer_id, error = %error, "outgoing connection error");
@@ -1435,6 +1543,7 @@ fn current_dht_site_version(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_publish_task(
     swarm: &mut Swarm<LatticeBehaviour>,
     prepared: PreparedPublish,
@@ -1443,15 +1552,15 @@ fn start_publish_task(
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, PublishQuery>,
     next_publish_task_id: &mut u64,
+    local_record_store: &LocalRecordStore,
     local_records: &mut HashMap<String, Vec<u8>>,
-    local_records_path: &Path,
 ) {
     let task_id = *next_publish_task_id;
     *next_publish_task_id = (*next_publish_task_id).saturating_add(1);
 
     remember_local_record(
+        local_record_store,
         local_records,
-        local_records_path,
         prepared.manifest_record.0.clone(),
         prepared.manifest_record.1.clone(),
     );
@@ -1476,8 +1585,8 @@ fn start_publish_task(
 
     for (key, value) in prepared.block_records {
         remember_local_record(
+            local_record_store,
             local_records,
-            local_records_path,
             key.clone(),
             value.clone(),
         );
@@ -1679,8 +1788,8 @@ fn handle_claim_name_lookup_result(
     swarm: &mut Swarm<LatticeBehaviour>,
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
     site_signing_key: &SigningKey,
+    local_record_store: &LocalRecordStore,
     local_records: &mut HashMap<String, Vec<u8>>,
-    local_records_path: &Path,
 ) {
     let PendingClaimGet {
         name,
@@ -1728,8 +1837,8 @@ fn handle_claim_name_lookup_result(
     let key = format!("name:{name}");
     let payload_bytes = payload.into_bytes();
     remember_local_record(
+        local_record_store,
         local_records,
-        local_records_path,
         key.clone(),
         payload_bytes.clone(),
     );
@@ -2139,7 +2248,7 @@ fn resolve_block_bytes(stored: &[u8], expected_hash: &str) -> Vec<u8> {
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         bail!("hex input length must be even");
     }
 
@@ -2278,83 +2387,144 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn load_local_records(path: &Path) -> HashMap<String, Vec<u8>> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(_) => return HashMap::new(),
-    };
+impl LocalRecordStore {
+    fn open(path: &Path) -> Result<Self> {
+        fs::create_dir_all(path)
+            .with_context(|| format!("failed to create local records db dir {}", path.display()))?;
+        let db = sled::open(path)
+            .with_context(|| format!("failed to open local records db at {}", path.display()))?;
+        let records = db
+            .open_tree("records")
+            .context("failed to open records tree")?;
+        let meta = db.open_tree("meta").context("failed to open meta tree")?;
+        Ok(Self { db, records, meta })
+    }
 
-    let persisted: PersistedLocalRecords = match serde_json::from_str(&contents) {
-        Ok(persisted) => persisted,
-        Err(err) => {
-            warn!(
-                path = %path.display(),
-                error = %err,
-                "failed to parse local records file"
-            );
-            return HashMap::new();
+    fn load_records(&self) -> Result<HashMap<String, Vec<u8>>> {
+        let mut out = HashMap::new();
+        for item in self.records.iter() {
+            let (key, value) = item.context("failed to iterate local records")?;
+            let key = match std::str::from_utf8(&key) {
+                Ok(key) => key.to_string(),
+                Err(_) => {
+                    warn!("local records db contained non-utf8 key; skipping");
+                    continue;
+                }
+            };
+            out.insert(key, value.to_vec());
         }
-    };
+        Ok(out)
+    }
 
-    let mut out = HashMap::with_capacity(persisted.records.len());
-    for (key, value_b64) in persisted.records {
-        match BASE64_STANDARD.decode(value_b64.as_bytes()) {
-            Ok(value) => {
-                out.insert(key, value);
-            }
-            Err(err) => {
-                warn!(
-                    key = %key,
-                    error = %err,
-                    "failed to decode persisted local record value"
-                );
+    fn put_record(&self, key: &str, value: &[u8], pinned: bool) -> Result<()> {
+        self.records
+            .insert(key.as_bytes(), value)
+            .context("failed to persist local record value")?;
+
+        let existing_pinned = self
+            .meta
+            .get(key.as_bytes())
+            .context("failed to read local record metadata")?
+            .and_then(|raw| serde_json::from_slice::<RecordMeta>(&raw).ok())
+            .map(|meta| meta.pinned)
+            .unwrap_or(false);
+
+        let meta = RecordMeta {
+            pinned: pinned || existing_pinned,
+            updated_at: unix_ts(),
+        };
+        let meta_bytes = serde_json::to_vec(&meta).context("failed to encode local record meta")?;
+        self.meta
+            .insert(key.as_bytes(), meta_bytes)
+            .context("failed to persist local record metadata")?;
+        self.db
+            .flush()
+            .context("failed to flush local records db")?;
+        Ok(())
+    }
+
+    fn gc_unpinned(&self, max_age_secs: u64, max_total_bytes: usize) -> Result<LocalRecordGcStats> {
+        let now = unix_ts();
+        let mut stats = LocalRecordGcStats::default();
+
+        let mut candidates: Vec<(String, usize, u64)> = Vec::new();
+        let mut total_bytes: usize = 0;
+
+        for item in self.records.iter() {
+            let (key, value) = item.context("failed to iterate local records for gc")?;
+            let key_str = match std::str::from_utf8(&key) {
+                Ok(key) => key.to_string(),
+                Err(_) => continue,
+            };
+            let size = value.len();
+            total_bytes = total_bytes.saturating_add(size);
+
+            let meta = self
+                .meta
+                .get(&key)
+                .context("failed to read metadata for gc")?
+                .and_then(|raw| serde_json::from_slice::<RecordMeta>(&raw).ok())
+                .unwrap_or(RecordMeta {
+                    pinned: key_should_be_pinned(&key_str),
+                    updated_at: 0,
+                });
+            if !meta.pinned {
+                candidates.push((key_str, size, meta.updated_at));
             }
         }
+
+        let mut to_remove: Vec<(String, usize)> = Vec::new();
+        for (key, size, updated_at) in &candidates {
+            if now.saturating_sub(*updated_at) > max_age_secs {
+                to_remove.push((key.clone(), *size));
+            }
+        }
+
+        for (key, size) in &to_remove {
+            self.records
+                .remove(key.as_bytes())
+                .context("failed to remove stale local record")?;
+            self.meta
+                .remove(key.as_bytes())
+                .context("failed to remove stale local record meta")?;
+            stats.removed_records = stats.removed_records.saturating_add(1);
+            stats.removed_bytes = stats.removed_bytes.saturating_add(*size);
+            total_bytes = total_bytes.saturating_sub(*size);
+        }
+
+        if total_bytes > max_total_bytes {
+            let mut remaining = candidates
+                .into_iter()
+                .filter(|(key, _, _)| !to_remove.iter().any(|(removed, _)| removed == key))
+                .collect::<Vec<_>>();
+            remaining.sort_by_key(|(_, _, updated_at)| *updated_at);
+
+            for (key, size, _) in remaining {
+                if total_bytes <= max_total_bytes {
+                    break;
+                }
+                self.records
+                    .remove(key.as_bytes())
+                    .context("failed to remove oversized local record")?;
+                self.meta
+                    .remove(key.as_bytes())
+                    .context("failed to remove oversized local record meta")?;
+                stats.removed_records = stats.removed_records.saturating_add(1);
+                stats.removed_bytes = stats.removed_bytes.saturating_add(size);
+                total_bytes = total_bytes.saturating_sub(size);
+            }
+        }
+
+        if stats.removed_records > 0 {
+            self.db.flush().context("failed to flush gc changes")?;
+        }
+        Ok(stats)
     }
-    out
-}
-
-fn save_local_records(path: &Path, local_records: &HashMap<String, Vec<u8>>) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create local records parent directory {}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let mut encoded = HashMap::with_capacity(local_records.len());
-    for (key, value) in local_records {
-        encoded.insert(key.clone(), BASE64_STANDARD.encode(value));
-    }
-    let payload = PersistedLocalRecords { records: encoded };
-    let json = serde_json::to_vec_pretty(&payload).context("failed to encode local records")?;
-
-    let mut tmp_path = PathBuf::from(path);
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| format!("{ext}.tmp"))
-        .unwrap_or_else(|| "tmp".to_string());
-    tmp_path.set_extension(ext);
-
-    fs::write(&tmp_path, &json)
-        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path).with_context(|| {
-        format!(
-            "failed to replace local records file {} with {}",
-            path.display(),
-            tmp_path.display()
-        )
-    })?;
-
-    Ok(())
 }
 
 fn remember_local_record(
+    local_record_store: &LocalRecordStore,
     local_records: &mut HashMap<String, Vec<u8>>,
-    local_records_path: &Path,
     key: String,
     value: Vec<u8>,
 ) {
@@ -2366,15 +2536,33 @@ fn remember_local_record(
         return;
     }
 
-    local_records.insert(key.clone(), value);
-    if let Err(err) = save_local_records(local_records_path, local_records) {
-        warn!(
-            key = %key,
-            path = %local_records_path.display(),
-            error = %err,
-            "failed to persist local records"
-        );
+    let pinned = key_should_be_pinned(&key);
+    local_records.insert(key.clone(), value.clone());
+    if let Err(err) = local_record_store.put_record(&key, &value, pinned) {
+        warn!(key = %key, error = %err, "failed to persist local record");
     }
+}
+
+fn key_should_be_pinned(key: &str) -> bool {
+    key.starts_with("name:") || key.starts_with("site:") || key.starts_with("block:")
+}
+
+fn unix_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|dur| dur.as_secs())
+        .unwrap_or(0)
+}
+
+fn local_record_value(swarm: &mut Swarm<LatticeBehaviour>, key: &str) -> Option<Vec<u8>> {
+    let target = kad::RecordKey::new(&key.as_bytes());
+    for record in swarm.behaviour_mut().kademlia.store_mut().records() {
+        let record = record.as_ref();
+        if record.key == target {
+            return Some(record.value.clone());
+        }
+    }
+    None
 }
 
 fn restore_local_records_to_store(

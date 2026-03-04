@@ -1,0 +1,41 @@
+name: Localnet Stress
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  localnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release -p lattice-daemon -p lattice-cli -p lattice-site
+
+      - name: Run localnet stress (range + restart)
+        env:
+          LATTICE_STRESS_NODES: "4"
+          LATTICE_STRESS_ROUNDS: "1"
+          LATTICE_STRESS_ASSET_FILES: "12"
+          LATTICE_STRESS_ASSET_BYTES: "4096"
+          LATTICE_STRESS_VIDEO_BYTES: "524288"
+          LATTICE_STRESS_RANGE_CHECK: "1"
+          LATTICE_STRESS_RESTART_CHECK: "1"
+          RUST_LOG: "warn"
+        run: ./scripts/localnet_stress.sh run

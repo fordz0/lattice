@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use tower_http::cors::{Any, CorsLayer};
@@ -18,9 +19,19 @@ use crate::rpc::RpcCommand;
 
 const RPC_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+
+static HTTP_REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_RANGE_REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_RANGE_416_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_BLOCK_FETCH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_BLOCK_FETCH_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_OWNER_MISMATCH_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub async fn start_http_server(port: u16, rpc_tx: mpsc::Sender<RpcCommand>) -> Result<()> {
     let app = Router::new()
+        .route("/__lattice_metrics", get(metrics_endpoint))
         .route("/", get(serve_site))
         .route("/*path", get(serve_site))
         .with_state(rpc_tx)
@@ -44,31 +55,44 @@ async fn serve_site(
     headers: HeaderMap,
     State(rpc_tx): State<mpsc::Sender<RpcCommand>>,
 ) -> impl IntoResponse {
+    HTTP_REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if headers.contains_key(header::RANGE) {
+        HTTP_RANGE_REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let fail = |response: Response| -> Response {
+        record_http_error(response.status());
+        response
+    };
+
     let site_name = match extract_site_name(&host, &uri) {
         Some(name) => name,
         None => {
-            return plain(
+            return fail(plain(
                 StatusCode::NOT_FOUND,
                 "site not found on Lattice (expected *.lat host)",
-            );
+            ));
         }
     };
 
-    let request_path = normalize_path(uri.path());
+    let request_path = match normalize_path(uri.path()) {
+        Some(path) => path,
+        None => return fail(plain(StatusCode::BAD_REQUEST, "invalid path")),
+    };
 
     let manifest = match fetch_manifest(&rpc_tx, &site_name).await {
         Ok(manifest) => manifest,
-        Err(response) => return response,
+        Err(response) => return fail(response),
     };
 
     let file = match manifest.files.iter().find(|f| f.path == request_path) {
         Some(file) => file,
-        None => return plain(StatusCode::NOT_FOUND, "site not found on Lattice"),
+        None => return fail(plain(StatusCode::NOT_FOUND, "site not found on Lattice")),
     };
 
     let requested_range = match parse_requested_range(&headers, file.size) {
         Ok(range) => range,
-        Err(response) => return response,
+        Err(response) => return fail(response),
     };
 
     let full_range = if file.size == 0 {
@@ -83,7 +107,7 @@ async fn serve_site(
 
     let bytes = match fetch_file_range(&rpc_tx, file, effective_range).await {
         Ok(bytes) => bytes,
-        Err(response) => return response,
+        Err(response) => return fail(response),
     };
 
     let mime_type = infer_mime_type(&file.path);
@@ -119,6 +143,9 @@ async fn fetch_manifest(
         Ok(Ok(None)) => return Err(plain(StatusCode::NOT_FOUND, "site not found on Lattice")),
         Ok(Err(_)) => return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error")),
     };
+    if manifest_json.len() > MAX_MANIFEST_BYTES {
+        return Err(plain(StatusCode::BAD_GATEWAY, "site manifest too large"));
+    }
 
     let manifest: SiteManifest = match serde_json::from_str(&manifest_json) {
         Ok(manifest) => manifest,
@@ -134,7 +161,60 @@ async fn fetch_manifest(
         return Err(plain(StatusCode::BAD_GATEWAY, "manifest signature invalid"));
     }
 
+    for file in &manifest.files {
+        if !is_safe_manifest_path(&file.path) {
+            return Err(plain(
+                StatusCode::BAD_GATEWAY,
+                "invalid path in site manifest",
+            ));
+        }
+    }
+
+    let owner_key = match fetch_name_owner(rpc_tx, site_name).await? {
+        Some(owner_key) => owner_key,
+        None => return Err(plain(StatusCode::NOT_FOUND, "name owner record missing")),
+    };
+    if owner_key != manifest.publisher_key {
+        HTTP_OWNER_MISMATCH_TOTAL.fetch_add(1, Ordering::Relaxed);
+        warn!(
+            name = %site_name,
+            owner_key = %owner_key,
+            publisher_key = %manifest.publisher_key,
+            "manifest publisher does not match name owner"
+        );
+        return Err(plain(
+            StatusCode::BAD_GATEWAY,
+            "manifest publisher does not match name owner",
+        ));
+    }
+
     Ok(manifest)
+}
+
+async fn fetch_name_owner(
+    rpc_tx: &mpsc::Sender<RpcCommand>,
+    site_name: &str,
+) -> std::result::Result<Option<String>, Response> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let send_result = timeout(
+        RPC_SEND_TIMEOUT,
+        rpc_tx.send(RpcCommand::GetRecord {
+            key: format!("name:{site_name}"),
+            respond_to: resp_tx,
+        }),
+    )
+    .await;
+    match send_result {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error")),
+        Err(_) => return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout")),
+    }
+
+    match timeout(RPC_RESPONSE_TIMEOUT, resp_rx).await {
+        Err(_) => Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout")),
+        Ok(Ok(owner)) => Ok(owner),
+        Ok(Err(_)) => Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error")),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -143,6 +223,7 @@ struct ByteRange {
     end: u64,
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_requested_range(
     headers: &HeaderMap,
     file_size: u64,
@@ -306,6 +387,7 @@ async fn fetch_block_bytes(
     rpc_tx: &mpsc::Sender<RpcCommand>,
     block_hash: &str,
 ) -> std::result::Result<Vec<u8>, Response> {
+    HTTP_BLOCK_FETCH_TOTAL.fetch_add(1, Ordering::Relaxed);
     let (resp_tx, resp_rx) = oneshot::channel();
     let send_result = timeout(
         RPC_SEND_TIMEOUT,
@@ -318,25 +400,41 @@ async fn fetch_block_bytes(
 
     match send_result {
         Ok(Ok(())) => {}
-        Ok(Err(_)) => return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error")),
-        Err(_) => return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout")),
+        Ok(Err(_)) => {
+            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error"));
+        }
+        Err(_) => {
+            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"));
+        }
     }
 
     let encoded = match timeout(RPC_RESPONSE_TIMEOUT, resp_rx).await {
-        Err(_) => return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout")),
+        Err(_) => {
+            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"));
+        }
         Ok(Ok(Some(encoded))) => encoded,
         Ok(Ok(None)) => {
+            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
             return Err(plain_owned(
                 StatusCode::NOT_FOUND,
                 format!("block missing: {block_hash}"),
-            ))
+            ));
         }
-        Ok(Err(_)) => return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error")),
+        Ok(Err(_)) => {
+            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error"));
+        }
     };
 
     let stored_bytes = match hex::decode(encoded.trim()) {
         Ok(bytes) => bytes,
-        Err(_) => return Err(plain(StatusCode::BAD_GATEWAY, "invalid block encoding")),
+        Err(_) => {
+            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            return Err(plain(StatusCode::BAD_GATEWAY, "invalid block encoding"));
+        }
     };
 
     Ok(resolve_block_bytes(&stored_bytes, block_hash))
@@ -364,21 +462,32 @@ fn resolve_block_bytes(stored: &[u8], expected_hash: &str) -> Vec<u8> {
     stored.to_vec()
 }
 
-fn normalize_path(path: &str) -> String {
+fn normalize_path(path: &str) -> Option<String> {
     if path.is_empty() || path == "/" {
-        return "index.html".to_string();
+        return Some("index.html".to_string());
     }
 
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
-        return "index.html".to_string();
+        return Some("index.html".to_string());
     }
 
-    if trimmed.ends_with('/') {
+    let normalized = if trimmed.ends_with('/') {
         format!("{trimmed}index.html")
     } else {
         trimmed.to_string()
+    };
+
+    let normalized_path = std::path::Path::new(&normalized);
+    if normalized_path.is_absolute() {
+        return None;
     }
+    for component in normalized_path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return None;
+        }
+    }
+    Some(normalized)
 }
 
 fn extract_site_name(host: &str, uri: &axum::http::Uri) -> Option<String> {
@@ -475,6 +584,77 @@ fn range_not_satisfiable(total_size: u64) -> Response {
         "invalid byte range".to_string(),
     )
         .into_response()
+}
+
+async fn metrics_endpoint() -> Response {
+    let body = format!(
+        concat!(
+            "# HELP lattice_http_requests_total Total HTTP requests.\n",
+            "# TYPE lattice_http_requests_total counter\n",
+            "lattice_http_requests_total {}\n",
+            "# HELP lattice_http_errors_total Total HTTP errors.\n",
+            "# TYPE lattice_http_errors_total counter\n",
+            "lattice_http_errors_total {}\n",
+            "# HELP lattice_http_range_requests_total Total requests with Range header.\n",
+            "# TYPE lattice_http_range_requests_total counter\n",
+            "lattice_http_range_requests_total {}\n",
+            "# HELP lattice_http_range_416_total Total unsatisfiable range responses.\n",
+            "# TYPE lattice_http_range_416_total counter\n",
+            "lattice_http_range_416_total {}\n",
+            "# HELP lattice_http_block_fetch_total Total block fetches.\n",
+            "# TYPE lattice_http_block_fetch_total counter\n",
+            "lattice_http_block_fetch_total {}\n",
+            "# HELP lattice_http_block_fetch_errors_total Total block fetch failures.\n",
+            "# TYPE lattice_http_block_fetch_errors_total counter\n",
+            "lattice_http_block_fetch_errors_total {}\n",
+            "# HELP lattice_http_owner_mismatch_total Manifest/name-owner mismatches.\n",
+            "# TYPE lattice_http_owner_mismatch_total counter\n",
+            "lattice_http_owner_mismatch_total {}\n"
+        ),
+        HTTP_REQUESTS_TOTAL.load(Ordering::Relaxed),
+        HTTP_ERRORS_TOTAL.load(Ordering::Relaxed),
+        HTTP_RANGE_REQUESTS_TOTAL.load(Ordering::Relaxed),
+        HTTP_RANGE_416_TOTAL.load(Ordering::Relaxed),
+        HTTP_BLOCK_FETCH_TOTAL.load(Ordering::Relaxed),
+        HTTP_BLOCK_FETCH_ERRORS_TOTAL.load(Ordering::Relaxed),
+        HTTP_OWNER_MISMATCH_TOTAL.load(Ordering::Relaxed),
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    (StatusCode::OK, headers, body).into_response()
+}
+
+fn record_http_error(status: StatusCode) {
+    if status.is_client_error() || status.is_server_error() {
+        HTTP_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if status == StatusCode::RANGE_NOT_SATISFIABLE {
+        HTTP_RANGE_416_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn is_safe_manifest_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let path = std::path::Path::new(path);
+    if path.is_absolute() {
+        return false;
+    }
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return false;
+        }
+    }
+    true
 }
 
 fn plain(status: StatusCode, msg: &'static str) -> Response {
