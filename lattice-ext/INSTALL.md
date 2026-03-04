@@ -27,5 +27,5 @@ Or do it manually:
 ## Usage
 
 Type any .lat address in the Firefox address bar:
-  benjf.lat
-  http://benjf.lat
+  lattice.lat
+  http://lattice.lat
