@@ -851,6 +851,15 @@ fn handle_swarm_event(
                             let _ = task.respond_to.send(Err(err.to_string()));
                         }
                     }
+                } else {
+                    // Untracked put_record (e.g. from RepublishLocalRecords).
+                    match result {
+                        Ok(ok) => info!(key = ?ok.key, "republish put_record succeeded"),
+                        Err(kad::PutRecordError::QuorumFailed { key, .. }) => {
+                            warn!(key = ?key, "republish put_record quorum failed");
+                        }
+                        Err(err) => warn!(error = %err, "republish put_record failed"),
+                    }
                 }
             }
             kad::QueryResult::GetRecord(result) => {

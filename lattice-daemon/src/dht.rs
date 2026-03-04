@@ -25,6 +25,9 @@ pub fn add_bootstrap_peers(kad: &mut Behaviour<MemoryStore>, peers: &[String]) {
             }
         }
     }
+    // Trigger a bootstrap query so the routing table is populated
+    // (FIND_NODE exchange with bootstrap peers) before the first publish.
+    let _ = kad.bootstrap();
 }
 
 pub fn put_record_bytes(
