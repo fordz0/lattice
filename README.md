@@ -97,7 +97,7 @@ See [BOOTSTRAP.md](BOOTSTRAP.md).
 - [x] Internet connectivity via bootstrap peers
 - [x] CLI — status, peers, put, get, name claim/info, init, publish, fetch
 - [x] Site publishing with Ed25519 manifest signing
-- [ ] Firefox extension
+- [x] Firefox extension
 - [ ] Loom chat protocol
 - [ ] NAT traversal
 - [ ] Heartbeat / proof-of-use name expiry
