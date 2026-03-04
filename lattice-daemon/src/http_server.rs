@@ -89,7 +89,7 @@ async fn serve_site(
         Err(response) => return fail(response),
     };
 
-    let file = match manifest.files.iter().find(|f| f.path == request_path) {
+    let file = match find_manifest_file(&manifest.files, &request_path) {
         Some(file) => file,
         None => return fail(plain(StatusCode::NOT_FOUND, "site not found on Lattice")),
     };
@@ -560,6 +560,10 @@ fn normalize_path(path: &str) -> Option<String> {
         return Some("index.html".to_string());
     }
 
+    if path.contains('\0') || path.contains('\\') {
+        return None;
+    }
+
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
         return Some("index.html".to_string());
@@ -587,6 +591,36 @@ fn normalize_path(path: &str) -> Option<String> {
         }
     }
     Some(normalized)
+}
+
+fn find_manifest_file<'a>(files: &'a [FileEntry], request_path: &str) -> Option<&'a FileEntry> {
+    if let Some(file) = files.iter().find(|f| f.path == request_path) {
+        return Some(file);
+    }
+
+    for candidate in manifest_path_fallbacks(request_path) {
+        if let Some(file) = files.iter().find(|f| f.path == candidate) {
+            return Some(file);
+        }
+    }
+
+    None
+}
+
+fn manifest_path_fallbacks(request_path: &str) -> Vec<String> {
+    if request_path == "index.html" {
+        return Vec::new();
+    }
+
+    let path = std::path::Path::new(request_path);
+    if path.extension().is_some() {
+        return Vec::new();
+    }
+
+    vec![
+        format!("{request_path}/index.html"),
+        format!("{request_path}.html"),
+    ]
 }
 
 fn extract_site_name(host: &str, uri: &axum::http::Uri) -> Option<String> {
@@ -745,6 +779,9 @@ fn is_safe_manifest_path(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
+    if path.contains('\0') || path.contains('\\') {
+        return false;
+    }
     let path = std::path::Path::new(path);
     if path.is_absolute() {
         return false;
@@ -778,4 +815,59 @@ fn plain_owned(status: StatusCode, msg: String) -> Response {
         HeaderValue::from_static("*"),
     );
     (status, headers, msg).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            hash: String::new(),
+            size: 0,
+            chunks: Vec::new(),
+            chunk_size: None,
+        }
+    }
+
+    #[test]
+    fn matches_exact_manifest_path_first() {
+        let files = vec![file("projects"), file("projects/index.html")];
+        let matched = find_manifest_file(&files, "projects").expect("match");
+        assert_eq!(matched.path, "projects");
+    }
+
+    #[test]
+    fn falls_back_to_directory_index_html() {
+        let files = vec![file("index.html"), file("projects/index.html")];
+        let matched = find_manifest_file(&files, "projects").expect("match");
+        assert_eq!(matched.path, "projects/index.html");
+    }
+
+    #[test]
+    fn falls_back_to_flat_html_file() {
+        let files = vec![file("index.html"), file("projects.html")];
+        let matched = find_manifest_file(&files, "projects").expect("match");
+        assert_eq!(matched.path, "projects.html");
+    }
+
+    #[test]
+    fn does_not_apply_html_fallback_for_extension_paths() {
+        let files = vec![file("assets/app.js"), file("assets/app.js/index.html")];
+        let matched = find_manifest_file(&files, "assets/app.js").expect("match");
+        assert_eq!(matched.path, "assets/app.js");
+    }
+
+    #[test]
+    fn normalize_path_rejects_backslashes_and_nul() {
+        assert!(normalize_path("/a\\b").is_none());
+        assert!(normalize_path("/a\0b").is_none());
+    }
+
+    #[test]
+    fn safe_manifest_path_rejects_backslashes_and_nul() {
+        assert!(!is_safe_manifest_path("a\\b"));
+        assert!(!is_safe_manifest_path("a\0b"));
+    }
 }

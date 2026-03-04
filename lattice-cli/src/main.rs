@@ -513,13 +513,26 @@ fn lattice_data_dir() -> Result<PathBuf> {
 }
 
 fn safe_join(base: &Path, untrusted: &str) -> Result<PathBuf> {
+    if untrusted.contains('\0') {
+        bail!("unsafe path in manifest: {}", untrusted);
+    }
+    if untrusted.contains('\\') {
+        bail!("unsafe path separator in manifest: {}", untrusted);
+    }
+
     let path = Path::new(untrusted);
     if path.is_absolute() {
         bail!("unsafe path in manifest: {}", untrusted);
     }
 
     for component in path.components() {
-        if matches!(component, std::path::Component::ParentDir) {
+        if matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::CurDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ) {
             bail!("path traversal in manifest: {}", untrusted);
         }
     }
@@ -566,4 +579,34 @@ fn file_block_hashes(file: &FileEntry) -> Vec<String> {
         return file.chunks.clone();
     }
     vec![file.hash.clone()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_join_rejects_parent_dir() {
+        let base = Path::new("/tmp/out");
+        assert!(safe_join(base, "../secret").is_err());
+    }
+
+    #[test]
+    fn safe_join_rejects_curdir_segments() {
+        let base = Path::new("/tmp/out");
+        assert!(safe_join(base, "./index.html").is_err());
+    }
+
+    #[test]
+    fn safe_join_rejects_backslashes() {
+        let base = Path::new("/tmp/out");
+        assert!(safe_join(base, "a\\b.txt").is_err());
+    }
+
+    #[test]
+    fn safe_join_accepts_normal_relative_path() {
+        let base = Path::new("/tmp/out");
+        let joined = safe_join(base, "assets/app.js").expect("join path");
+        assert_eq!(joined, base.join("assets/app.js"));
+    }
 }
