@@ -60,7 +60,8 @@ pub fn build_manifest(
 
 pub fn save_manifest(manifest: &SiteManifest, site_dir: &Path) -> Result<()> {
     let output_path = site_dir.join("lattice.json");
-    let json = serde_json::to_string_pretty(manifest).context("failed to serialize lattice.json")?;
+    let json =
+        serde_json::to_string_pretty(manifest).context("failed to serialize lattice.json")?;
     std::fs::write(&output_path, json)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
     Ok(())

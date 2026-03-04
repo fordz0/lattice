@@ -62,6 +62,14 @@ pub enum RpcCommand {
         name: String,
         respond_to: oneshot::Sender<Result<GetSiteResponse, String>>,
     },
+    ClaimName {
+        name: String,
+        pubkey_hex: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ListNames {
+        respond_to: oneshot::Sender<Vec<String>>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +104,12 @@ struct GetSiteParams {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClaimNameParams {
+    name: String,
+    pubkey_hex: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct PutRecordResponse {
     status: String,
@@ -110,7 +124,10 @@ struct PublishSiteResponse {
     error: Option<String>,
 }
 
-pub async fn start_rpc_server(port: u16, command_tx: mpsc::Sender<RpcCommand>) -> Result<ServerHandle> {
+pub async fn start_rpc_server(
+    port: u16,
+    command_tx: mpsc::Sender<RpcCommand>,
+) -> Result<ServerHandle> {
     let addr = format!("127.0.0.1:{port}");
     let server = ServerBuilder::default().build(&addr).await?;
 
@@ -261,6 +278,50 @@ pub async fn start_rpc_server(port: u16, command_tx: mpsc::Sender<RpcCommand>) -
             Ok(response) => Ok::<_, ErrorObjectOwned>(response),
             Err(err) => Err(internal_error(err)),
         }
+    })?;
+
+    module.register_async_method("claim_name", |params, ctx, _| async move {
+        let ClaimNameParams { name, pubkey_hex } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        ctx.send(RpcCommand::ClaimName {
+            name,
+            pubkey_hex,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch claim_name: {e}")))?;
+
+        let result = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("claim_name response dropped: {e}")))?;
+
+        let response = match result {
+            Ok(()) => PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            },
+            Err(err) => PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            },
+        };
+
+        Ok::<_, ErrorObjectOwned>(response)
+    })?;
+
+    module.register_async_method("list_names", |_, ctx, _| async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ListNames {
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch list_names: {e}")))?;
+
+        let names = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("list_names response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(names)
     })?;
 
     let handle = server.start(module);

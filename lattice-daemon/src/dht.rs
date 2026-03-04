@@ -22,7 +22,11 @@ pub fn add_bootstrap_peers(kad: &mut Behaviour<MemoryStore>, peers: &[String]) {
     }
 }
 
-pub fn put_record_bytes(kad: &mut Behaviour<MemoryStore>, key: String, value: Vec<u8>) -> Result<QueryId> {
+pub fn put_record_bytes(
+    kad: &mut Behaviour<MemoryStore>,
+    key: String,
+    value: Vec<u8>,
+) -> Result<QueryId> {
     let record = Record::new(key.into_bytes(), value);
     kad.put_record(record, Quorum::One)
         .context("failed to start put_record query")

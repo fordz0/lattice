@@ -101,7 +101,10 @@ fn file_response(mime_type: &str, body: Vec<u8>) -> Response {
     let content_type = HeaderValue::from_str(mime_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     headers.insert(header::CONTENT_TYPE, content_type);
-    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
 
     (StatusCode::OK, headers, body).into_response()
 }
@@ -112,6 +115,9 @@ fn plain(status: StatusCode, msg: &'static str) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
     (status, headers, msg).into_response()
 }

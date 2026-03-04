@@ -5,8 +5,11 @@ use ed25519_dalek::SigningKey;
 use lattice_daemon::config::load_or_create_config;
 use lattice_daemon::dht;
 use lattice_daemon::http_server;
+use lattice_daemon::names::NameRecord;
 use lattice_daemon::node::load_or_create_identity;
-use lattice_daemon::rpc::{self, GetSiteResponse, NodeInfoResponse, PublishSiteOk, RpcCommand, SiteFile};
+use lattice_daemon::rpc::{
+    self, GetSiteResponse, NodeInfoResponse, PublishSiteOk, RpcCommand, SiteFile,
+};
 use lattice_daemon::transport;
 use lattice_site::manifest::{hash_bytes, verify_manifest, SiteManifest};
 use lattice_site::publisher as site_publisher;
@@ -20,11 +23,13 @@ use libp2p::mdns;
 use libp2p::relay;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, Swarm};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 #[derive(NetworkBehaviour)]
@@ -70,6 +75,22 @@ struct PreparedPublish {
     records: Vec<(String, Vec<u8>)>,
 }
 
+struct PendingTextQuery {
+    key: String,
+    respond_to: oneshot::Sender<Option<String>>,
+}
+
+struct PendingClaimGet {
+    name: String,
+    pubkey_hex: String,
+    respond_to: oneshot::Sender<Result<(), String>>,
+}
+
+struct PendingClaimPut {
+    name: String,
+    respond_to: oneshot::Sender<Result<(), String>>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -79,62 +100,127 @@ async fn main() -> Result<()> {
     let config = load_or_create_config()?;
     let node_identity = load_or_create_identity(&config.data_dir)?;
     let site_signing_key = load_site_signing_key(&config.data_dir)?;
+    let local_pubkey_hex = hex::encode(site_signing_key.verifying_key().to_bytes());
+    let owned_names: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let peer_id = node_identity.peer_id;
 
-    let mut swarm = transport::build_swarm(node_identity.keypair, |key| -> std::result::Result<
-        LatticeBehaviour,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
-        let mut kademlia = dht::new_kademlia(peer_id);
-        dht::add_bootstrap_peers(&mut kademlia, &config.bootstrap_peers);
+    let mut swarm = transport::build_swarm(
+        node_identity.keypair,
+        |key| -> std::result::Result<LatticeBehaviour, Box<dyn std::error::Error + Send + Sync>> {
+            let mut kademlia = dht::new_kademlia(peer_id);
+            dht::add_bootstrap_peers(&mut kademlia, &config.bootstrap_peers);
 
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
-        let gossipsub = gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(key.clone()),
-            gossipsub::Config::default(),
-        )?;
-        let identify = identify::Behaviour::new(identify::Config::new(
-            "/lattice/0.1.0".to_string(),
-            key.public(),
-        ));
-        let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
-        let relay = relay::Behaviour::new(peer_id, relay::Config::default());
-        let dcutr = dcutr::Behaviour::new(peer_id);
+            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
+            let gossipsub = gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(key.clone()),
+                gossipsub::Config::default(),
+            )?;
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/lattice/0.1.0".to_string(),
+                key.public(),
+            ));
+            let autonat = autonat::Behaviour::new(peer_id, autonat::Config::default());
+            let relay = relay::Behaviour::new(peer_id, relay::Config::default());
+            let dcutr = dcutr::Behaviour::new(peer_id);
 
-        Ok(LatticeBehaviour {
-            kademlia,
-            mdns,
-            gossipsub,
-            identify,
-            autonat,
-            relay,
-            dcutr,
-        })
-    })?;
+            Ok(LatticeBehaviour {
+                kademlia,
+                mdns,
+                gossipsub,
+                identify,
+                autonat,
+                relay,
+                dcutr,
+            })
+        },
+    )?;
 
-    let listen_addr: Multiaddr = Multiaddr::from_str(&format!("/ip4/0.0.0.0/tcp/{}", config.listen_port))?;
+    let listen_addr: Multiaddr =
+        Multiaddr::from_str(&format!("/ip4/0.0.0.0/tcp/{}", config.listen_port))?;
     swarm.listen_on(listen_addr)?;
 
-    let quic_addr: Multiaddr = Multiaddr::from_str(&format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port))?;
+    let quic_addr: Multiaddr =
+        Multiaddr::from_str(&format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port))?;
     swarm.listen_on(quic_addr)?;
 
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcCommand>(64);
     let _rpc_server = rpc::start_rpc_server(config.rpc_port, rpc_tx.clone()).await?;
+    let http_port = config.http_port;
     let http_rpc_tx = rpc_tx.clone();
     let _http_server = tokio::spawn(async move {
-        if let Err(err) = http_server::start_http_server(7781, http_rpc_tx).await {
+        if let Err(err) = http_server::start_http_server(http_port, http_rpc_tx).await {
             error!(error = %err, "http server exited");
         }
     });
-    info!("HTTP server listening on port 7781");
+    info!(http_port, "HTTP server listening");
 
     info!(peer_id = %peer_id, "lattice daemon started");
-    info!(port = config.listen_port, rpc_port = config.rpc_port, "listening and RPC configured");
+    info!(
+        port = config.listen_port,
+        rpc_port = config.rpc_port,
+        http_port = config.http_port,
+        "listening and RPC configured"
+    );
 
-    let mut pending_put: HashMap<kad::QueryId, oneshot::Sender<Result<(), String>>> = HashMap::new();
-    let mut pending_get_text: HashMap<kad::QueryId, oneshot::Sender<Option<String>>> = HashMap::new();
-    let mut pending_get_block: HashMap<kad::QueryId, oneshot::Sender<Option<String>>> = HashMap::new();
+    let heartbeat_rpc_tx = rpc_tx.clone();
+    let heartbeat_owned_names = Arc::clone(&owned_names);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            let (tx, rx) = oneshot::channel();
+            let names = if heartbeat_rpc_tx
+                .send(RpcCommand::ListNames { respond_to: tx })
+                .await
+                .is_ok()
+            {
+                rx.await.unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            let names = if names.is_empty() {
+                match heartbeat_owned_names.lock() {
+                    Ok(guard) => guard.iter().cloned().collect::<Vec<_>>(),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                names
+            };
+
+            for name in names {
+                let (tx2, rx2) = oneshot::channel();
+                if heartbeat_rpc_tx
+                    .send(RpcCommand::ClaimName {
+                        name: name.clone(),
+                        pubkey_hex: String::new(),
+                        respond_to: tx2,
+                    })
+                    .await
+                    .is_err()
+                {
+                    warn!(name = %name, "heartbeat failed to dispatch");
+                    continue;
+                }
+
+                match rx2.await {
+                    Ok(Ok(())) => info!(name = %name, "heartbeat sent"),
+                    Ok(Err(err)) => warn!(name = %name, error = %err, "heartbeat failed"),
+                    Err(_) => warn!(name = %name, "heartbeat response dropped"),
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
+
+    let mut pending_put: HashMap<kad::QueryId, oneshot::Sender<Result<(), String>>> =
+        HashMap::new();
+    let mut pending_get_text: HashMap<kad::QueryId, PendingTextQuery> = HashMap::new();
+    let mut pending_get_block: HashMap<kad::QueryId, oneshot::Sender<Option<String>>> =
+        HashMap::new();
+    let mut pending_claim_get: HashMap<kad::QueryId, PendingClaimGet> = HashMap::new();
+    let mut pending_claim_put: HashMap<kad::QueryId, PendingClaimPut> = HashMap::new();
 
     let mut publish_tasks: HashMap<u64, PublishTask> = HashMap::new();
     let mut publish_query_to_task: HashMap<kad::QueryId, u64> = HashMap::new();
@@ -168,8 +254,14 @@ async fn main() -> Result<()> {
                             }
                         }
                         RpcCommand::GetRecord { key, respond_to } => {
-                            let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, key);
-                            pending_get_text.insert(query_id, respond_to);
+                            let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, key.clone());
+                            pending_get_text.insert(
+                                query_id,
+                                PendingTextQuery {
+                                    key,
+                                    respond_to,
+                                },
+                            );
                         }
                         RpcCommand::PublishSite { name, site_dir, respond_to } => {
                             match prepare_publish(&name, Path::new(&site_dir), &site_signing_key) {
@@ -218,8 +310,15 @@ async fn main() -> Result<()> {
                             }
                         }
                         RpcCommand::GetSiteManifest { name, respond_to } => {
-                            let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, format!("site:{name}"));
-                            pending_get_text.insert(query_id, respond_to);
+                            let key = format!("site:{name}");
+                            let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, key.clone());
+                            pending_get_text.insert(
+                                query_id,
+                                PendingTextQuery {
+                                    key,
+                                    respond_to,
+                                },
+                            );
                         }
                         RpcCommand::GetBlock { hash, respond_to } => {
                             let query_id = dht::get_record_bytes(&mut swarm.behaviour_mut().kademlia, format!("block:{hash}"));
@@ -240,6 +339,48 @@ async fn main() -> Result<()> {
                             get_site_queries.insert(query_id, GetSiteQuery::Manifest { task_id });
                             get_site_tasks.insert(task_id, task);
                         }
+                        RpcCommand::ClaimName {
+                            name,
+                            pubkey_hex,
+                            respond_to,
+                        } => {
+                            if name.trim().is_empty() {
+                                let _ = respond_to.send(Err("name cannot be empty".to_string()));
+                                continue;
+                            }
+
+                            let effective_pubkey = if pubkey_hex.is_empty() {
+                                local_pubkey_hex.clone()
+                            } else if pubkey_hex == local_pubkey_hex {
+                                pubkey_hex
+                            } else {
+                                let _ = respond_to.send(Err(
+                                    "name already claimed by another key".to_string(),
+                                ));
+                                continue;
+                            };
+
+                            let query_id = dht::get_record(
+                                &mut swarm.behaviour_mut().kademlia,
+                                format!("name:{name}"),
+                            );
+                            pending_claim_get.insert(
+                                query_id,
+                                PendingClaimGet {
+                                    name,
+                                    pubkey_hex: effective_pubkey,
+                                    respond_to,
+                                },
+                            );
+                        }
+                        RpcCommand::ListNames { respond_to } => {
+                            let mut names = match owned_names.lock() {
+                                Ok(guard) => guard.iter().cloned().collect::<Vec<_>>(),
+                                Err(_) => Vec::new(),
+                            };
+                            names.sort_unstable();
+                            let _ = respond_to.send(names);
+                        }
                     }
                 }
             }
@@ -250,10 +391,13 @@ async fn main() -> Result<()> {
                     &mut pending_put,
                     &mut pending_get_text,
                     &mut pending_get_block,
+                    &mut pending_claim_get,
+                    &mut pending_claim_put,
                     &mut publish_tasks,
                     &mut publish_query_to_task,
                     &mut get_site_tasks,
                     &mut get_site_queries,
+                    &owned_names,
                 );
             }
         }
@@ -264,15 +408,20 @@ fn handle_swarm_event(
     event: libp2p::swarm::SwarmEvent<LatticeBehaviourEvent>,
     swarm: &mut Swarm<LatticeBehaviour>,
     pending_put: &mut HashMap<kad::QueryId, oneshot::Sender<Result<(), String>>>,
-    pending_get_text: &mut HashMap<kad::QueryId, oneshot::Sender<Option<String>>>,
+    pending_get_text: &mut HashMap<kad::QueryId, PendingTextQuery>,
     pending_get_block: &mut HashMap<kad::QueryId, oneshot::Sender<Option<String>>>,
+    pending_claim_get: &mut HashMap<kad::QueryId, PendingClaimGet>,
+    pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
     get_site_tasks: &mut HashMap<u64, GetSiteTask>,
     get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
+    owned_names: &Arc<Mutex<HashSet<String>>>,
 ) {
     match event {
-        libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+        libp2p::swarm::SwarmEvent::ConnectionEstablished {
+            peer_id, endpoint, ..
+        } => {
             info!(peer = %peer_id, address = ?endpoint.get_remote_address(), "new peer connected");
         }
         libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
@@ -281,100 +430,138 @@ fn handle_swarm_event(
         libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
             info!(address = %address, "node listening");
         }
-        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Mdns(
+            mdns::Event::Discovered(list),
+        )) => {
             for (peer_id, addr) in list {
                 info!(peer = %peer_id, address = %addr, "mDNS peer discovered");
                 swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
             }
         }
-        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Mdns(
+            mdns::Event::Expired(list),
+        )) => {
             for (peer_id, addr) in list {
-                swarm.behaviour_mut().kademlia.remove_address(&peer_id, &addr);
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .remove_address(&peer_id, &addr);
             }
         }
-        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed { id, result, .. })) => {
-            match result {
-                kad::QueryResult::PutRecord(result) => {
-                    if let Some(ch) = pending_put.remove(&id) {
+        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Kademlia(
+            kad::Event::OutboundQueryProgressed { id, result, .. },
+        )) => match result {
+            kad::QueryResult::PutRecord(result) => {
+                if let Some(ch) = pending_put.remove(&id) {
+                    match result {
+                        Ok(ok) => {
+                            info!(key = ?ok.key, "kademlia put_record succeeded");
+                            let _ = ch.send(Ok(()));
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "kademlia put_record failed");
+                            let _ = ch.send(Err(err.to_string()));
+                        }
+                    }
+                } else if let Some(task_id) = publish_query_to_task.remove(&id) {
+                    if let Some(task) = publish_tasks.get_mut(&task_id) {
+                        task.remaining = task.remaining.saturating_sub(1);
                         match result {
                             Ok(ok) => {
-                                info!(key = ?ok.key, "kademlia put_record succeeded");
-                                let _ = ch.send(Ok(()));
+                                info!(key = ?ok.key, "kademlia publish put_record succeeded");
                             }
                             Err(err) => {
-                                warn!(error = %err, "kademlia put_record failed");
-                                let _ = ch.send(Err(err.to_string()));
+                                warn!(error = %err, "kademlia publish put_record failed");
+                                if task.failed.is_none() {
+                                    task.failed = Some(err.to_string());
+                                }
                             }
                         }
-                    } else if let Some(task_id) = publish_query_to_task.remove(&id) {
-                        if let Some(task) = publish_tasks.get_mut(&task_id) {
-                            task.remaining = task.remaining.saturating_sub(1);
-                            match result {
-                                Ok(ok) => {
-                                    info!(key = ?ok.key, "kademlia publish put_record succeeded");
-                                }
-                                Err(err) => {
-                                    warn!(error = %err, "kademlia publish put_record failed");
-                                    if task.failed.is_none() {
-                                        task.failed = Some(err.to_string());
-                                    }
-                                }
-                            }
 
-                            if task.remaining == 0 {
-                                let task = publish_tasks.remove(&task_id).expect("publish task should exist");
-                                let response = match task.failed {
-                                    Some(err) => Err(err),
-                                    None => Ok(PublishSiteOk {
-                                        version: task.version,
-                                        file_count: task.file_count,
-                                    }),
-                                };
-                                let _ = task.respond_to.send(response);
+                        if task.remaining == 0 {
+                            let task = publish_tasks
+                                .remove(&task_id)
+                                .expect("publish task should exist");
+                            let response = match task.failed {
+                                Some(err) => Err(err),
+                                None => Ok(PublishSiteOk {
+                                    version: task.version,
+                                    file_count: task.file_count,
+                                }),
+                            };
+                            let _ = task.respond_to.send(response);
+                        }
+                    }
+                } else if let Some(task) = pending_claim_put.remove(&id) {
+                    match result {
+                        Ok(ok) => {
+                            info!(key = ?ok.key, name = %task.name, "kademlia claim_name put_record succeeded");
+                            if let Ok(mut guard) = owned_names.lock() {
+                                guard.insert(task.name.clone());
                             }
+                            let _ = task.respond_to.send(Ok(()));
+                        }
+                        Err(err) => {
+                            warn!(name = %task.name, error = %err, "kademlia claim_name put_record failed");
+                            let _ = task.respond_to.send(Err(err.to_string()));
                         }
                     }
                 }
-                kad::QueryResult::GetRecord(result) => {
-                    if let Some(ch) = pending_get_text.remove(&id) {
-                        match result {
-                            Ok(kad::GetRecordOk::FoundRecord(record)) => {
-                                let value = String::from_utf8(record.record.value).ok();
-                                info!(key = ?record.record.key, found = value.is_some(), "kademlia get_record result");
-                                let _ = ch.send(value);
-                            }
-                            Ok(_) => {
-                                info!("kademlia get_record finished without record");
-                                let _ = ch.send(None);
-                            }
-                            Err(err) => {
-                                warn!(error = %err, "kademlia get_record failed");
-                                let _ = ch.send(None);
-                            }
-                        }
-                    } else if let Some(ch) = pending_get_block.remove(&id) {
-                        match result {
-                            Ok(kad::GetRecordOk::FoundRecord(record)) => {
-                                let value = hex_encode(&record.record.value);
-                                info!(key = ?record.record.key, bytes = record.record.value.len(), "kademlia get_block result");
-                                let _ = ch.send(Some(value));
-                            }
-                            Ok(_) => {
-                                info!("kademlia get_block finished without record");
-                                let _ = ch.send(None);
-                            }
-                            Err(err) => {
-                                warn!(error = %err, "kademlia get_block failed");
-                                let _ = ch.send(None);
-                            }
-                        }
-                    } else if let Some(query) = get_site_queries.remove(&id) {
-                        handle_get_site_query_result(query, result, swarm, get_site_tasks, get_site_queries);
-                    }
-                }
-                _ => {}
             }
-        }
+            kad::QueryResult::GetRecord(result) => {
+                if let Some(pending) = pending_get_text.remove(&id) {
+                    match result {
+                        Ok(kad::GetRecordOk::FoundRecord(record)) => {
+                            let value = String::from_utf8(record.record.value)
+                                .ok()
+                                .and_then(|value| normalize_get_record_value(&pending.key, value));
+                            info!(
+                                key = ?record.record.key,
+                                request_key = %pending.key,
+                                found = value.is_some(),
+                                "kademlia get_record result"
+                            );
+                            let _ = pending.respond_to.send(value);
+                        }
+                        Ok(_) => {
+                            info!("kademlia get_record finished without record");
+                            let _ = pending.respond_to.send(None);
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "kademlia get_record failed");
+                            let _ = pending.respond_to.send(None);
+                        }
+                    }
+                } else if let Some(ch) = pending_get_block.remove(&id) {
+                    match result {
+                        Ok(kad::GetRecordOk::FoundRecord(record)) => {
+                            let value = hex_encode(&record.record.value);
+                            info!(key = ?record.record.key, bytes = record.record.value.len(), "kademlia get_block result");
+                            let _ = ch.send(Some(value));
+                        }
+                        Ok(_) => {
+                            info!("kademlia get_block finished without record");
+                            let _ = ch.send(None);
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "kademlia get_block failed");
+                            let _ = ch.send(None);
+                        }
+                    }
+                } else if let Some(claim) = pending_claim_get.remove(&id) {
+                    handle_claim_name_lookup_result(claim, result, swarm, pending_claim_put);
+                } else if let Some(query) = get_site_queries.remove(&id) {
+                    handle_get_site_query_result(
+                        query,
+                        result,
+                        swarm,
+                        get_site_tasks,
+                        get_site_queries,
+                    );
+                }
+            }
+            _ => {}
+        },
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Identify(
             identify::Event::Received { peer_id, info, .. },
         )) => {
@@ -412,6 +599,82 @@ fn handle_swarm_event(
     }
 }
 
+fn normalize_get_record_value(key: &str, value: String) -> Option<String> {
+    if !key.starts_with("name:") {
+        return Some(value);
+    }
+
+    if let Ok(record) = serde_json::from_str::<NameRecord>(&value) {
+        if record.is_expired() {
+            return None;
+        }
+        return Some(record.key);
+    }
+
+    Some(value)
+}
+
+fn handle_claim_name_lookup_result(
+    claim: PendingClaimGet,
+    result: Result<kad::GetRecordOk, kad::GetRecordError>,
+    swarm: &mut Swarm<LatticeBehaviour>,
+    pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
+) {
+    let PendingClaimGet {
+        name,
+        pubkey_hex,
+        respond_to,
+    } = claim;
+
+    let mut record_to_store = NameRecord::new(pubkey_hex.clone());
+
+    if let Ok(kad::GetRecordOk::FoundRecord(record)) = result {
+        let existing_value = match String::from_utf8(record.record.value) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = respond_to.send(Err("invalid name record".to_string()));
+                return;
+            }
+        };
+
+        if let Ok(mut existing_record) = serde_json::from_str::<NameRecord>(&existing_value) {
+            if !existing_record.is_expired() && existing_record.key != pubkey_hex {
+                let _ = respond_to.send(Err("name already claimed".to_string()));
+                return;
+            }
+
+            if existing_record.key == pubkey_hex {
+                existing_record.refresh();
+                record_to_store = existing_record;
+            }
+        } else if existing_value != pubkey_hex {
+            let _ = respond_to.send(Err("name already claimed".to_string()));
+            return;
+        }
+    }
+
+    let payload = match serde_json::to_string(&record_to_store) {
+        Ok(payload) => payload,
+        Err(err) => {
+            let _ = respond_to.send(Err(format!("failed to encode name record: {err}")));
+            return;
+        }
+    };
+
+    match dht::put_record(
+        &mut swarm.behaviour_mut().kademlia,
+        format!("name:{name}"),
+        payload,
+    ) {
+        Ok(query_id) => {
+            pending_claim_put.insert(query_id, PendingClaimPut { name, respond_to });
+        }
+        Err(err) => {
+            let _ = respond_to.send(Err(err.to_string()));
+        }
+    }
+}
+
 fn handle_get_site_query_result(
     query: GetSiteQuery,
     result: Result<kad::GetRecordOk, kad::GetRecordError>,
@@ -435,7 +698,9 @@ fn handle_get_site_query_result(
                     {
                         Some(manifest) => manifest,
                         None => {
-                            let _ = task.respond_to.send(Err("invalid site manifest".to_string()));
+                            let _ = task
+                                .respond_to
+                                .send(Err("invalid site manifest".to_string()));
                             return;
                         }
                     }
@@ -474,7 +739,11 @@ fn handle_get_site_query_result(
             );
             get_site_tasks.insert(task_id, task);
         }
-        GetSiteQuery::Block { task_id, hash, path } => {
+        GetSiteQuery::Block {
+            task_id,
+            hash,
+            path,
+        } => {
             let mut task = if let Some(task) = get_site_tasks.remove(&task_id) {
                 task
             } else {
@@ -499,7 +768,9 @@ fn handle_get_site_query_result(
             let manifest = match task.manifest.as_ref() {
                 Some(manifest) => manifest,
                 None => {
-                    let _ = task.respond_to.send(Err("site task missing manifest".to_string()));
+                    let _ = task
+                        .respond_to
+                        .send(Err("site task missing manifest".to_string()));
                     return;
                 }
             };
@@ -600,7 +871,11 @@ fn load_site_signing_key(data_dir: &Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&secret))
 }
 
-fn prepare_publish(name: &str, site_dir: &Path, signing_key: &SigningKey) -> Result<PreparedPublish> {
+fn prepare_publish(
+    name: &str,
+    site_dir: &Path,
+    signing_key: &SigningKey,
+) -> Result<PreparedPublish> {
     let (existing_version, rating) = match site_publisher::load_manifest(site_dir) {
         Ok(existing) => {
             let rating = if existing.rating.is_empty() {
@@ -613,7 +888,8 @@ fn prepare_publish(name: &str, site_dir: &Path, signing_key: &SigningKey) -> Res
         Err(_) => (0, "general".to_string()),
     };
 
-    let manifest = site_publisher::build_manifest(name, site_dir, signing_key, &rating, existing_version)?;
+    let manifest =
+        site_publisher::build_manifest(name, site_dir, signing_key, &rating, existing_version)?;
     verify_manifest(&manifest)?;
     site_publisher::save_manifest(&manifest, site_dir)?;
 
@@ -636,7 +912,8 @@ fn prepare_publish(name: &str, site_dir: &Path, signing_key: &SigningKey) -> Res
         records.push((format!("block:{}", file.hash), contents));
     }
 
-    let manifest_json = serde_json::to_string(&manifest).context("failed to serialize site manifest")?;
+    let manifest_json =
+        serde_json::to_string(&manifest).context("failed to serialize site manifest")?;
     records.push((format!("site:{name}"), manifest_json.into_bytes()));
 
     Ok(PreparedPublish {

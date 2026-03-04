@@ -44,7 +44,8 @@ pub fn sign_manifest(manifest: &mut SiteManifest, keypair: &SigningKey) -> Resul
 }
 
 pub fn verify_manifest(manifest: &SiteManifest) -> Result<()> {
-    let pubkey_bytes = hex::decode(&manifest.publisher_key).context("publisher_key is not valid hex")?;
+    let pubkey_bytes =
+        hex::decode(&manifest.publisher_key).context("publisher_key is not valid hex")?;
     if pubkey_bytes.len() != 32 {
         bail!(
             "invalid publisher key length: expected 32 bytes, got {}",

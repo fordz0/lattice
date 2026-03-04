@@ -95,10 +95,37 @@ impl RpcClient {
     }
 
     pub async fn get_site_manifest(&self, name: &str) -> Result<Value> {
-        self.call("get_site_manifest", json!({ "name": name })).await
+        self.call("get_site_manifest", json!({ "name": name }))
+            .await
     }
 
     pub async fn get_block(&self, hash: &str) -> Result<Value> {
         self.call("get_block", json!({ "hash": hash })).await
+    }
+
+    pub async fn claim_name(&self, name: &str, pubkey_hex: &str) -> Result<Value> {
+        self.call(
+            "claim_name",
+            json!({
+                "name": name,
+                "pubkey_hex": pubkey_hex,
+            }),
+        )
+        .await
+    }
+
+    pub async fn list_names(&self) -> Result<Vec<String>> {
+        let value = self.call("list_names", json!([])).await?;
+        value
+            .as_array()
+            .ok_or_else(|| anyhow!("invalid list_names response"))?
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .map(ToString::to_string)
+                    .ok_or_else(|| anyhow!("invalid list_names entry"))
+            })
+            .collect()
     }
 }

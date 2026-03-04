@@ -27,8 +27,13 @@ struct Cli {
 enum Command {
     Status,
     Peers,
-    Put { key: String, value: String },
-    Get { key: String },
+    Put {
+        key: String,
+        value: String,
+    },
+    Get {
+        key: String,
+    },
     Keygen,
     Name {
         #[command(subcommand)]
@@ -55,6 +60,7 @@ enum Command {
 enum NameCommand {
     Claim { name: String },
     Info { name: String },
+    List,
 }
 
 #[tokio::main]
@@ -113,9 +119,12 @@ async fn run() -> Result<()> {
             NameCommand::Claim { name } => {
                 let client = RpcClient::new(cli.rpc_port);
                 let owner_key = load_identity_public_key_hex()?;
-                let result = client.put_record(&format!("name:{name}"), &owner_key).await?;
+                let result = client.claim_name(&name, &owner_key).await?;
 
-                let status = result.get("status").and_then(Value::as_str).unwrap_or("err");
+                let status = result
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("err");
                 if status == "ok" {
                     println!("claimed {name}.lat");
                 } else {
@@ -140,12 +149,24 @@ async fn run() -> Result<()> {
                 println!("Name:      {name}.lat");
                 println!("Owner key: {owner}");
             }
+            NameCommand::List => {
+                let client = RpcClient::new(cli.rpc_port);
+                let names = client.list_names().await?;
+                if names.is_empty() {
+                    println!("No names claimed on this node");
+                } else {
+                    for name in names {
+                        println!("{name}.lat");
+                    }
+                }
+            }
         },
         Command::Init { name, rating } => {
             init_site(name, &rating)?;
         }
         Command::Publish { dir } => {
-            let site_dir = dir.unwrap_or(std::env::current_dir().context("failed to get current directory")?);
+            let site_dir =
+                dir.unwrap_or(std::env::current_dir().context("failed to get current directory")?);
             let canonical_dir = site_dir
                 .canonicalize()
                 .with_context(|| format!("failed to resolve {}", site_dir.display()))?;
@@ -159,7 +180,10 @@ async fn run() -> Result<()> {
                 .publish_site(&name, &canonical_dir.to_string_lossy())
                 .await?;
 
-            let status = result.get("status").and_then(Value::as_str).unwrap_or("err");
+            let status = result
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("err");
             if status != "ok" {
                 let error = result
                     .get("error")
@@ -396,7 +420,8 @@ fn lattice_data_dir() -> Result<PathBuf> {
         return Ok(PathBuf::from(dir));
     }
 
-    let base_dirs = BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
+    let base_dirs =
+        BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
     Ok(base_dirs.home_dir().join(".lattice"))
 }
 
