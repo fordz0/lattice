@@ -2060,7 +2060,12 @@ fn handle_get_site_query_result(
                         Some(active.block_hashes[active.next_block_index].clone());
                     active.next_block_index += 1;
                 } else {
-                    let finished = task.active_file.take().expect("active file exists");
+                    let Some(finished) = task.active_file.take() else {
+                        let _ = task
+                            .respond_to
+                            .send(Err("site task missing active file".to_string()));
+                        return;
+                    };
                     let file_hash = hex::encode(Sha256::digest(&finished.bytes));
                     if file_hash != finished.expected_hash {
                         let _ = task.respond_to.send(Err(format!(

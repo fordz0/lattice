@@ -382,7 +382,15 @@ fn plan_range_slices(
             usize::try_from(chunk_end_from_manifest.saturating_sub(chunk_start)).unwrap_or(0)
         };
 
-        if within_start >= chunk_size || within_end >= chunk_size || within_start > within_end {
+        let declared_chunk_len_u64 = chunk_end_from_manifest
+            .saturating_sub(chunk_start)
+            .saturating_add(1);
+        let declared_chunk_len = usize::try_from(declared_chunk_len_u64)
+            .map_err(|_| plain(StatusCode::BAD_GATEWAY, "chunk bounds mismatch"))?;
+        if within_start >= declared_chunk_len
+            || within_end >= declared_chunk_len
+            || within_start > within_end
+        {
             return Err(plain(StatusCode::BAD_GATEWAY, "chunk bounds mismatch"));
         }
 
@@ -414,6 +422,9 @@ fn stream_file_range(
     let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<Bytes, io::Error>>(8);
 
     tokio::spawn(async move {
+        let verify_full_file = range.start == 0 && range.end.saturating_add(1) == file.size;
+        let mut full_file_hasher = verify_full_file.then(Sha256::new);
+
         for slice in slices {
             let chunk_bytes = match fetch_block_bytes(&rpc_tx, &slice.block_hash).await {
                 Ok(bytes) => bytes,
@@ -441,14 +452,23 @@ fn stream_file_range(
                 break;
             }
 
+            let slice_bytes = &chunk_bytes[slice.start..=slice.end];
+            if let Some(hasher) = full_file_hasher.as_mut() {
+                hasher.update(slice_bytes);
+            }
             if tx
-                .send(Ok(Bytes::copy_from_slice(
-                    &chunk_bytes[slice.start..=slice.end],
-                )))
+                .send(Ok(Bytes::copy_from_slice(slice_bytes)))
                 .await
                 .is_err()
             {
                 break;
+            }
+        }
+
+        if let Some(hasher) = full_file_hasher.take() {
+            let actual_file_hash = hex::encode(hasher.finalize());
+            if actual_file_hash != file.hash {
+                let _ = tx.send(Err(io::Error::other("file hash mismatch"))).await;
             }
         }
     });
