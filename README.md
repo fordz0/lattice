@@ -55,7 +55,7 @@ mkdir mysite && cd mysite
 ./target/release/lattice-cli publish
 
 # fetch someone else's site
-./target/release/lattice-cli fetch benjf --out ./benjf
+./target/release/lattice-cli fetch website --out ./website
 ```
 
 ### Visit .lat sites in Firefox
