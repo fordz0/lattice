@@ -9,6 +9,7 @@ use base64::Engine as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use tower_http::cors::{Any, CorsLayer};
+use tracing::warn;
 
 use crate::rpc::RpcCommand;
 
@@ -36,10 +37,14 @@ async fn serve_site(
     OriginalUri(uri): OriginalUri,
     State(rpc_tx): State<mpsc::Sender<RpcCommand>>,
 ) -> impl IntoResponse {
-    let host_no_port = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
-    let site_name = match host_no_port.strip_suffix(".lat") {
-        Some(name) if !name.is_empty() => name.to_string(),
-        _ => return plain(StatusCode::NOT_FOUND, "site not found on Lattice"),
+    let site_name = match extract_site_name(&host, &uri) {
+        Some(name) => name,
+        None => {
+            return plain(
+                StatusCode::NOT_FOUND,
+                "site not found on Lattice (expected *.lat host)",
+            );
+        }
     };
 
     let request_path = normalize_path(uri.path());
@@ -69,7 +74,14 @@ async fn serve_site(
             if err == "too many concurrent requests" {
                 return plain(StatusCode::SERVICE_UNAVAILABLE, "lattice daemon busy");
             }
-            return plain(StatusCode::BAD_GATEWAY, "lattice daemon error");
+            if err.starts_with("block missing:") {
+                return plain(StatusCode::NOT_FOUND, "site content missing on Lattice");
+            }
+            warn!(error = %err, "get_site failed");
+            return plain_owned(
+                StatusCode::BAD_GATEWAY,
+                format!("lattice daemon error: {err}"),
+            );
         }
         Ok(Err(_)) => return plain(StatusCode::BAD_GATEWAY, "lattice daemon error"),
     };
@@ -104,6 +116,27 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
+fn extract_site_name(host: &str, uri: &axum::http::Uri) -> Option<String> {
+    if let Some(name) = parse_site_name_from_host(host) {
+        return Some(name);
+    }
+    uri.host().and_then(parse_site_name_from_host)
+}
+
+fn parse_site_name_from_host(raw_host: &str) -> Option<String> {
+    let host = raw_host
+        .trim()
+        .trim_end_matches('.')
+        .split(':')
+        .next()
+        .unwrap_or(raw_host)
+        .to_ascii_lowercase();
+    match host.strip_suffix(".lat") {
+        Some(name) if !name.is_empty() => Some(name.to_string()),
+        _ => None,
+    }
+}
+
 fn file_response(mime_type: &str, body: Vec<u8>) -> Response {
     let mut headers = HeaderMap::new();
     let content_type = HeaderValue::from_str(mime_type)
@@ -118,6 +151,10 @@ fn file_response(mime_type: &str, body: Vec<u8>) -> Response {
 }
 
 fn plain(status: StatusCode, msg: &'static str) -> Response {
+    plain_owned(status, msg.to_string())
+}
+
+fn plain_owned(status: StatusCode, msg: String) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,

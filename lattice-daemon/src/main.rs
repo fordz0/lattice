@@ -1136,6 +1136,13 @@ fn publish_name_ownership(
                 return Ok(PublishNameOwnership::OwnedByOther);
             }
 
+            if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
+                if legacy_owner_key == local_pubkey_hex {
+                    return Ok(PublishNameOwnership::OwnedByLocal);
+                }
+                return Ok(PublishNameOwnership::OwnedByOther);
+            }
+
             Err("invalid ownership record for name".to_string())
         }
         Ok(_) => Ok(PublishNameOwnership::Unclaimed),
@@ -1229,6 +1236,25 @@ fn parse_verified_name_record(name: &str, value: &str) -> Option<NameRecord> {
     Some(record)
 }
 
+fn parse_legacy_name_owner(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = if trimmed.starts_with('"') {
+        serde_json::from_str::<String>(trimmed).ok()?
+    } else {
+        trimmed.to_string()
+    };
+
+    if candidate.len() == 64 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(candidate.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
 fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("name cannot be empty".to_string());
@@ -1298,6 +1324,10 @@ fn normalize_get_record_value(key: &str, value: String) -> Option<String> {
         return Some(record.key);
     }
 
+    if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
+        return Some(legacy_owner_key);
+    }
+
     None
 }
 
@@ -1334,6 +1364,11 @@ fn handle_claim_name_lookup_result(
             if existing_record.key == pubkey_hex {
                 existing_record.refresh_signed(&name, site_signing_key);
                 record_to_store = existing_record;
+            }
+        } else if let Some(legacy_owner_key) = parse_legacy_name_owner(&existing_value) {
+            if legacy_owner_key != pubkey_hex {
+                let _ = respond_to.send(Err("name already claimed".to_string()));
+                return;
             }
         }
     }
@@ -1475,27 +1510,34 @@ fn handle_get_site_query_result(
                                             .to_string()));
                                 return;
                             }
+                        } else if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
+                            if legacy_owner_key != manifest.publisher_key {
+                                let _ =
+                                    task.respond_to
+                                        .send(Err("manifest publisher does not match name owner"
+                                            .to_string()));
+                                return;
+                            }
+                            warn!(
+                                name = %name,
+                                "using legacy unsigned name owner record for compatibility"
+                            );
                         } else {
-                            let _ = task
-                                .respond_to
-                                .send(Err("invalid name ownership record".to_string()));
-                            return;
+                            warn!(name = %name, "invalid name ownership record; treating as unclaimed");
                         }
                     } else {
-                        let _ = task
-                            .respond_to
-                            .send(Err("invalid name ownership record".to_string()));
-                        return;
+                        warn!(name = %name, "invalid name record bytes; treating as unclaimed");
                     }
                 }
                 Ok(_) | Err(kad::GetRecordError::NotFound { .. }) => {
                     warn!(name = %name, "name record not found; serving unclaimed site");
                 }
                 Err(err) => {
-                    let _ = task
-                        .respond_to
-                        .send(Err(format!("failed to resolve name ownership: {err}")));
-                    return;
+                    warn!(
+                        name = %name,
+                        error = %err,
+                        "failed to resolve name ownership; serving site without ownership confirmation"
+                    );
                 }
             }
 
@@ -1545,7 +1587,7 @@ fn handle_get_site_query_result(
                 }
             };
 
-            let raw_bytes = decode_block_storage(&stored).unwrap_or(stored);
+            let raw_bytes = resolve_block_bytes(&stored, &hash);
             let actual_hash = hex::encode(Sha256::digest(&raw_bytes));
             if actual_hash != hash {
                 let _ = task.respond_to.send(Err(format!(
@@ -1631,6 +1673,16 @@ fn infer_mime_type(path: &str) -> &'static str {
 fn decode_block_storage(stored: &[u8]) -> Option<Vec<u8>> {
     let hex = std::str::from_utf8(stored).ok()?.trim();
     decode_hex(hex).ok()
+}
+
+fn resolve_block_bytes(stored: &[u8], expected_hash: &str) -> Vec<u8> {
+    if let Some(decoded) = decode_block_storage(stored) {
+        let decoded_hash = hex::encode(Sha256::digest(&decoded));
+        if decoded_hash == expected_hash {
+            return decoded;
+        }
+    }
+    stored.to_vec()
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>> {
