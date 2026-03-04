@@ -17,7 +17,8 @@ pub struct NodeInfoResponse {
 #[derive(Debug, Clone)]
 pub struct PublishSiteOk {
     pub version: u64,
-    pub file_count: u32,
+    pub file_count: usize,
+    pub claimed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,7 +129,8 @@ struct PutRecordResponse {
 struct PublishSiteResponse {
     status: String,
     version: Option<u64>,
-    file_count: Option<u32>,
+    file_count: Option<usize>,
+    claimed: Option<bool>,
     error: Option<String>,
 }
 
@@ -235,12 +237,14 @@ pub async fn start_rpc_server(
                 status: "ok".to_string(),
                 version: Some(ok.version),
                 file_count: Some(ok.file_count),
+                claimed: Some(ok.claimed),
                 error: None,
             },
             Err(err) => PublishSiteResponse {
                 status: "err".to_string(),
                 version: None,
                 file_count: None,
+                claimed: None,
                 error: Some(err),
             },
         };

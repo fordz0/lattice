@@ -8,6 +8,8 @@ use lattice_site::manifest::{hash_bytes, hash_file, verify_manifest, FileEntry, 
 use lattice_site::publisher as site_publisher;
 use rpc::{DaemonNotRunning, RpcClient};
 use serde_json::Value;
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,6 +50,8 @@ enum Command {
     Publish {
         #[arg(long)]
         dir: Option<PathBuf>,
+        #[arg(long)]
+        name: Option<String>,
     },
     Fetch {
         name: String,
@@ -63,6 +67,19 @@ enum NameCommand {
     List,
 }
 
+#[derive(Debug)]
+struct NameClaimedByOther {
+    name: String,
+}
+
+impl fmt::Display for NameClaimedByOther {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.lat is already claimed by another key", self.name)
+    }
+}
+
+impl Error for NameClaimedByOther {}
+
 #[tokio::main]
 async fn main() {
     let exit_code = match run().await {
@@ -70,6 +87,12 @@ async fn main() {
         Err(err) => {
             if err.downcast_ref::<DaemonNotRunning>().is_some() {
                 eprintln!("lattice daemon is not running. Start it with: lattice-daemon");
+            } else if let Some(claimed) = err.downcast_ref::<NameClaimedByOther>() {
+                println!(
+                    "Error: {}.lat is already claimed by another key",
+                    claimed.name
+                );
+                println!("Claim the name first: lattice name claim {}", claimed.name);
             } else {
                 eprintln!("{err:#}");
             }
@@ -163,14 +186,19 @@ async fn run() -> Result<()> {
         Command::Init { name, rating } => {
             init_site(name, &rating)?;
         }
-        Command::Publish { dir } => {
+        Command::Publish { dir, name } => {
             let site_dir =
                 dir.unwrap_or(std::env::current_dir().context("failed to get current directory")?);
             let canonical_dir = site_dir
                 .canonicalize()
                 .with_context(|| format!("failed to resolve {}", site_dir.display()))?;
-            let name = site_name_for_dir(&canonical_dir)?;
-            let _publisher_key = load_identity_public_key_hex()?;
+            let name = match name {
+                Some(name) if !name.trim().is_empty() => name,
+                Some(_) => {
+                    bail!("no name specified — use --name <name> or add \"name\" to lattice.json")
+                }
+                None => site_name_for_dir(&canonical_dir)?,
+            };
 
             println!("Publishing {name}.lat...");
 
@@ -188,6 +216,9 @@ async fn run() -> Result<()> {
                     .get("error")
                     .and_then(Value::as_str)
                     .unwrap_or("publish_site failed");
+                if error == "name already claimed by another key" {
+                    return Err(anyhow!(NameClaimedByOther { name }));
+                }
                 bail!("{error}");
             }
 
@@ -196,11 +227,15 @@ async fn run() -> Result<()> {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let version = result.get("version").and_then(Value::as_u64).unwrap_or(0);
+            let claimed = result
+                .get("claimed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
 
-            println!("Hashed {file_count} files");
-            println!("Stored to DHT");
-            println!("Version: {version}");
-            println!("Published {name}.lat v{version}");
+            if claimed {
+                println!("Auto-claimed {name}.lat");
+            }
+            println!("Published {name}.lat v{version} ({file_count} files)");
         }
         Command::Fetch { name, out } => {
             let out_dir = out.unwrap_or_else(|| PathBuf::from(&name));
@@ -395,11 +430,7 @@ fn site_name_for_dir(site_dir: &Path) -> Result<String> {
         }
     }
 
-    site_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("failed to derive site name from {}", site_dir.display()))
+    bail!("no name specified — use --name <name> or add \"name\" to lattice.json")
 }
 
 fn load_identity_public_key_hex() -> Result<String> {

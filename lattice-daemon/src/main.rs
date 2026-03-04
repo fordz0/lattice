@@ -54,7 +54,8 @@ struct PublishTask {
     remaining: u32,
     failed: Option<String>,
     version: u64,
-    file_count: u32,
+    file_count: usize,
+    claimed: bool,
 }
 
 struct GetSiteTask {
@@ -83,7 +84,7 @@ enum GetSiteQuery {
 
 struct PreparedPublish {
     version: u64,
-    file_count: u32,
+    file_count: usize,
     records: Vec<(String, Vec<u8>)>,
 }
 
@@ -118,6 +119,13 @@ struct PendingPublishOwnershipCheck {
 }
 
 struct PendingPublishVersionCheck {
+    name: String,
+    site_dir: String,
+    respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
+    claimed: bool,
+}
+
+struct PendingPublishClaimPut {
     name: String,
     site_dir: String,
     respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
@@ -267,6 +275,8 @@ async fn main() -> Result<()> {
     let mut pending_name_probes: HashMap<kad::QueryId, PendingNameProbe> = HashMap::new();
     let mut pending_publish_checks: HashMap<kad::QueryId, PendingPublishOwnershipCheck> =
         HashMap::new();
+    let mut pending_publish_claim_put: HashMap<kad::QueryId, PendingPublishClaimPut> =
+        HashMap::new();
     let mut pending_publish_version_checks: HashMap<kad::QueryId, PendingPublishVersionCheck> =
         HashMap::new();
 
@@ -313,6 +323,7 @@ async fn main() -> Result<()> {
                         }
                         RpcCommand::PublishSite { name, site_dir, respond_to } => {
                             if pending_publish_checks.len()
+                                + pending_publish_claim_put.len()
                                 + pending_publish_version_checks.len()
                                 + publish_tasks.len()
                                 >= MAX_CONCURRENT_PUBLISH
@@ -480,6 +491,7 @@ async fn main() -> Result<()> {
                     &mut pending_claim_put,
                     &mut pending_name_probes,
                     &mut pending_publish_checks,
+                    &mut pending_publish_claim_put,
                     &mut pending_publish_version_checks,
                     &mut publish_tasks,
                     &mut publish_query_to_task,
@@ -505,6 +517,7 @@ fn handle_swarm_event(
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
     pending_name_probes: &mut HashMap<kad::QueryId, PendingNameProbe>,
     pending_publish_checks: &mut HashMap<kad::QueryId, PendingPublishOwnershipCheck>,
+    pending_publish_claim_put: &mut HashMap<kad::QueryId, PendingPublishClaimPut>,
     pending_publish_version_checks: &mut HashMap<kad::QueryId, PendingPublishVersionCheck>,
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
@@ -592,9 +605,42 @@ fn handle_swarm_event(
                                 None => Ok(PublishSiteOk {
                                     version: task.version,
                                     file_count: task.file_count,
+                                    claimed: task.claimed,
                                 }),
                             };
                             let _ = task.respond_to.send(response);
+                        }
+                    }
+                } else if let Some(pending) = pending_publish_claim_put.remove(&id) {
+                    match result {
+                        Ok(ok) => {
+                            info!(key = ?ok.key, name = %pending.name, "kademlia auto-claim put_record succeeded");
+                            let mut guard = match owned_names.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => {
+                                    error!("owned_names mutex poisoned — recovering");
+                                    poisoned.into_inner()
+                                }
+                            };
+                            guard.insert(pending.name.clone());
+                            info!(name = %pending.name, "name was unclaimed — auto-claimed before publish");
+                            let query_id = dht::get_record(
+                                &mut swarm.behaviour_mut().kademlia,
+                                format!("site:{}", pending.name),
+                            );
+                            pending_publish_version_checks.insert(
+                                query_id,
+                                PendingPublishVersionCheck {
+                                    name: pending.name,
+                                    site_dir: pending.site_dir,
+                                    respond_to: pending.respond_to,
+                                    claimed: true,
+                                },
+                            );
+                        }
+                        Err(err) => {
+                            warn!(name = %pending.name, error = %err, "kademlia auto-claim put_record failed");
+                            let _ = pending.respond_to.send(Err(err.to_string()));
                         }
                     }
                 } else if let Some(task) = pending_claim_put.remove(&id) {
@@ -671,31 +717,49 @@ fn handle_swarm_event(
                                     name: pending.name,
                                     site_dir: pending.site_dir,
                                     respond_to: pending.respond_to,
+                                    claimed: false,
                                 },
                             );
                         }
                         Ok(PublishNameOwnership::Unclaimed) => {
-                            warn!(
-                                name = %pending.name,
-                                "publishing unclaimed name; claim it for permanent ownership"
+                            let record = NameRecord::new_signed(
+                                local_pubkey_hex.to_string(),
+                                &pending.name,
+                                site_signing_key,
                             );
-                            let query_id = dht::get_record(
+                            let payload = match serde_json::to_string(&record) {
+                                Ok(payload) => payload,
+                                Err(err) => {
+                                    let _ = pending
+                                        .respond_to
+                                        .send(Err(format!("failed to encode name record: {err}")));
+                                    return;
+                                }
+                            };
+                            match dht::put_record(
                                 &mut swarm.behaviour_mut().kademlia,
-                                format!("site:{}", pending.name),
-                            );
-                            pending_publish_version_checks.insert(
-                                query_id,
-                                PendingPublishVersionCheck {
-                                    name: pending.name,
-                                    site_dir: pending.site_dir,
-                                    respond_to: pending.respond_to,
-                                },
-                            );
+                                format!("name:{}", pending.name),
+                                payload,
+                            ) {
+                                Ok(query_id) => {
+                                    pending_publish_claim_put.insert(
+                                        query_id,
+                                        PendingPublishClaimPut {
+                                            name: pending.name,
+                                            site_dir: pending.site_dir,
+                                            respond_to: pending.respond_to,
+                                        },
+                                    );
+                                }
+                                Err(err) => {
+                                    let _ = pending.respond_to.send(Err(err.to_string()));
+                                }
+                            }
                         }
                         Ok(PublishNameOwnership::OwnedByOther) => {
-                            let _ = pending.respond_to.send(Err(
-                                "you do not own this name — claim it first with: lattice name claim <name>".to_string(),
-                            ));
+                            let _ = pending
+                                .respond_to
+                                .send(Err("name already claimed by another key".to_string()));
                         }
                         Err(err) => {
                             let _ = pending.respond_to.send(Err(err));
@@ -721,6 +785,7 @@ fn handle_swarm_event(
                                             start_publish_task(
                                                 swarm,
                                                 prepared,
+                                                pending.claimed,
                                                 pending.respond_to,
                                                 publish_tasks,
                                                 publish_query_to_task,
@@ -731,6 +796,7 @@ fn handle_swarm_event(
                                         start_publish_task(
                                             swarm,
                                             prepared,
+                                            pending.claimed,
                                             pending.respond_to,
                                             publish_tasks,
                                             publish_query_to_task,
@@ -916,6 +982,7 @@ fn current_dht_site_version(
 fn start_publish_task(
     swarm: &mut Swarm<LatticeBehaviour>,
     prepared: PreparedPublish,
+    claimed: bool,
     respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
@@ -930,6 +997,7 @@ fn start_publish_task(
         failed: None,
         version: prepared.version,
         file_count: prepared.file_count,
+        claimed,
     };
 
     for (key, value) in prepared.records {
@@ -952,6 +1020,7 @@ fn start_publish_task(
             None => Ok(PublishSiteOk {
                 version: task.version,
                 file_count: task.file_count,
+                claimed: task.claimed,
             }),
         };
         let _ = task.respond_to.send(response);
@@ -1432,7 +1501,7 @@ fn prepare_publish(
 
     Ok(PreparedPublish {
         version: manifest.version,
-        file_count: manifest.files.len() as u32,
+        file_count: manifest.files.len(),
         records,
     })
 }
