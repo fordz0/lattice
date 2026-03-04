@@ -6,11 +6,29 @@ browser.runtime.onInstalled.addListener(function(details) {
   }
 });
 
+browser.webRequest.onBeforeRequest.addListener(
+  function(requestInfo) {
+    try {
+      var url = new URL(requestInfo.url);
+      if (url.protocol === 'https:' && url.hostname && url.hostname.endsWith('.lat')) {
+        url.protocol = 'http:';
+        return { redirectUrl: url.toString() };
+      }
+    } catch (_e) {
+      // Ignore parse errors and continue.
+    }
+
+    return {};
+  },
+  { urls: ['https://*.lat/*', 'https://*.lat'], types: ['main_frame', 'sub_frame'] },
+  ['blocking']
+);
+
 browser.proxy.onRequest.addListener(
   function(requestInfo) {
     try {
       var url = new URL(requestInfo.url);
-      if (url.hostname && url.hostname.endsWith('.lat')) {
+      if (url.protocol === 'http:' && url.hostname && url.hostname.endsWith('.lat')) {
         return {
           type: 'http',
           host: '127.0.0.1',

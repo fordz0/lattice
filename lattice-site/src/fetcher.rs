@@ -11,5 +11,5 @@ pub struct SiteBlock {
 }
 
 pub async fn fetch_site(_name: &str) -> Result<Vec<SiteBlock>> {
-    todo!("fetching site blocks from peers is not implemented yet");
+    Err(anyhow::anyhow!("fetch not yet implemented"))
 }

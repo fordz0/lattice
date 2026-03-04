@@ -6,7 +6,7 @@ use lattice_daemon::config::load_or_create_config;
 use lattice_daemon::dht;
 use lattice_daemon::http_server;
 use lattice_daemon::names::NameRecord;
-use lattice_daemon::node::load_or_create_identity;
+use lattice_daemon::node::{load_or_create_identity, load_or_create_site_signing_key};
 use lattice_daemon::rpc::{
     self, GetSiteResponse, NodeInfoResponse, PublishSiteOk, RpcCommand, SiteFile,
 };
@@ -23,6 +23,7 @@ use libp2p::mdns;
 use libp2p::relay;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, Swarm};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -31,6 +32,11 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
+
+const MAX_CONCURRENT_GET_SITE: usize = 50;
+const MAX_CONCURRENT_PUBLISH: usize = 10;
+const MAX_GET_SITE_FILES: usize = 1000;
+const MAX_GET_SITE_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(NetworkBehaviour)]
 struct LatticeBehaviour {
@@ -53,14 +59,20 @@ struct PublishTask {
 
 struct GetSiteTask {
     respond_to: oneshot::Sender<Result<GetSiteResponse, String>>,
+    requested_name: String,
     manifest: Option<SiteManifest>,
     next_index: usize,
+    total_bytes: u64,
     files: Vec<SiteFile>,
 }
 
 enum GetSiteQuery {
     Manifest {
         task_id: u64,
+    },
+    NameOwner {
+        task_id: u64,
+        name: String,
     },
     Block {
         task_id: u64,
@@ -91,6 +103,26 @@ struct PendingClaimPut {
     respond_to: oneshot::Sender<Result<(), String>>,
 }
 
+struct PendingNameProbe {
+    name: String,
+    pubkey_hex: String,
+    respond_to: oneshot::Sender<Result<(), String>>,
+    probe_count: u32,
+    found_owner: bool,
+}
+
+struct PendingPublishOwnershipCheck {
+    name: String,
+    site_dir: String,
+    respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
+}
+
+struct PendingPublishVersionCheck {
+    name: String,
+    site_dir: String,
+    respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -98,9 +130,17 @@ async fn main() -> Result<()> {
         .init();
 
     let config = load_or_create_config()?;
+    let had_separate_site_key = config.data_dir.join("site_signing.key").exists();
     let node_identity = load_or_create_identity(&config.data_dir)?;
-    let site_signing_key = load_site_signing_key(&config.data_dir)?;
+    let site_signing_key = load_or_create_site_signing_key(&config.data_dir)?;
+    if !had_separate_site_key {
+        warn!(
+            "first run: generated new site signing key separate from p2p identity. Re-claim your names with: lattice name claim <name>"
+        );
+    }
     let local_pubkey_hex = hex::encode(site_signing_key.verifying_key().to_bytes());
+    info!("site signing key loaded from site_signing.key");
+    info!("your publisher key is: {}", local_pubkey_hex);
     let owned_names: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let peer_id = node_identity.peer_id;
@@ -166,7 +206,7 @@ async fn main() -> Result<()> {
     let heartbeat_rpc_tx = rpc_tx.clone();
     let heartbeat_owned_names = Arc::clone(&owned_names);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
             let (tx, rx) = oneshot::channel();
             let names = if heartbeat_rpc_tx
@@ -180,10 +220,14 @@ async fn main() -> Result<()> {
             };
 
             let names = if names.is_empty() {
-                match heartbeat_owned_names.lock() {
-                    Ok(guard) => guard.iter().cloned().collect::<Vec<_>>(),
-                    Err(_) => Vec::new(),
-                }
+                let guard = match heartbeat_owned_names.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        error!("owned_names mutex poisoned — recovering");
+                        poisoned.into_inner()
+                    }
+                };
+                guard.iter().cloned().collect::<Vec<_>>()
             } else {
                 names
             };
@@ -210,7 +254,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
         }
     });
 
@@ -219,8 +263,12 @@ async fn main() -> Result<()> {
     let mut pending_get_text: HashMap<kad::QueryId, PendingTextQuery> = HashMap::new();
     let mut pending_get_block: HashMap<kad::QueryId, oneshot::Sender<Option<String>>> =
         HashMap::new();
-    let mut pending_claim_get: HashMap<kad::QueryId, PendingClaimGet> = HashMap::new();
     let mut pending_claim_put: HashMap<kad::QueryId, PendingClaimPut> = HashMap::new();
+    let mut pending_name_probes: HashMap<kad::QueryId, PendingNameProbe> = HashMap::new();
+    let mut pending_publish_checks: HashMap<kad::QueryId, PendingPublishOwnershipCheck> =
+        HashMap::new();
+    let mut pending_publish_version_checks: HashMap<kad::QueryId, PendingPublishVersionCheck> =
+        HashMap::new();
 
     let mut publish_tasks: HashMap<u64, PublishTask> = HashMap::new();
     let mut publish_query_to_task: HashMap<kad::QueryId, u64> = HashMap::new();
@@ -264,50 +312,38 @@ async fn main() -> Result<()> {
                             );
                         }
                         RpcCommand::PublishSite { name, site_dir, respond_to } => {
-                            match prepare_publish(&name, Path::new(&site_dir), &site_signing_key) {
-                                Ok(prepared) => {
-                                    let task_id = next_publish_task_id;
-                                    next_publish_task_id = next_publish_task_id.saturating_add(1);
-
-                                    let mut task = PublishTask {
-                                        respond_to,
-                                        remaining: 0,
-                                        failed: None,
-                                        version: prepared.version,
-                                        file_count: prepared.file_count,
-                                    };
-
-                                    for (key, value) in prepared.records {
-                                        match dht::put_record_bytes(&mut swarm.behaviour_mut().kademlia, key, value) {
-                                            Ok(query_id) => {
-                                                task.remaining = task.remaining.saturating_add(1);
-                                                publish_query_to_task.insert(query_id, task_id);
-                                            }
-                                            Err(err) => {
-                                                if task.failed.is_none() {
-                                                    task.failed = Some(err.to_string());
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if task.remaining == 0 {
-                                        let response = match task.failed {
-                                            Some(err) => Err(err),
-                                            None => Ok(PublishSiteOk {
-                                                version: task.version,
-                                                file_count: task.file_count,
-                                            }),
-                                        };
-                                        let _ = task.respond_to.send(response);
-                                    } else {
-                                        publish_tasks.insert(task_id, task);
-                                    }
-                                }
-                                Err(err) => {
-                                    let _ = respond_to.send(Err(err.to_string()));
-                                }
+                            if pending_publish_checks.len()
+                                + pending_publish_version_checks.len()
+                                + publish_tasks.len()
+                                >= MAX_CONCURRENT_PUBLISH
+                            {
+                                let _ = respond_to
+                                    .send(Err("too many concurrent publish tasks".to_string()));
+                                continue;
                             }
+                            if let Err(err) = validate_name(&name) {
+                                let _ = respond_to.send(Err(err));
+                                continue;
+                            }
+                            let canonical_site_dir = match validate_site_dir(&site_dir) {
+                                Ok(path) => path,
+                                Err(err) => {
+                                    let _ = respond_to.send(Err(err));
+                                    continue;
+                                }
+                            };
+                            let query_id = dht::get_record(
+                                &mut swarm.behaviour_mut().kademlia,
+                                format!("name:{name}"),
+                            );
+                            pending_publish_checks.insert(
+                                query_id,
+                                PendingPublishOwnershipCheck {
+                                    name,
+                                    site_dir: canonical_site_dir.to_string_lossy().into_owned(),
+                                    respond_to,
+                                },
+                            );
                         }
                         RpcCommand::GetSiteManifest { name, respond_to } => {
                             let key = format!("site:{name}");
@@ -325,13 +361,20 @@ async fn main() -> Result<()> {
                             pending_get_block.insert(query_id, respond_to);
                         }
                         RpcCommand::GetSite { name, respond_to } => {
+                            if get_site_tasks.len() >= MAX_CONCURRENT_GET_SITE {
+                                let _ = respond_to
+                                    .send(Err("too many concurrent requests".to_string()));
+                                continue;
+                            }
                             let task_id = next_get_site_task_id;
                             next_get_site_task_id = next_get_site_task_id.saturating_add(1);
 
                             let task = GetSiteTask {
                                 respond_to,
+                                requested_name: name.clone(),
                                 manifest: None,
                                 next_index: 0,
+                                total_bytes: 0,
                                 files: Vec::new(),
                             };
 
@@ -344,8 +387,8 @@ async fn main() -> Result<()> {
                             pubkey_hex,
                             respond_to,
                         } => {
-                            if name.trim().is_empty() {
-                                let _ = respond_to.send(Err("name cannot be empty".to_string()));
+                            if let Err(err) = validate_name(&name) {
+                                let _ = respond_to.send(Err(err));
                                 continue;
                             }
 
@@ -364,22 +407,65 @@ async fn main() -> Result<()> {
                                 &mut swarm.behaviour_mut().kademlia,
                                 format!("name:{name}"),
                             );
-                            pending_claim_get.insert(
+                            pending_name_probes.insert(
                                 query_id,
-                                PendingClaimGet {
+                                PendingNameProbe {
                                     name,
                                     pubkey_hex: effective_pubkey,
                                     respond_to,
+                                    probe_count: 0,
+                                    found_owner: false,
                                 },
                             );
                         }
                         RpcCommand::ListNames { respond_to } => {
-                            let mut names = match owned_names.lock() {
-                                Ok(guard) => guard.iter().cloned().collect::<Vec<_>>(),
-                                Err(_) => Vec::new(),
+                            let guard = match owned_names.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => {
+                                    error!("owned_names mutex poisoned — recovering");
+                                    poisoned.into_inner()
+                                }
                             };
+                            let mut names = guard.iter().cloned().collect::<Vec<_>>();
                             names.sort_unstable();
                             let _ = respond_to.send(names);
+                        }
+                        RpcCommand::RetryNameProbe {
+                            name,
+                            pubkey_hex,
+                            probe_count,
+                            respond_to,
+                        } => {
+                            if let Err(err) = validate_name(&name) {
+                                let _ = respond_to.send(Err(err));
+                                continue;
+                            }
+
+                            let effective_pubkey = if pubkey_hex.is_empty() {
+                                local_pubkey_hex.clone()
+                            } else if pubkey_hex == local_pubkey_hex {
+                                pubkey_hex
+                            } else {
+                                let _ = respond_to.send(Err(
+                                    "name already claimed by another key".to_string(),
+                                ));
+                                continue;
+                            };
+
+                            let query_id = dht::get_record(
+                                &mut swarm.behaviour_mut().kademlia,
+                                format!("name:{name}"),
+                            );
+                            pending_name_probes.insert(
+                                query_id,
+                                PendingNameProbe {
+                                    name,
+                                    pubkey_hex: effective_pubkey,
+                                    respond_to,
+                                    probe_count,
+                                    found_owner: false,
+                                },
+                            );
                         }
                     }
                 }
@@ -391,13 +477,19 @@ async fn main() -> Result<()> {
                     &mut pending_put,
                     &mut pending_get_text,
                     &mut pending_get_block,
-                    &mut pending_claim_get,
                     &mut pending_claim_put,
+                    &mut pending_name_probes,
+                    &mut pending_publish_checks,
+                    &mut pending_publish_version_checks,
                     &mut publish_tasks,
                     &mut publish_query_to_task,
+                    &mut next_publish_task_id,
                     &mut get_site_tasks,
                     &mut get_site_queries,
                     &owned_names,
+                    &rpc_tx,
+                    &site_signing_key,
+                    &local_pubkey_hex,
                 );
             }
         }
@@ -410,13 +502,19 @@ fn handle_swarm_event(
     pending_put: &mut HashMap<kad::QueryId, oneshot::Sender<Result<(), String>>>,
     pending_get_text: &mut HashMap<kad::QueryId, PendingTextQuery>,
     pending_get_block: &mut HashMap<kad::QueryId, oneshot::Sender<Option<String>>>,
-    pending_claim_get: &mut HashMap<kad::QueryId, PendingClaimGet>,
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
+    pending_name_probes: &mut HashMap<kad::QueryId, PendingNameProbe>,
+    pending_publish_checks: &mut HashMap<kad::QueryId, PendingPublishOwnershipCheck>,
+    pending_publish_version_checks: &mut HashMap<kad::QueryId, PendingPublishVersionCheck>,
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
+    next_publish_task_id: &mut u64,
     get_site_tasks: &mut HashMap<u64, GetSiteTask>,
     get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
     owned_names: &Arc<Mutex<HashSet<String>>>,
+    rpc_tx: &mpsc::Sender<RpcCommand>,
+    site_signing_key: &SigningKey,
+    local_pubkey_hex: &str,
 ) {
     match event {
         libp2p::swarm::SwarmEvent::ConnectionEstablished {
@@ -479,9 +577,16 @@ fn handle_swarm_event(
                         }
 
                         if task.remaining == 0 {
-                            let task = publish_tasks
-                                .remove(&task_id)
-                                .expect("publish task should exist");
+                            let task = match publish_tasks.remove(&task_id) {
+                                Some(task) => task,
+                                None => {
+                                    error!(
+                                        task_id,
+                                        "publish task missing from map — internal error"
+                                    );
+                                    return;
+                                }
+                            };
                             let response = match task.failed {
                                 Some(err) => Err(err),
                                 None => Ok(PublishSiteOk {
@@ -496,9 +601,14 @@ fn handle_swarm_event(
                     match result {
                         Ok(ok) => {
                             info!(key = ?ok.key, name = %task.name, "kademlia claim_name put_record succeeded");
-                            if let Ok(mut guard) = owned_names.lock() {
-                                guard.insert(task.name.clone());
-                            }
+                            let mut guard = match owned_names.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => {
+                                    error!("owned_names mutex poisoned — recovering");
+                                    poisoned.into_inner()
+                                }
+                            };
+                            guard.insert(task.name.clone());
                             let _ = task.respond_to.send(Ok(()));
                         }
                         Err(err) => {
@@ -548,8 +658,161 @@ fn handle_swarm_event(
                             let _ = ch.send(None);
                         }
                     }
-                } else if let Some(claim) = pending_claim_get.remove(&id) {
-                    handle_claim_name_lookup_result(claim, result, swarm, pending_claim_put);
+                } else if let Some(pending) = pending_publish_checks.remove(&id) {
+                    match publish_name_ownership(&pending.name, result, local_pubkey_hex) {
+                        Ok(PublishNameOwnership::OwnedByLocal) => {
+                            let query_id = dht::get_record(
+                                &mut swarm.behaviour_mut().kademlia,
+                                format!("site:{}", pending.name),
+                            );
+                            pending_publish_version_checks.insert(
+                                query_id,
+                                PendingPublishVersionCheck {
+                                    name: pending.name,
+                                    site_dir: pending.site_dir,
+                                    respond_to: pending.respond_to,
+                                },
+                            );
+                        }
+                        Ok(PublishNameOwnership::Unclaimed) => {
+                            warn!(
+                                name = %pending.name,
+                                "publishing unclaimed name; claim it for permanent ownership"
+                            );
+                            let query_id = dht::get_record(
+                                &mut swarm.behaviour_mut().kademlia,
+                                format!("site:{}", pending.name),
+                            );
+                            pending_publish_version_checks.insert(
+                                query_id,
+                                PendingPublishVersionCheck {
+                                    name: pending.name,
+                                    site_dir: pending.site_dir,
+                                    respond_to: pending.respond_to,
+                                },
+                            );
+                        }
+                        Ok(PublishNameOwnership::OwnedByOther) => {
+                            let _ = pending.respond_to.send(Err(
+                                "you do not own this name — claim it first with: lattice name claim <name>".to_string(),
+                            ));
+                        }
+                        Err(err) => {
+                            let _ = pending.respond_to.send(Err(err));
+                        }
+                    }
+                } else if let Some(pending) = pending_publish_version_checks.remove(&id) {
+                    match current_dht_site_version(result) {
+                        Ok(dht_version) => {
+                            let baseline_version = dht_version.unwrap_or(0);
+                            match prepare_publish(
+                                &pending.name,
+                                Path::new(&pending.site_dir),
+                                site_signing_key,
+                                baseline_version,
+                            ) {
+                                Ok(prepared) => {
+                                    if let Some(current_version) = dht_version {
+                                        if current_version >= prepared.version {
+                                            let _ = pending.respond_to.send(Err(format!(
+                                                "version must be higher than current version {current_version}"
+                                            )));
+                                        } else {
+                                            start_publish_task(
+                                                swarm,
+                                                prepared,
+                                                pending.respond_to,
+                                                publish_tasks,
+                                                publish_query_to_task,
+                                                next_publish_task_id,
+                                            );
+                                        }
+                                    } else {
+                                        start_publish_task(
+                                            swarm,
+                                            prepared,
+                                            pending.respond_to,
+                                            publish_tasks,
+                                            publish_query_to_task,
+                                            next_publish_task_id,
+                                        );
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = pending.respond_to.send(Err(err.to_string()));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let _ = pending.respond_to.send(Err(err));
+                        }
+                    }
+                } else if let Some(mut probe) = pending_name_probes.remove(&id) {
+                    probe.probe_count = probe.probe_count.saturating_add(1);
+
+                    let mut probe_error: Option<String> = None;
+                    let found_active_owner = match &result {
+                        Ok(kad::GetRecordOk::FoundRecord(record)) => {
+                            if let Ok(value) = String::from_utf8(record.record.value.clone()) {
+                                if let Some(existing) =
+                                    parse_verified_name_record(&probe.name, &value)
+                                {
+                                    !existing.is_expired() && existing.key != probe.pubkey_hex
+                                } else {
+                                    probe_error = Some(
+                                        "invalid existing name record; refusing claim".to_string(),
+                                    );
+                                    false
+                                }
+                            } else {
+                                probe_error = Some(
+                                    "invalid existing name record; refusing claim".to_string(),
+                                );
+                                false
+                            }
+                        }
+                        Err(kad::GetRecordError::NotFound { .. }) => false,
+                        Err(err) => {
+                            probe_error = Some(format!("name lookup failed: {err}"));
+                            false
+                        }
+                        _ => false,
+                    };
+
+                    probe.found_owner |= found_active_owner;
+
+                    if let Some(err) = probe_error {
+                        let _ = probe.respond_to.send(Err(err));
+                    } else if probe.found_owner {
+                        let _ = probe
+                            .respond_to
+                            .send(Err("name already claimed by another key".to_string()));
+                    } else if probe.probe_count >= 3 {
+                        handle_claim_name_lookup_result(
+                            PendingClaimGet {
+                                name: probe.name,
+                                pubkey_hex: probe.pubkey_hex,
+                                respond_to: probe.respond_to,
+                            },
+                            result,
+                            swarm,
+                            pending_claim_put,
+                            site_signing_key,
+                        );
+                    } else {
+                        let rpc_tx_for_retry = rpc_tx.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            let _ = rpc_tx_for_retry
+                                .send(RpcCommand::RetryNameProbe {
+                                    name: probe.name,
+                                    pubkey_hex: probe.pubkey_hex,
+                                    probe_count: probe.probe_count,
+                                    respond_to: probe.respond_to,
+                                })
+                                .await;
+                        });
+                    }
                 } else if let Some(query) = get_site_queries.remove(&id) {
                     handle_get_site_query_result(
                         query,
@@ -599,19 +862,169 @@ fn handle_swarm_event(
     }
 }
 
+enum PublishNameOwnership {
+    OwnedByLocal,
+    Unclaimed,
+    OwnedByOther,
+}
+
+fn publish_name_ownership(
+    name: &str,
+    result: Result<kad::GetRecordOk, kad::GetRecordError>,
+    local_pubkey_hex: &str,
+) -> Result<PublishNameOwnership, String> {
+    match result {
+        Ok(kad::GetRecordOk::FoundRecord(record)) => {
+            let value = String::from_utf8(record.record.value)
+                .map_err(|_| "invalid ownership record for name".to_string())?;
+
+            if let Some(existing) = parse_verified_name_record(name, &value) {
+                if existing.is_expired() {
+                    return Ok(PublishNameOwnership::Unclaimed);
+                }
+                if existing.key == local_pubkey_hex {
+                    return Ok(PublishNameOwnership::OwnedByLocal);
+                }
+                return Ok(PublishNameOwnership::OwnedByOther);
+            }
+
+            Err("invalid ownership record for name".to_string())
+        }
+        Ok(_) => Ok(PublishNameOwnership::Unclaimed),
+        Err(kad::GetRecordError::NotFound { .. }) => Ok(PublishNameOwnership::Unclaimed),
+        Err(err) => Err(format!("failed to resolve name ownership: {err}")),
+    }
+}
+
+fn current_dht_site_version(
+    result: Result<kad::GetRecordOk, kad::GetRecordError>,
+) -> Result<Option<u64>, String> {
+    match result {
+        Ok(kad::GetRecordOk::FoundRecord(record)) => {
+            let value = String::from_utf8(record.record.value)
+                .map_err(|_| "invalid site manifest record".to_string())?;
+            let manifest: SiteManifest = serde_json::from_str(&value)
+                .map_err(|_| "invalid site manifest record".to_string())?;
+            Ok(Some(manifest.version))
+        }
+        Ok(_) => Ok(None),
+        Err(kad::GetRecordError::NotFound { .. }) => Ok(None),
+        Err(err) => Err(format!("failed to read current site version: {err}")),
+    }
+}
+
+fn start_publish_task(
+    swarm: &mut Swarm<LatticeBehaviour>,
+    prepared: PreparedPublish,
+    respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
+    publish_tasks: &mut HashMap<u64, PublishTask>,
+    publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
+    next_publish_task_id: &mut u64,
+) {
+    let task_id = *next_publish_task_id;
+    *next_publish_task_id = (*next_publish_task_id).saturating_add(1);
+
+    let mut task = PublishTask {
+        respond_to,
+        remaining: 0,
+        failed: None,
+        version: prepared.version,
+        file_count: prepared.file_count,
+    };
+
+    for (key, value) in prepared.records {
+        match dht::put_record_bytes(&mut swarm.behaviour_mut().kademlia, key, value) {
+            Ok(query_id) => {
+                task.remaining = task.remaining.saturating_add(1);
+                publish_query_to_task.insert(query_id, task_id);
+            }
+            Err(err) => {
+                if task.failed.is_none() {
+                    task.failed = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    if task.remaining == 0 {
+        let response = match task.failed {
+            Some(err) => Err(err),
+            None => Ok(PublishSiteOk {
+                version: task.version,
+                file_count: task.file_count,
+            }),
+        };
+        let _ = task.respond_to.send(response);
+    } else {
+        publish_tasks.insert(task_id, task);
+    }
+}
+
+fn parse_verified_name_record(name: &str, value: &str) -> Option<NameRecord> {
+    let record: NameRecord = serde_json::from_str(value).ok()?;
+    if !record.verify(name) {
+        return None;
+    }
+    if record.heartbeat_at < record.claimed_at {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if record.heartbeat_at > now.saturating_add(300) {
+        return None;
+    }
+    Some(record)
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("name cannot be empty".to_string());
+    }
+    if name.len() > 63 {
+        return Err("name must be 63 characters or fewer".to_string());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("name may only contain lowercase letters, digits, and hyphens".to_string());
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return Err("name cannot start or end with a hyphen".to_string());
+    }
+    Ok(())
+}
+
+fn validate_site_dir(site_dir: &str) -> Result<std::path::PathBuf, String> {
+    let path = Path::new(site_dir);
+    if !path.is_absolute() {
+        return Err("site_dir must be an absolute path".to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("invalid site_dir: {e}"))?;
+    if !canonical.is_dir() {
+        return Err("site_dir must be a directory".to_string());
+    }
+    Ok(canonical)
+}
+
 fn normalize_get_record_value(key: &str, value: String) -> Option<String> {
     if !key.starts_with("name:") {
         return Some(value);
     }
 
-    if let Ok(record) = serde_json::from_str::<NameRecord>(&value) {
+    let name = key.strip_prefix("name:")?;
+    if let Some(record) = parse_verified_name_record(name, &value) {
         if record.is_expired() {
             return None;
         }
         return Some(record.key);
     }
 
-    Some(value)
+    None
 }
 
 fn handle_claim_name_lookup_result(
@@ -619,6 +1032,7 @@ fn handle_claim_name_lookup_result(
     result: Result<kad::GetRecordOk, kad::GetRecordError>,
     swarm: &mut Swarm<LatticeBehaviour>,
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
+    site_signing_key: &SigningKey,
 ) {
     let PendingClaimGet {
         name,
@@ -626,7 +1040,7 @@ fn handle_claim_name_lookup_result(
         respond_to,
     } = claim;
 
-    let mut record_to_store = NameRecord::new(pubkey_hex.clone());
+    let mut record_to_store = NameRecord::new_signed(pubkey_hex.clone(), &name, site_signing_key);
 
     if let Ok(kad::GetRecordOk::FoundRecord(record)) = result {
         let existing_value = match String::from_utf8(record.record.value) {
@@ -637,19 +1051,16 @@ fn handle_claim_name_lookup_result(
             }
         };
 
-        if let Ok(mut existing_record) = serde_json::from_str::<NameRecord>(&existing_value) {
+        if let Some(mut existing_record) = parse_verified_name_record(&name, &existing_value) {
             if !existing_record.is_expired() && existing_record.key != pubkey_hex {
                 let _ = respond_to.send(Err("name already claimed".to_string()));
                 return;
             }
 
             if existing_record.key == pubkey_hex {
-                existing_record.refresh();
+                existing_record.refresh_signed(&name, site_signing_key);
                 record_to_store = existing_record;
             }
-        } else if existing_value != pubkey_hex {
-            let _ = respond_to.send(Err("name already claimed".to_string()));
-            return;
         }
     }
 
@@ -692,18 +1103,31 @@ fn handle_get_site_query_result(
 
             let manifest = match result {
                 Ok(kad::GetRecordOk::FoundRecord(record)) => {
-                    match String::from_utf8(record.record.value)
-                        .ok()
-                        .and_then(|json| serde_json::from_str::<SiteManifest>(&json).ok())
-                    {
-                        Some(manifest) => manifest,
-                        None => {
+                    let value = match String::from_utf8(record.record.value) {
+                        Ok(value) => value,
+                        Err(_) => {
                             let _ = task
                                 .respond_to
                                 .send(Err("invalid site manifest".to_string()));
                             return;
                         }
+                    };
+                    let manifest = match serde_json::from_str::<SiteManifest>(&value) {
+                        Ok(manifest) => manifest,
+                        Err(_) => {
+                            let _ = task
+                                .respond_to
+                                .send(Err("invalid site manifest".to_string()));
+                            return;
+                        }
+                    };
+                    if let Err(err) = verify_manifest(&manifest) {
+                        let _ = task
+                            .respond_to
+                            .send(Err(format!("manifest signature invalid: {err}")));
+                        return;
                     }
+                    manifest
                 }
                 _ => {
                     let _ = task.respond_to.send(Err("site not found".to_string()));
@@ -711,9 +1135,99 @@ fn handle_get_site_query_result(
                 }
             };
 
+            if manifest.name != task.requested_name {
+                let _ = task
+                    .respond_to
+                    .send(Err("manifest name mismatch".to_string()));
+                return;
+            }
+            if manifest.files.len() > MAX_GET_SITE_FILES {
+                let _ = task
+                    .respond_to
+                    .send(Err("site exceeds maximum file count".to_string()));
+                return;
+            }
+            let declared_bytes = manifest
+                .files
+                .iter()
+                .fold(0_u64, |acc, file| acc.saturating_add(file.size));
+            if declared_bytes > MAX_GET_SITE_TOTAL_BYTES {
+                let _ = task
+                    .respond_to
+                    .send(Err("site exceeds maximum total size".to_string()));
+                return;
+            }
+
+            task.manifest = Some(manifest);
+
+            let query_id = dht::get_record(
+                &mut swarm.behaviour_mut().kademlia,
+                format!("name:{}", task.requested_name),
+            );
+            get_site_queries.insert(
+                query_id,
+                GetSiteQuery::NameOwner {
+                    task_id,
+                    name: task.requested_name.clone(),
+                },
+            );
+            get_site_tasks.insert(task_id, task);
+        }
+        GetSiteQuery::NameOwner { task_id, name } => {
+            let mut task = if let Some(task) = get_site_tasks.remove(&task_id) {
+                task
+            } else {
+                return;
+            };
+
+            let manifest = match task.manifest.as_ref() {
+                Some(manifest) => manifest,
+                None => {
+                    let _ = task
+                        .respond_to
+                        .send(Err("site task missing manifest".to_string()));
+                    return;
+                }
+            };
+
+            match result {
+                Ok(kad::GetRecordOk::FoundRecord(record)) => {
+                    if let Ok(value) = String::from_utf8(record.record.value) {
+                        if let Some(owner) = parse_verified_name_record(&name, &value) {
+                            if !owner.is_expired() && owner.key != manifest.publisher_key {
+                                let _ =
+                                    task.respond_to
+                                        .send(Err("manifest publisher does not match name owner"
+                                            .to_string()));
+                                return;
+                            }
+                        } else {
+                            let _ = task
+                                .respond_to
+                                .send(Err("invalid name ownership record".to_string()));
+                            return;
+                        }
+                    } else {
+                        let _ = task
+                            .respond_to
+                            .send(Err("invalid name ownership record".to_string()));
+                        return;
+                    }
+                }
+                Ok(_) | Err(kad::GetRecordError::NotFound { .. }) => {
+                    warn!(name = %name, "name record not found; serving unclaimed site");
+                }
+                Err(err) => {
+                    let _ = task
+                        .respond_to
+                        .send(Err(format!("failed to resolve name ownership: {err}")));
+                    return;
+                }
+            }
+
             if manifest.files.is_empty() {
                 let response = GetSiteResponse {
-                    name: manifest.name,
+                    name: manifest.name.clone(),
                     version: manifest.version,
                     files: Vec::new(),
                 };
@@ -722,7 +1236,6 @@ fn handle_get_site_query_result(
             }
 
             let first = manifest.files[0].clone();
-            task.manifest = Some(manifest);
             task.next_index = 1;
 
             let query_id = dht::get_record_bytes(
@@ -759,6 +1272,23 @@ fn handle_get_site_query_result(
             };
 
             let raw_bytes = decode_block_storage(&stored).unwrap_or(stored);
+            let actual_hash = hex::encode(Sha256::digest(&raw_bytes));
+            if actual_hash != hash {
+                let _ = task.respond_to.send(Err(format!(
+                    "block hash mismatch for {}: expected {} got {}",
+                    path, hash, actual_hash
+                )));
+                return;
+            }
+            let next_total = task.total_bytes.saturating_add(raw_bytes.len() as u64);
+            if next_total > MAX_GET_SITE_TOTAL_BYTES {
+                let _ = task
+                    .respond_to
+                    .send(Err("site exceeds maximum total size".to_string()));
+                return;
+            }
+            task.total_bytes = next_total;
+
             task.files.push(SiteFile {
                 path: path.clone(),
                 contents: BASE64_STANDARD.encode(raw_bytes),
@@ -853,30 +1383,13 @@ fn hex_nibble(byte: u8) -> Result<u8> {
     }
 }
 
-fn load_site_signing_key(data_dir: &Path) -> Result<SigningKey> {
-    let key_path = data_dir.join("identity.key");
-    let bytes = fs::read(&key_path)
-        .with_context(|| format!("failed to read identity key {}", key_path.display()))?;
-
-    if bytes.len() != 32 {
-        bail!(
-            "invalid identity key length in {}: expected 32 bytes, got {}",
-            key_path.display(),
-            bytes.len()
-        );
-    }
-
-    let mut secret = [0_u8; 32];
-    secret.copy_from_slice(&bytes);
-    Ok(SigningKey::from_bytes(&secret))
-}
-
 fn prepare_publish(
     name: &str,
     site_dir: &Path,
     signing_key: &SigningKey,
+    dht_baseline_version: u64,
 ) -> Result<PreparedPublish> {
-    let (existing_version, rating) = match site_publisher::load_manifest(site_dir) {
+    let (local_existing_version, rating) = match site_publisher::load_manifest(site_dir) {
         Ok(existing) => {
             let rating = if existing.rating.is_empty() {
                 "general".to_string()
@@ -888,6 +1401,7 @@ fn prepare_publish(
         Err(_) => (0, "general".to_string()),
     };
 
+    let existing_version = local_existing_version.max(dht_baseline_version);
     let manifest =
         site_publisher::build_manifest(name, site_dir, signing_key, &rating, existing_version)?;
     verify_manifest(&manifest)?;

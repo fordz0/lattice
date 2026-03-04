@@ -7,6 +7,7 @@ use axum::Router;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{timeout, Duration};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::rpc::RpcCommand;
@@ -18,7 +19,7 @@ pub async fn start_http_server(port: u16, rpc_tx: mpsc::Sender<RpcCommand>) -> R
         .with_state(rpc_tx)
         .layer(CorsLayer::new().allow_origin(Any));
 
-    let listen_addr = format!("0.0.0.0:{port}");
+    let listen_addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await
         .with_context(|| format!("failed to bind HTTP server on {listen_addr}"))?;
@@ -44,26 +45,33 @@ async fn serve_site(
     let request_path = normalize_path(uri.path());
 
     let (resp_tx, resp_rx) = oneshot::channel();
-    if rpc_tx
-        .send(RpcCommand::GetSite {
+    let send_result = timeout(
+        Duration::from_secs(10),
+        rpc_tx.send(RpcCommand::GetSite {
             name: site_name,
             respond_to: resp_tx,
-        })
-        .await
-        .is_err()
-    {
-        return plain(StatusCode::BAD_GATEWAY, "lattice daemon error");
+        }),
+    )
+    .await;
+    match send_result {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => return plain(StatusCode::BAD_GATEWAY, "lattice daemon error"),
+        Err(_) => return plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"),
     }
 
-    let site = match resp_rx.await {
-        Ok(Ok(site)) => site,
-        Ok(Err(err)) => {
+    let site = match timeout(Duration::from_secs(20), resp_rx).await {
+        Err(_) => return plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"),
+        Ok(Ok(Ok(site))) => site,
+        Ok(Ok(Err(err))) => {
             if err == "site not found" {
                 return plain(StatusCode::NOT_FOUND, "site not found on Lattice");
             }
+            if err == "too many concurrent requests" {
+                return plain(StatusCode::SERVICE_UNAVAILABLE, "lattice daemon busy");
+            }
             return plain(StatusCode::BAD_GATEWAY, "lattice daemon error");
         }
-        Err(_) => return plain(StatusCode::BAD_GATEWAY, "lattice daemon error"),
+        Ok(Err(_)) => return plain(StatusCode::BAD_GATEWAY, "lattice daemon error"),
     };
 
     let file = match site.files.iter().find(|f| f.path == request_path) {

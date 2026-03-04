@@ -5,6 +5,8 @@ use jsonrpsee::RpcModule;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
+const RESERVED_PREFIXES: &[&str] = &["name:", "site:", "block:"];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeInfoResponse {
     pub peer_id: String,
@@ -69,6 +71,12 @@ pub enum RpcCommand {
     },
     ListNames {
         respond_to: oneshot::Sender<Vec<String>>,
+    },
+    RetryNameProbe {
+        name: String,
+        pubkey_hex: String,
+        probe_count: u32,
+        respond_to: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -149,6 +157,19 @@ pub async fn start_rpc_server(
 
     module.register_async_method("put_record", |params, ctx, _| async move {
         let PutRecordParams { key, value } = params.parse()?;
+
+        if let Some(name) = key.strip_prefix("name:") {
+            if let Err(err) = validate_name(name) {
+                return Err(internal_error(err));
+            }
+        }
+        if RESERVED_PREFIXES.iter().any(|p| key.starts_with(p)) {
+            return Err(internal_error(
+                "cannot write to reserved key prefix via put_record; use dedicated RPCs (claim_name, publish_site)"
+                    .to_string(),
+            ));
+        }
+
         let (resp_tx, resp_rx) = oneshot::channel();
 
         ctx.send(RpcCommand::PutRecord {
@@ -330,4 +351,23 @@ pub async fn start_rpc_server(
 
 fn internal_error(message: String) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32000, message, None::<()>)
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("name cannot be empty".to_string());
+    }
+    if name.len() > 63 {
+        return Err("name must be 63 characters or fewer".to_string());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("name may only contain lowercase letters, digits, and hyphens".to_string());
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return Err("name cannot start or end with a hyphen".to_string());
+    }
+    Ok(())
 }

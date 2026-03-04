@@ -118,8 +118,7 @@ async fn run() -> Result<()> {
         Command::Name { command } => match command {
             NameCommand::Claim { name } => {
                 let client = RpcClient::new(cli.rpc_port);
-                let owner_key = load_identity_public_key_hex()?;
-                let result = client.claim_name(&name, &owner_key).await?;
+                let result = client.claim_name(&name, "").await?;
 
                 let status = result
                     .get("status")
@@ -201,6 +200,7 @@ async fn run() -> Result<()> {
             println!("Hashed {file_count} files");
             println!("Stored to DHT");
             println!("Version: {version}");
+            println!("Published {name}.lat v{version}");
         }
         Command::Fetch { name, out } => {
             let out_dir = out.unwrap_or_else(|| PathBuf::from(&name));
@@ -236,7 +236,7 @@ async fn run() -> Result<()> {
                     );
                 }
 
-                let output_path = out_dir.join(&file.path);
+                let output_path = safe_join(&out_dir, &file.path)?;
                 if let Some(parent) = output_path.parent() {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -331,6 +331,12 @@ fn keygen() -> Result<()> {
 
     fs::write(&key_path, signing_key.to_bytes())
         .with_context(|| format!("failed to save key to {}", key_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
+            .context("failed to set key file permissions")?;
+    }
 
     println!("Public key: {public_key_hex}");
     println!("Saved secret key: {}", key_path.display());
@@ -423,6 +429,21 @@ fn lattice_data_dir() -> Result<PathBuf> {
     let base_dirs =
         BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
     Ok(base_dirs.home_dir().join(".lattice"))
+}
+
+fn safe_join(base: &Path, untrusted: &str) -> Result<PathBuf> {
+    let path = Path::new(untrusted);
+    if path.is_absolute() {
+        bail!("unsafe path in manifest: {}", untrusted);
+    }
+
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            bail!("path traversal in manifest: {}", untrusted);
+        }
+    }
+
+    Ok(base.join(path))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

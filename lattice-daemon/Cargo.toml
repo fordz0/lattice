@@ -13,8 +13,10 @@ hex = "0.4"
 jsonrpsee = { version = "0.24", features = ["server"] }
 lattice-site = { path = "../lattice-site" }
 libp2p = { version = "0.56", features = ["tokio", "tcp", "quic", "noise", "yamux", "kad", "mdns", "gossipsub", "macros", "identify", "autonat", "relay", "dcutr"] }
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 toml = "1"
 tower = "0.4"

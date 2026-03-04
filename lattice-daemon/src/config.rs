@@ -17,8 +17,14 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let base_dirs = BaseDirs::new().expect("failed to locate user home directory");
-        let data_dir = base_dirs.home_dir().join(".lattice");
+        let data_dir = BaseDirs::new()
+            .map(|base_dirs| base_dirs.home_dir().join(".lattice"))
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|h| h.join(".lattice"))
+            })
+            .unwrap_or_else(|| PathBuf::from(".lattice"));
 
         Self {
             listen_port: 7779,

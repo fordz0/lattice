@@ -1,8 +1,16 @@
-use anyhow::{Context, Result};
+// NOTE: breaking data-dir change:
+// Site publishing now uses a separate key file at ~/.lattice/site_signing.key.
+// Existing installs using identity.key for publishing must re-claim names with:
+// `lattice name claim <name>`.
+use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::SigningKey;
 use libp2p::identity;
 use libp2p::PeerId;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use std::fs;
 use std::path::Path;
+use tracing::info;
 
 pub struct NodeIdentity {
     pub keypair: identity::Keypair,
@@ -54,4 +62,40 @@ pub fn load_or_create_identity(data_dir: &Path) -> Result<NodeIdentity> {
 
     let peer_id = keypair.public().to_peer_id();
     Ok(NodeIdentity { keypair, peer_id })
+}
+
+pub fn load_or_create_site_signing_key(data_dir: &Path) -> Result<SigningKey> {
+    let key_path = data_dir.join("site_signing.key");
+
+    if key_path.exists() {
+        let bytes = fs::read(&key_path).context("failed to read site signing key")?;
+        let key_bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("invalid site signing key length"))?;
+        return Ok(SigningKey::from_bytes(&key_bytes));
+    }
+
+    fs::create_dir_all(data_dir)
+        .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+
+    let mut rng = OsRng;
+    let mut secret = [0_u8; 32];
+    rng.fill_bytes(&mut secret);
+    let signing_key = SigningKey::from_bytes(&secret);
+    fs::write(&key_path, signing_key.to_bytes())
+        .with_context(|| format!("failed to write site signing key {}", key_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "failed to set permissions on site signing key {}",
+                key_path.display()
+            )
+        })?;
+    }
+
+    info!(path = ?key_path, "generated new site signing key");
+    Ok(signing_key)
 }

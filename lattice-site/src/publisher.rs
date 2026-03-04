@@ -1,8 +1,11 @@
 use crate::manifest::{hash_file, sign_manifest, FileEntry, SiteManifest};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::path::Path;
 use walkdir::WalkDir;
+
+const MAX_SITE_FILES: usize = 1000;
+const MAX_SITE_BYTES: u64 = 100 * 1024 * 1024;
 
 pub fn build_manifest(
     name: &str,
@@ -12,6 +15,7 @@ pub fn build_manifest(
     existing_version: u64,
 ) -> Result<SiteManifest> {
     let mut files = Vec::new();
+    let mut total_bytes: u64 = 0;
 
     for entry in WalkDir::new(site_dir) {
         let entry = entry.with_context(|| format!("failed walking {}", site_dir.display()))?;
@@ -35,7 +39,14 @@ pub fn build_manifest(
             .metadata()
             .with_context(|| format!("failed to read metadata for {}", path.display()))?
             .len();
+        total_bytes = total_bytes.saturating_add(size);
+        if total_bytes > MAX_SITE_BYTES {
+            bail!("site exceeds maximum total size of 100MB");
+        }
 
+        if files.len() >= MAX_SITE_FILES {
+            bail!("site exceeds maximum file count of {MAX_SITE_FILES}");
+        }
         files.push(FileEntry {
             path: relative,
             hash,
@@ -45,9 +56,13 @@ pub fn build_manifest(
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
+    let version = existing_version
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("site version overflow"))?;
+
     let mut manifest = SiteManifest {
         name: name.to_string(),
-        version: existing_version + 1,
+        version,
         publisher_key: hex::encode(keypair.verifying_key().to_bytes()),
         rating: rating.to_string(),
         files,
