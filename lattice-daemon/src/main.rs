@@ -1959,43 +1959,49 @@ fn handle_get_site_query_result(
 
             match result {
                 Ok(kad::GetRecordOk::FoundRecord(record)) => {
-                    if let Ok(value) = String::from_utf8(record.record.value) {
-                        if let Some(owner) = parse_verified_name_record(&name, &value) {
-                            if !owner.is_expired() && owner.key != manifest_publisher_key {
-                                let _ =
-                                    task.respond_to
-                                        .send(Err("manifest publisher does not match name owner"
-                                            .to_string()));
-                                return;
-                            }
-                        } else if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
-                            if legacy_owner_key != manifest_publisher_key {
-                                let _ =
-                                    task.respond_to
-                                        .send(Err("manifest publisher does not match name owner"
-                                            .to_string()));
-                                return;
-                            }
-                            warn!(
-                                name = %name,
-                                "using legacy unsigned name owner record for compatibility"
-                            );
-                        } else {
-                            warn!(name = %name, "invalid name ownership record; treating as unclaimed");
+                    let value = match String::from_utf8(record.record.value) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            let _ = task
+                                .respond_to
+                                .send(Err("invalid name ownership record".to_string()));
+                            return;
                         }
+                    };
+
+                    let owner_key = if let Some(owner) = parse_verified_name_record(&name, &value) {
+                        owner.key
+                    } else if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
+                        warn!(
+                            name = %name,
+                            "using legacy unsigned name owner record for compatibility"
+                        );
+                        legacy_owner_key
                     } else {
-                        warn!(name = %name, "invalid name record bytes; treating as unclaimed");
+                        let _ = task
+                            .respond_to
+                            .send(Err("invalid name ownership record".to_string()));
+                        return;
+                    };
+
+                    if owner_key != manifest_publisher_key {
+                        let _ = task.respond_to.send(Err(
+                            "manifest publisher does not match name owner".to_string(),
+                        ));
+                        return;
                     }
                 }
                 Ok(_) | Err(kad::GetRecordError::NotFound { .. }) => {
-                    warn!(name = %name, "name record not found; serving unclaimed site");
+                    let _ = task
+                        .respond_to
+                        .send(Err("name owner record missing".to_string()));
+                    return;
                 }
                 Err(err) => {
-                    warn!(
-                        name = %name,
-                        error = %err,
-                        "failed to resolve name ownership; serving site without ownership confirmation"
-                    );
+                    let _ = task
+                        .respond_to
+                        .send(Err(format!("failed to resolve name ownership: {err}")));
+                    return;
                 }
             }
 

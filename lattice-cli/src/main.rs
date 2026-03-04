@@ -82,6 +82,9 @@ impl fmt::Display for NameClaimedByOther {
 
 impl Error for NameClaimedByOther {}
 
+const MAX_FETCH_SITE_FILES: usize = 1000;
+const MAX_FETCH_SITE_BYTES: u64 = 100 * 1024 * 1024;
+
 #[tokio::main]
 async fn main() {
     let exit_code = match run().await {
@@ -252,6 +255,35 @@ async fn run() -> Result<()> {
                 .with_context(|| format!("failed to parse site manifest for {}.lat", name))?;
 
             verify_manifest(&manifest)?;
+            if manifest.name != name {
+                bail!(
+                    "manifest name mismatch: expected {}.lat, got {}.lat",
+                    name,
+                    manifest.name
+                );
+            }
+            if manifest.files.len() > MAX_FETCH_SITE_FILES {
+                bail!("site exceeds maximum file count");
+            }
+            let declared_bytes = manifest
+                .files
+                .iter()
+                .fold(0_u64, |acc, file| acc.saturating_add(file.size));
+            if declared_bytes > MAX_FETCH_SITE_BYTES {
+                bail!("site exceeds maximum total size");
+            }
+
+            let owner_result = client.get_record(&format!("name:{name}")).await?;
+            let owner_key = owner_result
+                .as_str()
+                .ok_or_else(|| anyhow!("name owner record missing or invalid for {}.lat", name))?;
+            if owner_key != manifest.publisher_key {
+                bail!(
+                    "manifest publisher does not match name owner for {}.lat",
+                    name
+                );
+            }
+
             fs::create_dir_all(&out_dir)
                 .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
 
@@ -506,7 +538,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         bail!("hex input length must be even");
     }
 

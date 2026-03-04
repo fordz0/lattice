@@ -20,6 +20,9 @@ use crate::rpc::RpcCommand;
 const RPC_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_MANIFEST_FILES: usize = 1000;
+const MAX_MANIFEST_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_HTTP_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
 
 static HTTP_REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -155,6 +158,12 @@ async fn fetch_manifest(
     if manifest.name != site_name {
         return Err(plain(StatusCode::BAD_GATEWAY, "manifest name mismatch"));
     }
+    if manifest.files.len() > MAX_MANIFEST_FILES {
+        return Err(plain(
+            StatusCode::BAD_GATEWAY,
+            "site exceeds maximum file count",
+        ));
+    }
 
     if let Err(err) = verify_manifest(&manifest) {
         warn!(name = %site_name, error = %err, "manifest signature invalid");
@@ -168,6 +177,16 @@ async fn fetch_manifest(
                 "invalid path in site manifest",
             ));
         }
+    }
+    let declared_bytes = manifest
+        .files
+        .iter()
+        .fold(0_u64, |acc, file| acc.saturating_add(file.size));
+    if declared_bytes > MAX_MANIFEST_TOTAL_BYTES {
+        return Err(plain(
+            StatusCode::BAD_GATEWAY,
+            "site exceeds maximum total size",
+        ));
     }
 
     let owner_key = match fetch_name_owner(rpc_tx, site_name).await? {
@@ -307,7 +326,16 @@ async fn fetch_file_range(
         .filter(|size| *size > 0)
         .unwrap_or(DEFAULT_CHUNK_SIZE_BYTES);
 
-    let mut out = Vec::with_capacity((range.end - range.start + 1) as usize);
+    let expected_len_u64 = range.end - range.start + 1;
+    if expected_len_u64 > MAX_HTTP_RESPONSE_BYTES {
+        return Err(plain(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "requested range too large",
+        ));
+    }
+    let expected_len = usize::try_from(expected_len_u64)
+        .map_err(|_| plain(StatusCode::PAYLOAD_TOO_LARGE, "requested range too large"))?;
+    let mut out = Vec::with_capacity(expected_len);
 
     for (chunk_index, block_hash) in block_hashes.iter().enumerate() {
         let chunk_start = if block_hashes.len() == 1 {
@@ -362,7 +390,6 @@ async fn fetch_file_range(
         out.extend_from_slice(&chunk_bytes[within_start..=within_end]);
     }
 
-    let expected_len = (range.end - range.start + 1) as usize;
     if out.len() != expected_len {
         return Err(plain(StatusCode::BAD_GATEWAY, "incomplete file range"));
     }
@@ -483,7 +510,13 @@ fn normalize_path(path: &str) -> Option<String> {
         return None;
     }
     for component in normalized_path.components() {
-        if matches!(component, std::path::Component::ParentDir) {
+        if matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::CurDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ) {
             return None;
         }
     }
@@ -650,7 +683,13 @@ fn is_safe_manifest_path(path: &str) -> bool {
         return false;
     }
     for component in path.components() {
-        if matches!(component, std::path::Component::ParentDir) {
+        if matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::CurDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ) {
             return false;
         }
     }
