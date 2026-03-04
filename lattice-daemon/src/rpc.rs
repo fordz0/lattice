@@ -85,6 +85,7 @@ pub enum RpcCommand {
         probe_count: u32,
         respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
     },
+    RepublishLocalRecords,
 }
 
 #[derive(Debug, Deserialize)]

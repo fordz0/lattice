@@ -10,7 +10,7 @@ pub fn new_kademlia(local_peer_id: PeerId) -> Behaviour<MemoryStore> {
     let store = MemoryStore::new(local_peer_id);
     let mut config = kad::Config::default();
     config.set_record_ttl(Some(Duration::from_secs(48 * 60 * 60)));
-    config.set_replication_interval(Some(Duration::from_secs(20 * 60 * 60)));
+    config.set_replication_interval(Some(Duration::from_secs(30 * 60)));
     config.set_provider_record_ttl(Some(Duration::from_secs(48 * 60 * 60)));
     let mut kad = Behaviour::with_config(local_peer_id, store, config);
     kad.set_mode(Some(kad::Mode::Server));

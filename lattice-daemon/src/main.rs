@@ -19,6 +19,7 @@ use libp2p::futures::StreamExt;
 use libp2p::gossipsub;
 use libp2p::identify;
 use libp2p::kad;
+use libp2p::kad::store::RecordStore as _;
 use libp2p::mdns;
 use libp2p::multiaddr::Protocol;
 use libp2p::relay;
@@ -540,6 +541,25 @@ async fn main() -> Result<()> {
                                 },
                             );
                         }
+                        RpcCommand::RepublishLocalRecords => {
+                            let local_records: Vec<kad::Record> = swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .store_mut()
+                                .records()
+                                .map(|r| r.into_owned())
+                                .collect();
+                            if !local_records.is_empty() {
+                                info!(count = local_records.len(), "republishing local DHT records");
+                                for record in local_records {
+                                    swarm
+                                        .behaviour_mut()
+                                        .kademlia
+                                        .put_record(record, kad::Quorum::One)
+                                        .ok();
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -698,22 +718,12 @@ fn handle_swarm_event(
                             info!(key = ?ok.key, "kademlia publish put_record succeeded");
                         }
                         Err(kad::PutRecordError::QuorumFailed { key, .. }) => {
-                            if task.connected_peers_at_start == 0 {
-                                warn!(
-                                    task_id,
-                                    key = ?key,
-                                    "put_record quorum failed with zero peers; record stored locally — continuing"
-                                );
-                            } else {
-                                let msg = format!(
-                                    "failed to replicate record {:?} to peers (quorum failed). try publish again after peers connect",
-                                    key
-                                );
-                                warn!(task_id, key = ?key, "{msg}");
-                                if task.failed.is_none() {
-                                    task.failed = Some(msg);
-                                }
-                            }
+                            warn!(
+                                task_id,
+                                key = ?key,
+                                peers_at_start = task.connected_peers_at_start,
+                                "put_record quorum failed; record stored locally and will replicate once peers are ready"
+                            );
                         }
                         Err(err) => {
                             warn!(task_id, error = %err, "kademlia publish put_record failed");
@@ -766,6 +776,7 @@ fn handle_swarm_event(
                             }
                         }
                         PublishQueryKind::Manifest => {
+                            let succeeded = task.failed.is_none();
                             let response = match task.failed {
                                 Some(err) => Err(err),
                                 None => Ok(PublishSiteOk {
@@ -775,6 +786,18 @@ fn handle_swarm_event(
                                 }),
                             };
                             let _ = task.respond_to.send(response);
+
+                            // If any records failed quorum, schedule a re-push after a short
+                            // delay to give relay/routing time to settle.
+                            if succeeded {
+                                let rpc_tx_retry = rpc_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(30)).await;
+                                    let _ = rpc_tx_retry
+                                        .send(RpcCommand::RepublishLocalRecords)
+                                        .await;
+                                });
+                            }
                         }
                     }
                 } else if let Some(pending) = pending_publish_claim_put.remove(&id) {
@@ -1132,6 +1155,15 @@ fn handle_swarm_event(
                             }
                         });
                     }
+
+                    // Re-push all locally stored records now that we have a relay address.
+                    // This ensures blocks and manifests published before the relay was ready
+                    // get replicated to the DHT and are reachable by other peers.
+                    info!(relay = %relay_peer_id, "relay reservation accepted — scheduling DHT record re-push");
+                    let rpc_tx_relay = rpc_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = rpc_tx_relay.send(RpcCommand::RepublishLocalRecords).await;
+                    });
                 }
                 _ => {}
             }
