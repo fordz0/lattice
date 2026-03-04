@@ -6,23 +6,27 @@ browser.runtime.onInstalled.addListener(function(details) {
   }
 });
 
-browser.webRequest.onBeforeRequest.addListener(
-  function(requestInfo) {
-    try {
-      var url = new URL(requestInfo.url);
-      if (url.protocol === 'https:' && url.hostname && url.hostname.endsWith('.lat')) {
-        url.protocol = 'http:';
-        return { redirectUrl: url.toString() };
+// Guard: webRequest may be unavailable if permission wasn't granted at install time.
+// The proxy listener below is the critical path; this is just for HTTPS→HTTP redirect.
+if (typeof browser.webRequest !== 'undefined') {
+  browser.webRequest.onBeforeRequest.addListener(
+    function(requestInfo) {
+      try {
+        var url = new URL(requestInfo.url);
+        if (url.protocol === 'https:' && url.hostname && url.hostname.endsWith('.lat')) {
+          url.protocol = 'http:';
+          return { redirectUrl: url.toString() };
+        }
+      } catch (_e) {
+        // Ignore parse errors and continue.
       }
-    } catch (_e) {
-      // Ignore parse errors and continue.
-    }
 
-    return {};
-  },
-  { urls: ['https://*.lat/*', 'https://*.lat'], types: ['main_frame', 'sub_frame'] },
-  ['blocking']
-);
+      return {};
+    },
+    { urls: ['https://*.lat/*', 'https://*.lat'], types: ['main_frame', 'sub_frame'] },
+    ['blocking']
+  );
+}
 
 browser.proxy.onRequest.addListener(
   function(requestInfo) {
