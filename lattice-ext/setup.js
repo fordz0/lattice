@@ -20,8 +20,8 @@ document.getElementById('open-config').addEventListener('click', () => {
 document.getElementById('done-test').addEventListener('click', async () => {
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });
   if (tabs.length > 0 && tabs[0].id) {
-    browser.tabs.update(tabs[0].id, { url: 'http://benjf.lat' });
+    browser.tabs.update(tabs[0].id, { url: 'http://benjf.loom' });
   } else {
-    browser.tabs.create({ url: 'http://benjf.lat' });
+    browser.tabs.create({ url: 'http://benjf.loom' });
   }
 });

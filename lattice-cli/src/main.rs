@@ -76,7 +76,7 @@ struct NameClaimedByOther {
 
 impl fmt::Display for NameClaimedByOther {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.lat is already claimed by another key", self.name)
+        write!(f, "{}.loom is already claimed by another key", self.name)
     }
 }
 
@@ -94,7 +94,7 @@ async fn main() {
                 eprintln!("lattice daemon is not running. Start it with: lattice-daemon");
             } else if let Some(claimed) = err.downcast_ref::<NameClaimedByOther>() {
                 println!(
-                    "Error: {}.lat is already claimed by another key",
+                    "Error: {}.loom is already claimed by another key",
                     claimed.name
                 );
                 println!("Claim the name first: lattice name claim {}", claimed.name);
@@ -153,7 +153,7 @@ async fn run() -> Result<()> {
                     .and_then(Value::as_str)
                     .unwrap_or("err");
                 if status == "ok" {
-                    println!("claimed {name}.lat");
+                    println!("claimed {name}.loom");
                 } else {
                     let error = result
                         .get("error")
@@ -173,7 +173,7 @@ async fn run() -> Result<()> {
                     result.to_string()
                 };
 
-                println!("Name:      {name}.lat");
+                println!("Name:      {name}.loom");
                 println!("Owner key: {owner}");
             }
             NameCommand::List => {
@@ -183,7 +183,7 @@ async fn run() -> Result<()> {
                     println!("No names claimed on this node");
                 } else {
                     for name in names {
-                        println!("{name}.lat");
+                        println!("{name}.loom");
                     }
                 }
             }
@@ -205,7 +205,7 @@ async fn run() -> Result<()> {
                 None => site_name_for_dir(&canonical_dir)?,
             };
 
-            println!("Publishing {name}.lat...");
+            println!("Publishing {name}.loom...");
 
             let client = RpcClient::new(cli.rpc_port);
             let result = client
@@ -238,9 +238,9 @@ async fn run() -> Result<()> {
                 .unwrap_or(false);
 
             if claimed {
-                println!("Auto-claimed {name}.lat");
+                println!("Auto-claimed {name}.loom");
             }
-            println!("Published {name}.lat v{version} ({file_count} files)");
+            println!("Published {name}.loom v{version} ({file_count} files)");
         }
         Command::Fetch { name, out } => {
             let out_dir = out.unwrap_or_else(|| PathBuf::from(&name));
@@ -249,15 +249,15 @@ async fn run() -> Result<()> {
             let manifest_result = client.get_site_manifest(&name).await?;
             let manifest_json = manifest_result
                 .as_str()
-                .ok_or_else(|| anyhow!("site {}.lat not found", name))?;
+                .ok_or_else(|| anyhow!("site {}.loom not found", name))?;
 
             let manifest: SiteManifest = serde_json::from_str(manifest_json)
-                .with_context(|| format!("failed to parse site manifest for {}.lat", name))?;
+                .with_context(|| format!("failed to parse site manifest for {}.loom", name))?;
 
             verify_manifest(&manifest)?;
             if manifest.name != name {
                 bail!(
-                    "manifest name mismatch: expected {}.lat, got {}.lat",
+                    "manifest name mismatch: expected {}.loom, got {}.loom",
                     name,
                     manifest.name
                 );
@@ -276,10 +276,10 @@ async fn run() -> Result<()> {
             let owner_result = client.get_record(&format!("name:{name}")).await?;
             let owner_key = owner_result
                 .as_str()
-                .ok_or_else(|| anyhow!("name owner record missing or invalid for {}.lat", name))?;
+                .ok_or_else(|| anyhow!("name owner record missing or invalid for {}.loom", name))?;
             if owner_key != manifest.publisher_key {
                 bail!(
-                    "manifest publisher does not match name owner for {}.lat",
+                    "manifest publisher does not match name owner for {}.loom",
                     name
                 );
             }
@@ -331,7 +331,7 @@ async fn run() -> Result<()> {
             }
 
             println!(
-                "Fetched {}.lat v{} — {} files",
+                "Fetched {}.loom v{} — {} files",
                 name,
                 manifest.version,
                 manifest.files.len()
@@ -440,7 +440,7 @@ fn init_site(name: Option<String>, rating: &str) -> Result<()> {
 
     let index_path = cwd.join("index.html");
     let index_html = format!(
-        "<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>{0}.lat</title>\n</head>\n<body>\n  <h1>Welcome to {0}.lat - powered by Lattice</h1>\n</body>\n</html>\n",
+        "<!doctype html>\n<html>\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>{0}.loom</title>\n</head>\n<body>\n  <h1>Welcome to {0}.loom - powered by Lattice</h1>\n</body>\n</html>\n",
         site_name
     );
     fs::write(&index_path, index_html)
@@ -468,7 +468,7 @@ fn init_site(name: Option<String>, rating: &str) -> Result<()> {
     };
 
     site_publisher::save_manifest(&manifest, &cwd)?;
-    println!("Initialised {}.lat in current directory", site_name);
+    println!("Initialised {}.loom in current directory", site_name);
 
     Ok(())
 }

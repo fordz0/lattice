@@ -74,7 +74,7 @@ async fn serve_site(
         None => {
             return fail(plain(
                 StatusCode::NOT_FOUND,
-                "site not found on Lattice (expected *.lat host)",
+                "site not found on Lattice (expected *.loom host)",
             ));
         }
     };
@@ -638,7 +638,7 @@ fn parse_site_name_from_host(raw_host: &str) -> Option<String> {
         .next()
         .unwrap_or(raw_host)
         .to_ascii_lowercase();
-    match host.strip_suffix(".lat") {
+    match host.strip_suffix(".loom") {
         Some(name) if !name.is_empty() => Some(name.to_string()),
         _ => None,
     }

@@ -13,7 +13,7 @@ if (typeof browser.webRequest !== 'undefined') {
     function(requestInfo) {
       try {
         var url = new URL(requestInfo.url);
-        if (url.protocol === 'https:' && url.hostname && url.hostname.endsWith('.lat')) {
+        if (url.protocol === 'https:' && url.hostname && url.hostname.endsWith('.loom')) {
           url.protocol = 'http:';
           return { redirectUrl: url.toString() };
         }
@@ -23,7 +23,7 @@ if (typeof browser.webRequest !== 'undefined') {
 
       return {};
     },
-    { urls: ['https://*.lat/*', 'https://*.lat'], types: ['main_frame', 'sub_frame'] },
+    { urls: ['https://*.loom/*', 'https://*.loom'], types: ['main_frame', 'sub_frame'] },
     ['blocking']
   );
 }
@@ -32,7 +32,7 @@ browser.proxy.onRequest.addListener(
   function(requestInfo) {
     try {
       var url = new URL(requestInfo.url);
-      if (url.protocol === 'http:' && url.hostname && url.hostname.endsWith('.lat')) {
+      if (url.protocol === 'http:' && url.hostname && url.hostname.endsWith('.loom')) {
         return {
           type: 'http',
           host: '127.0.0.1',

@@ -11,12 +11,12 @@ The setup page will open automatically.
 
 ## One-time Firefox config
 
-Firefox needs to know .lat is a URL, not a search query.
+Firefox needs to know .loom is a URL, not a search query.
 The setup page walks you through it - takes about 30 seconds.
 
 Or do it manually:
 1. Go to about:config
-2. Search: browser.fixup.domainsuffixwhitelist.lat
+2. Search: browser.fixup.domainsuffixwhitelist.loom
 3. Click + to create it (defaults to true)
 
 ## Requirements
@@ -26,6 +26,6 @@ Or do it manually:
 
 ## Usage
 
-Type any .lat address in the Firefox address bar:
-  lattice.lat
-  http://lattice.lat
+Type any .loom address in the Firefox address bar:
+  lattice.loom
+  http://lattice.loom

@@ -119,7 +119,7 @@ assert_range_bytes() {
   dd if="$site_dir/assets/video.bin" of="$expected_file" bs=1 skip="$expected_skip" count="$expected_count" status=none
   if ! curl -fsS \
     -D "$header_file" \
-    -H "Host: ${SITE_NAME}.lat" \
+    -H "Host: ${SITE_NAME}.loom" \
     -H "Range: $range_header" \
     "http://127.0.0.1:$http_port/assets/video.bin" \
     -o "$actual_file"; then
@@ -187,7 +187,7 @@ run_round() {
 
   echo "=== round $round: publish from node1 ==="
   if ! "$CLI_BIN" --rpc-port "$(node_rpc_port 1)" publish --dir "$site_dir" --name "$SITE_NAME"; then
-    echo "publish failed for ${SITE_NAME}.lat in round $round" >&2
+    echo "publish failed for ${SITE_NAME}.loom in round $round" >&2
     return 1
   fi
   if (( SETTLE_SECS > 0 )); then
@@ -216,7 +216,7 @@ run_round() {
   for check_idx in "${check_nodes[@]}"; do
     local http_port
     http_port="$(node_http_port "$check_idx")"
-    if curl -fsS -H "Host: ${SITE_NAME}.lat" "http://127.0.0.1:$http_port/" >/tmp/lattice-stress-http-$check_idx.html; then
+    if curl -fsS -H "Host: ${SITE_NAME}.loom" "http://127.0.0.1:$http_port/" >/tmp/lattice-stress-http-$check_idx.html; then
       :
     else
       echo "http check failed on node$check_idx port $http_port"
@@ -279,7 +279,7 @@ run_restart_check() {
 
   local http_port
   http_port="$(node_http_port 2)"
-  curl -fsS -H "Host: ${SITE_NAME}.lat" "http://127.0.0.1:$http_port/" >/tmp/lattice-stress-restart-http.html
+  curl -fsS -H "Host: ${SITE_NAME}.loom" "http://127.0.0.1:$http_port/" >/tmp/lattice-stress-restart-http.html
 
   if [[ "$RANGE_CHECK" == "1" ]]; then
     echo "=== restart check: HTTP range ==="

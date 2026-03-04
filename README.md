@@ -2,7 +2,7 @@
 
 A censorship-resistant, peer-to-peer internet protocol. Publish and
 access websites without DNS, registrars, or hosting providers. Sites
-live at human-readable `.lat` addresses, owned by cryptographic
+live at human-readable `.loom` addresses, owned by cryptographic
 keypairs, served directly by peers.
 
 Traffic looks like HTTPS to anyone watching. No central authority.
@@ -43,7 +43,7 @@ optional and mainly useful for advanced testing/operator workflows.
 # check your node status
 ./target/release/lattice-cli status
 
-# optionally claim a .lat name up front
+# optionally claim a .loom name up front
 # (publish auto-claims if the name is currently unclaimed)
 ./target/release/lattice-cli name claim yourname
 
@@ -58,7 +58,7 @@ mkdir mysite && cd mysite
 ./target/release/lattice-cli fetch website --out ./website
 ```
 
-### Visit .lat sites in Firefox
+### Visit .loom sites in Firefox
 
 - Firefox extension install steps: [lattice-ext/INSTALL.md](lattice-ext/INSTALL.md)
 - You can also use `lattice-cli fetch` to retrieve site content locally.
