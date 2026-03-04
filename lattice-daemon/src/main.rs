@@ -60,6 +60,7 @@ struct PublishTask {
     respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
     remaining: u32,
     failed: Option<String>,
+    had_quorum_failed: bool,
     version: u64,
     file_count: usize,
     claimed: bool,
@@ -210,12 +211,16 @@ async fn main() -> Result<()> {
         },
     )?;
 
-    let listen_addr: Multiaddr =
-        Multiaddr::from_str(&format!("/ip4/{}/tcp/{}", config.listen_address, config.listen_port))?;
+    let listen_addr: Multiaddr = Multiaddr::from_str(&format!(
+        "/ip4/{}/tcp/{}",
+        config.listen_address, config.listen_port
+    ))?;
     swarm.listen_on(listen_addr)?;
 
-    let quic_addr: Multiaddr =
-        Multiaddr::from_str(&format!("/ip4/{}/udp/{}/quic-v1", config.listen_address, config.listen_port))?;
+    let quic_addr: Multiaddr = Multiaddr::from_str(&format!(
+        "/ip4/{}/udp/{}/quic-v1",
+        config.listen_address, config.listen_port
+    ))?;
     swarm.listen_on(quic_addr)?;
 
     let bootstrap_peer_ids = build_bootstrap_peer_ids(&config.bootstrap_peers);
@@ -741,13 +746,27 @@ fn handle_swarm_event(
                         Ok(ok) => {
                             info!(key = ?ok.key, "kademlia publish put_record succeeded");
                         }
-                        Err(kad::PutRecordError::QuorumFailed { key, .. }) => {
+                        Err(kad::PutRecordError::QuorumFailed {
+                            key,
+                            success,
+                            quorum,
+                        }) => {
                             warn!(
                                 task_id,
                                 key = ?key,
+                                success_count = success.len(),
+                                quorum_required = quorum.get(),
                                 peers_at_start = task.connected_peers_at_start,
                                 "put_record quorum failed; record stored locally and will replicate once peers are ready"
                             );
+                            task.had_quorum_failed = true;
+                            if task.failed.is_none() {
+                                task.failed = Some(format!(
+                                    "replication quorum failed for {key:?}: stored on {}/{} peers",
+                                    success.len(),
+                                    quorum.get()
+                                ));
+                            }
                         }
                         Err(err) => {
                             warn!(task_id, error = %err, "kademlia publish put_record failed");
@@ -801,7 +820,7 @@ fn handle_swarm_event(
                         }
                         PublishQueryKind::Manifest => {
                             let succeeded = task.failed.is_none();
-                            let response = match task.failed {
+                            let response = match task.failed.clone() {
                                 Some(err) => Err(err),
                                 None => Ok(PublishSiteOk {
                                     version: task.version,
@@ -811,15 +830,14 @@ fn handle_swarm_event(
                             };
                             let _ = task.respond_to.send(response);
 
-                            // If any records failed quorum, schedule a re-push after a short
-                            // delay to give relay/routing time to settle.
-                            if succeeded {
+                            // Even when we return an error for quorum failures, keep trying
+                            // to replicate local records in the background once peers settle.
+                            if succeeded || task.had_quorum_failed {
                                 let rpc_tx_retry = rpc_tx.clone();
                                 tokio::spawn(async move {
                                     tokio::time::sleep(Duration::from_secs(30)).await;
-                                    let _ = rpc_tx_retry
-                                        .send(RpcCommand::RepublishLocalRecords)
-                                        .await;
+                                    let _ =
+                                        rpc_tx_retry.send(RpcCommand::RepublishLocalRecords).await;
                                 });
                             }
                         }
@@ -879,8 +897,17 @@ fn handle_swarm_event(
                     // Untracked put_record (e.g. from RepublishLocalRecords).
                     match result {
                         Ok(ok) => info!(key = ?ok.key, "republish put_record succeeded"),
-                        Err(kad::PutRecordError::QuorumFailed { key, .. }) => {
-                            warn!(key = ?key, "republish put_record quorum failed");
+                        Err(kad::PutRecordError::QuorumFailed {
+                            key,
+                            success,
+                            quorum,
+                        }) => {
+                            warn!(
+                                key = ?key,
+                                success_count = success.len(),
+                                quorum_required = quorum.get(),
+                                "republish put_record quorum failed"
+                            );
                         }
                         Err(err) => warn!(error = %err, "republish put_record failed"),
                     }
@@ -1320,6 +1347,7 @@ fn start_publish_task(
         respond_to,
         remaining: 0,
         failed: None,
+        had_quorum_failed: false,
         version: prepared.version,
         file_count: prepared.file_count,
         claimed,

@@ -7,15 +7,23 @@ use libp2p::{Multiaddr, PeerId};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+const MAX_RECORD_VALUE_BYTES: usize = 1024 * 1024;
+const MAX_KAD_PACKET_BYTES: usize = 2 * 1024 * 1024;
+const KAD_SUBSTREAM_TIMEOUT_SECS: u64 = 30;
+
 pub fn new_kademlia(local_peer_id: PeerId) -> Behaviour<MemoryStore> {
     let mut store_config = kad::store::MemoryStoreConfig::default();
     // Allow block records up to 1 MiB (default 65 KiB is too small for site files).
-    store_config.max_value_bytes = 1024 * 1024;
+    store_config.max_value_bytes = MAX_RECORD_VALUE_BYTES;
     let store = MemoryStore::with_config(local_peer_id, store_config);
     let mut config = kad::Config::default();
     config.set_record_ttl(Some(Duration::from_secs(48 * 60 * 60)));
     config.set_replication_interval(Some(Duration::from_secs(30 * 60)));
     config.set_provider_record_ttl(Some(Duration::from_secs(48 * 60 * 60)));
+    // libp2p-kad defaults to 16 KiB packets. Records larger than that silently
+    // fail to propagate with QuorumFailed even when local store accepts them.
+    config.set_max_packet_size(MAX_KAD_PACKET_BYTES);
+    config.set_substreams_timeout(Duration::from_secs(KAD_SUBSTREAM_TIMEOUT_SECS));
     // Use a high replication factor so put_record targets enough peers to
     // include bootstrap/relay nodes even when other peers are XOR-closer
     // to the key.  Critical for NAT-traversed nodes that can only reach
