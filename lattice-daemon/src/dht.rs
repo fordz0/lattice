@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use libp2p::kad::store::MemoryStore;
+use libp2p::kad::store::RecordStore;
 use libp2p::kad::{self, Behaviour, QueryId, Quorum, Record};
 use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
@@ -28,8 +29,15 @@ pub fn put_record_bytes(
     value: Vec<u8>,
 ) -> Result<QueryId> {
     let record = Record::new(key.into_bytes(), value);
-    kad.put_record(record, Quorum::One)
-        .context("failed to start put_record query")
+    let query_id = kad
+        .put_record(record.clone(), Quorum::One)
+        .context("failed to start put_record query")?;
+
+    kad.store_mut()
+        .put(record)
+        .context("failed to store record locally")?;
+
+    Ok(query_id)
 }
 
 pub fn put_record(kad: &mut Behaviour<MemoryStore>, key: String, value: String) -> Result<QueryId> {
