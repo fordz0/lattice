@@ -319,6 +319,12 @@ async fn main() -> Result<()> {
     let mut get_site_queries: HashMap<kad::QueryId, GetSiteQuery> = HashMap::new();
     let mut next_get_site_task_id: u64 = 1;
 
+    // Persist published block records independently of Kademlia's MemoryStore.
+    // libp2p-kad evicts locally-stored records from MemoryStore when put_record
+    // fails with QuorumFailed, so without this cache the record is lost and
+    // subsequent republishes would silently skip it.
+    let mut block_cache: HashMap<String, Vec<u8>> = HashMap::new();
+
     loop {
         tokio::select! {
             maybe_cmd = rpc_rx.recv() => {
@@ -542,16 +548,32 @@ async fn main() -> Result<()> {
                             );
                         }
                         RpcCommand::RepublishLocalRecords => {
-                            let local_records: Vec<kad::Record> = swarm
+                            let mut all_records: Vec<kad::Record> = swarm
                                 .behaviour_mut()
                                 .kademlia
                                 .store_mut()
                                 .records()
                                 .map(|r| r.into_owned())
                                 .collect();
-                            if !local_records.is_empty() {
-                                info!(count = local_records.len(), "republishing local DHT records");
-                                for record in local_records {
+                            // Re-add any block records that Kademlia evicted after QuorumFailed.
+                            let existing_keys: HashSet<kad::RecordKey> =
+                                all_records.iter().map(|r| r.key.clone()).collect();
+                            for (key_str, value) in block_cache.iter() {
+                                let kad_key = kad::RecordKey::new(key_str);
+                                if !existing_keys.contains(&kad_key) {
+                                    let record = kad::Record::new(kad_key, value.clone());
+                                    swarm
+                                        .behaviour_mut()
+                                        .kademlia
+                                        .store_mut()
+                                        .put(record.clone())
+                                        .ok();
+                                    all_records.push(record);
+                                }
+                            }
+                            if !all_records.is_empty() {
+                                info!(count = all_records.len(), "republishing local DHT records");
+                                for record in all_records {
                                     swarm
                                         .behaviour_mut()
                                         .kademlia
@@ -588,6 +610,7 @@ async fn main() -> Result<()> {
                     &rpc_tx,
                     &site_signing_key,
                     &local_pubkey_hex,
+                    &mut block_cache,
                 );
             }
         }
@@ -618,6 +641,7 @@ fn handle_swarm_event(
     rpc_tx: &mpsc::Sender<RpcCommand>,
     site_signing_key: &SigningKey,
     local_pubkey_hex: &str,
+    block_cache: &mut HashMap<String, Vec<u8>>,
 ) {
     match event {
         libp2p::swarm::SwarmEvent::ConnectionEstablished {
@@ -1007,6 +1031,7 @@ fn handle_swarm_event(
                                                 publish_tasks,
                                                 publish_query_to_task,
                                                 next_publish_task_id,
+                                                block_cache,
                                             );
                                         }
                                     } else {
@@ -1018,6 +1043,7 @@ fn handle_swarm_event(
                                             publish_tasks,
                                             publish_query_to_task,
                                             next_publish_task_id,
+                                            block_cache,
                                         );
                                     }
                                 }
@@ -1279,6 +1305,7 @@ fn start_publish_task(
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, PublishQuery>,
     next_publish_task_id: &mut u64,
+    block_cache: &mut HashMap<String, Vec<u8>>,
 ) {
     let task_id = *next_publish_task_id;
     *next_publish_task_id = (*next_publish_task_id).saturating_add(1);
@@ -1301,6 +1328,7 @@ fn start_publish_task(
     }
 
     for (key, value) in prepared.block_records {
+        block_cache.insert(key.clone(), value.clone());
         match dht::put_record_bytes(&mut swarm.behaviour_mut().kademlia, key, value) {
             Ok(query_id) => {
                 task.remaining = task.remaining.saturating_add(1);
