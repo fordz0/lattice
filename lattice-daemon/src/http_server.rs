@@ -75,7 +75,7 @@ async fn serve_site(
                 return plain(StatusCode::SERVICE_UNAVAILABLE, "lattice daemon busy");
             }
             if err.starts_with("block missing:") {
-                return plain(StatusCode::NOT_FOUND, "site content missing on Lattice");
+                return plain_owned(StatusCode::NOT_FOUND, err);
             }
             warn!(error = %err, "get_site failed");
             return plain_owned(

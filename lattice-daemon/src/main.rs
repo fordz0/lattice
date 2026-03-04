@@ -62,6 +62,19 @@ struct PublishTask {
     version: u64,
     file_count: usize,
     claimed: bool,
+    connected_peers_at_start: usize,
+    manifest_record: Option<(String, Vec<u8>)>,
+}
+
+#[derive(Clone, Copy)]
+enum PublishQueryKind {
+    Block,
+    Manifest,
+}
+
+struct PublishQuery {
+    task_id: u64,
+    kind: PublishQueryKind,
 }
 
 struct GetSiteTask {
@@ -91,7 +104,8 @@ enum GetSiteQuery {
 struct PreparedPublish {
     version: u64,
     file_count: usize,
-    records: Vec<(String, Vec<u8>)>,
+    block_records: Vec<(String, Vec<u8>)>,
+    manifest_record: (String, Vec<u8>),
 }
 
 struct PendingTextQuery {
@@ -297,7 +311,7 @@ async fn main() -> Result<()> {
         HashMap::new();
 
     let mut publish_tasks: HashMap<u64, PublishTask> = HashMap::new();
-    let mut publish_query_to_task: HashMap<kad::QueryId, u64> = HashMap::new();
+    let mut publish_query_to_task: HashMap<kad::QueryId, PublishQuery> = HashMap::new();
     let mut next_publish_task_id: u64 = 1;
 
     let mut get_site_tasks: HashMap<u64, GetSiteTask> = HashMap::new();
@@ -572,7 +586,7 @@ fn handle_swarm_event(
     pending_publish_claim_put: &mut HashMap<kad::QueryId, PendingPublishClaimPut>,
     pending_publish_version_checks: &mut HashMap<kad::QueryId, PendingPublishVersionCheck>,
     publish_tasks: &mut HashMap<u64, PublishTask>,
-    publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
+    publish_query_to_task: &mut HashMap<kad::QueryId, PublishQuery>,
     next_publish_task_id: &mut u64,
     get_site_tasks: &mut HashMap<u64, GetSiteTask>,
     get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
@@ -671,39 +685,87 @@ fn handle_swarm_event(
                             let _ = ch.send(Err(err.to_string()));
                         }
                     }
-                } else if let Some(task_id) = publish_query_to_task.remove(&id) {
-                    if let Some(task) = publish_tasks.get_mut(&task_id) {
-                        task.remaining = task.remaining.saturating_sub(1);
-                        match result {
-                            Ok(ok) => {
-                                info!(key = ?ok.key, "kademlia publish put_record succeeded");
-                            }
-                            Err(kad::PutRecordError::QuorumFailed { key, .. }) => {
+                } else if let Some(publish_query) = publish_query_to_task.remove(&id) {
+                    let task_id = publish_query.task_id;
+                    let Some(mut task) = publish_tasks.remove(&task_id) else {
+                        error!(task_id, "publish task missing from map — internal error");
+                        return;
+                    };
+
+                    task.remaining = task.remaining.saturating_sub(1);
+                    match result {
+                        Ok(ok) => {
+                            info!(key = ?ok.key, "kademlia publish put_record succeeded");
+                        }
+                        Err(kad::PutRecordError::QuorumFailed { key, .. }) => {
+                            if task.connected_peers_at_start == 0 {
                                 warn!(
                                     task_id,
                                     key = ?key,
-                                    "put_record quorum failed but record stored locally — continuing"
+                                    "put_record quorum failed with zero peers; record stored locally — continuing"
                                 );
-                            }
-                            Err(err) => {
-                                warn!(task_id, error = %err, "kademlia publish put_record failed");
+                            } else {
+                                let msg = format!(
+                                    "failed to replicate record {:?} to peers (quorum failed). try publish again after peers connect",
+                                    key
+                                );
+                                warn!(task_id, key = ?key, "{msg}");
                                 if task.failed.is_none() {
-                                    task.failed = Some(err.to_string());
+                                    task.failed = Some(msg);
                                 }
                             }
                         }
+                        Err(err) => {
+                            warn!(task_id, error = %err, "kademlia publish put_record failed");
+                            if task.failed.is_none() {
+                                task.failed = Some(err.to_string());
+                            }
+                        }
+                    }
 
-                        if task.remaining == 0 {
-                            let task = match publish_tasks.remove(&task_id) {
-                                Some(task) => task,
-                                None => {
-                                    error!(
-                                        task_id,
-                                        "publish task missing from map — internal error"
-                                    );
-                                    return;
-                                }
+                    if task.remaining > 0 {
+                        publish_tasks.insert(task_id, task);
+                        return;
+                    }
+
+                    match publish_query.kind {
+                        PublishQueryKind::Block => {
+                            if let Some(err) = task.failed {
+                                let _ = task.respond_to.send(Err(err));
+                                return;
+                            }
+
+                            let Some((manifest_key, manifest_value)) = task.manifest_record.take()
+                            else {
+                                let _ = task
+                                    .respond_to
+                                    .send(Err("internal publish error: missing manifest record"
+                                        .to_string()));
+                                return;
                             };
+
+                            match dht::put_record_bytes(
+                                &mut swarm.behaviour_mut().kademlia,
+                                manifest_key,
+                                manifest_value,
+                            ) {
+                                Ok(query_id) => {
+                                    task.remaining = 1;
+                                    publish_query_to_task.insert(
+                                        query_id,
+                                        PublishQuery {
+                                            task_id,
+                                            kind: PublishQueryKind::Manifest,
+                                        },
+                                    );
+                                    publish_tasks.insert(task_id, task);
+                                }
+                                Err(err) => {
+                                    let _ = task.respond_to.send(Err(err.to_string()));
+                                }
+                            }
+                        }
+                        PublishQueryKind::Manifest => {
                             let response = match task.failed {
                                 Some(err) => Err(err),
                                 None => Ok(PublishSiteOk {
@@ -1174,7 +1236,7 @@ fn start_publish_task(
     claimed: bool,
     respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
     publish_tasks: &mut HashMap<u64, PublishTask>,
-    publish_query_to_task: &mut HashMap<kad::QueryId, u64>,
+    publish_query_to_task: &mut HashMap<kad::QueryId, PublishQuery>,
     next_publish_task_id: &mut u64,
 ) {
     let task_id = *next_publish_task_id;
@@ -1187,13 +1249,27 @@ fn start_publish_task(
         version: prepared.version,
         file_count: prepared.file_count,
         claimed,
+        connected_peers_at_start: swarm.connected_peers().count(),
+        manifest_record: Some(prepared.manifest_record),
     };
 
-    for (key, value) in prepared.records {
+    if task.connected_peers_at_start == 0 {
+        warn!(
+            "publishing with no connected peers; records are local-only until peers connect and replication occurs"
+        );
+    }
+
+    for (key, value) in prepared.block_records {
         match dht::put_record_bytes(&mut swarm.behaviour_mut().kademlia, key, value) {
             Ok(query_id) => {
                 task.remaining = task.remaining.saturating_add(1);
-                publish_query_to_task.insert(query_id, task_id);
+                publish_query_to_task.insert(
+                    query_id,
+                    PublishQuery {
+                        task_id,
+                        kind: PublishQueryKind::Block,
+                    },
+                );
             }
             Err(err) => {
                 if task.failed.is_none() {
@@ -1204,15 +1280,38 @@ fn start_publish_task(
     }
 
     if task.remaining == 0 {
-        let response = match task.failed {
-            Some(err) => Err(err),
-            None => Ok(PublishSiteOk {
-                version: task.version,
-                file_count: task.file_count,
-                claimed: task.claimed,
-            }),
+        if let Some(err) = task.failed {
+            let _ = task.respond_to.send(Err(err));
+            return;
+        }
+
+        let Some((manifest_key, manifest_value)) = task.manifest_record.take() else {
+            let _ = task.respond_to.send(Err(
+                "internal publish error: missing manifest record".to_string()
+            ));
+            return;
         };
-        let _ = task.respond_to.send(response);
+
+        match dht::put_record_bytes(
+            &mut swarm.behaviour_mut().kademlia,
+            manifest_key,
+            manifest_value,
+        ) {
+            Ok(query_id) => {
+                task.remaining = 1;
+                publish_query_to_task.insert(
+                    query_id,
+                    PublishQuery {
+                        task_id,
+                        kind: PublishQueryKind::Manifest,
+                    },
+                );
+                publish_tasks.insert(task_id, task);
+            }
+            Err(err) => {
+                let _ = task.respond_to.send(Err(err.to_string()));
+            }
+        }
     } else {
         publish_tasks.insert(task_id, task);
     }
@@ -1733,7 +1832,7 @@ fn prepare_publish(
     verify_manifest(&manifest)?;
     site_publisher::save_manifest(&manifest, site_dir)?;
 
-    let mut records = Vec::new();
+    let mut block_records = Vec::new();
     for file in &manifest.files {
         let file_path = site_dir.join(&file.path);
         let contents = fs::read(&file_path)
@@ -1749,17 +1848,18 @@ fn prepare_publish(
             );
         }
 
-        records.push((format!("block:{}", file.hash), contents));
+        block_records.push((format!("block:{}", file.hash), contents));
     }
 
     let manifest_json =
         serde_json::to_string(&manifest).context("failed to serialize site manifest")?;
-    records.push((format!("site:{name}"), manifest_json.into_bytes()));
+    let manifest_record = (format!("site:{name}"), manifest_json.into_bytes());
 
     Ok(PreparedPublish {
         version: manifest.version,
         file_count: manifest.files.len(),
-        records,
+        block_records,
+        manifest_record,
     })
 }
 
