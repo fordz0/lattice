@@ -11,7 +11,7 @@ use lattice_daemon::rpc::{
     self, GetSiteResponse, NodeInfoResponse, PublishSiteOk, RpcCommand, SiteFile,
 };
 use lattice_daemon::transport;
-use lattice_site::manifest::{hash_bytes, verify_manifest, SiteManifest};
+use lattice_site::manifest::{hash_bytes, verify_manifest, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES};
 use lattice_site::publisher as site_publisher;
 use libp2p::autonat;
 use libp2p::dcutr;
@@ -25,10 +25,11 @@ use libp2p::multiaddr::Protocol;
 use libp2p::relay;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, Swarm};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -43,6 +44,7 @@ const MAX_GET_SITE_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 const PUBLISH_OWNERSHIP_PROBES: u32 = 3;
 const PUBLISH_OWNERSHIP_PROBE_DELAY_SECS: u64 = 5;
 const RELAY_RESERVATION_RETRY_SECS: u64 = 60;
+const LOCAL_RECORDS_FILE: &str = "records.json";
 
 #[derive(NetworkBehaviour)]
 struct LatticeBehaviour {
@@ -83,24 +85,24 @@ struct GetSiteTask {
     respond_to: oneshot::Sender<Result<GetSiteResponse, String>>,
     requested_name: String,
     manifest: Option<SiteManifest>,
-    next_index: usize,
+    next_file_index: usize,
+    active_file: Option<ActiveFileDownload>,
     total_bytes: u64,
     files: Vec<SiteFile>,
 }
 
+struct ActiveFileDownload {
+    path: String,
+    expected_hash: String,
+    block_hashes: Vec<String>,
+    next_block_index: usize,
+    bytes: Vec<u8>,
+}
+
 enum GetSiteQuery {
-    Manifest {
-        task_id: u64,
-    },
-    NameOwner {
-        task_id: u64,
-        name: String,
-    },
-    Block {
-        task_id: u64,
-        hash: String,
-        path: String,
-    },
+    Manifest { task_id: u64 },
+    NameOwner { task_id: u64, name: String },
+    FileBlock { task_id: u64, block_hash: String },
 }
 
 struct PreparedPublish {
@@ -113,6 +115,12 @@ struct PreparedPublish {
 struct PendingTextQuery {
     key: String,
     respond_to: oneshot::Sender<Option<String>>,
+}
+
+struct PendingPut {
+    key: String,
+    value: Vec<u8>,
+    respond_to: oneshot::Sender<Result<(), String>>,
 }
 
 struct PendingClaimGet {
@@ -154,6 +162,11 @@ struct PendingPublishClaimPut {
     respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLocalRecords {
+    records: HashMap<String, String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -173,6 +186,8 @@ async fn main() -> Result<()> {
     info!("site signing key loaded from site_signing.key");
     info!("your publisher key is: {}", local_pubkey_hex);
     let owned_names: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let local_records_path = config.data_dir.join(LOCAL_RECORDS_FILE);
+    let mut local_records = load_local_records(&local_records_path);
 
     let peer_id = node_identity.peer_id;
 
@@ -223,6 +238,23 @@ async fn main() -> Result<()> {
     ))?;
     swarm.listen_on(quic_addr)?;
 
+    restore_local_records_to_store(&mut swarm, &local_records);
+    let restored_owned_names = owned_names_from_local_records(&local_records, &local_pubkey_hex);
+    if !restored_owned_names.is_empty() {
+        let mut guard = match owned_names.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("owned_names mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        };
+        guard.extend(restored_owned_names.clone());
+        info!(
+            count = restored_owned_names.len(),
+            "restored owned names from persisted records"
+        );
+    }
+
     let bootstrap_peer_ids = build_bootstrap_peer_ids(&config.bootstrap_peers);
     let mut relay_reservations: HashSet<libp2p::PeerId> = HashSet::new();
     let mut relay_reservation_requests: HashMap<libp2p::PeerId, Instant> = HashMap::new();
@@ -246,6 +278,19 @@ async fn main() -> Result<()> {
         http_port = config.http_port,
         "listening and RPC configured"
     );
+
+    if !local_records.is_empty() {
+        info!(
+            count = local_records.len(),
+            path = %local_records_path.display(),
+            "loaded persisted local DHT records"
+        );
+        let rpc_tx_repush = rpc_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let _ = rpc_tx_repush.send(RpcCommand::RepublishLocalRecords).await;
+        });
+    }
 
     let heartbeat_rpc_tx = rpc_tx.clone();
     let heartbeat_owned_names = Arc::clone(&owned_names);
@@ -302,8 +347,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let mut pending_put: HashMap<kad::QueryId, oneshot::Sender<Result<(), String>>> =
-        HashMap::new();
+    let mut pending_put: HashMap<kad::QueryId, PendingPut> = HashMap::new();
     let mut pending_get_text: HashMap<kad::QueryId, PendingTextQuery> = HashMap::new();
     let mut pending_get_block: HashMap<kad::QueryId, oneshot::Sender<Option<String>>> =
         HashMap::new();
@@ -324,12 +368,6 @@ async fn main() -> Result<()> {
     let mut get_site_queries: HashMap<kad::QueryId, GetSiteQuery> = HashMap::new();
     let mut next_get_site_task_id: u64 = 1;
 
-    // Persist published block records independently of Kademlia's MemoryStore.
-    // libp2p-kad evicts locally-stored records from MemoryStore when put_record
-    // fails with QuorumFailed, so without this cache the record is lost and
-    // subsequent republishes would silently skip it.
-    let mut block_cache: HashMap<String, Vec<u8>> = HashMap::new();
-
     loop {
         tokio::select! {
             maybe_cmd = rpc_rx.recv() => {
@@ -344,9 +382,27 @@ async fn main() -> Result<()> {
                             let _ = respond_to.send(info);
                         }
                         RpcCommand::PutRecord { key, value, respond_to } => {
-                            match dht::put_record(&mut swarm.behaviour_mut().kademlia, key, value) {
+                            let value_bytes = value.into_bytes();
+                            remember_local_record(
+                                &mut local_records,
+                                &local_records_path,
+                                key.clone(),
+                                value_bytes.clone(),
+                            );
+                            match dht::put_record_bytes(
+                                &mut swarm.behaviour_mut().kademlia,
+                                key.clone(),
+                                value_bytes.clone(),
+                            ) {
                                 Ok(query_id) => {
-                                    pending_put.insert(query_id, respond_to);
+                                    pending_put.insert(
+                                        query_id,
+                                        PendingPut {
+                                            key,
+                                            value: value_bytes,
+                                            respond_to,
+                                        },
+                                    );
                                 }
                                 Err(err) => {
                                     let _ = respond_to.send(Err(err.to_string()));
@@ -427,7 +483,8 @@ async fn main() -> Result<()> {
                                 respond_to,
                                 requested_name: name.clone(),
                                 manifest: None,
-                                next_index: 0,
+                                next_file_index: 0,
+                                active_file: None,
                                 total_bytes: 0,
                                 files: Vec::new(),
                             };
@@ -553,37 +610,26 @@ async fn main() -> Result<()> {
                             );
                         }
                         RpcCommand::RepublishLocalRecords => {
-                            let mut all_records: Vec<kad::Record> = swarm
-                                .behaviour_mut()
-                                .kademlia
-                                .store_mut()
-                                .records()
-                                .map(|r| r.into_owned())
-                                .collect();
-                            // Re-add any block records that Kademlia evicted after QuorumFailed.
-                            let existing_keys: HashSet<kad::RecordKey> =
-                                all_records.iter().map(|r| r.key.clone()).collect();
-                            for (key_str, value) in block_cache.iter() {
-                                let kad_key = kad::RecordKey::new(key_str);
-                                if !existing_keys.contains(&kad_key) {
-                                    let record = kad::Record::new(kad_key, value.clone());
-                                    swarm
-                                        .behaviour_mut()
-                                        .kademlia
-                                        .store_mut()
-                                        .put(record.clone())
-                                        .ok();
-                                    all_records.push(record);
-                                }
-                            }
-                            if !all_records.is_empty() {
-                                info!(count = all_records.len(), "republishing local DHT records");
-                                for record in all_records {
-                                    swarm
+                            if !local_records.is_empty() {
+                                info!(
+                                    count = local_records.len(),
+                                    "republishing local DHT records"
+                                );
+                                for (key, value) in local_records.iter() {
+                                    let record =
+                                        kad::Record::new(kad::RecordKey::new(key), value.clone());
+                                    if let Err(err) =
+                                        swarm.behaviour_mut().kademlia.store_mut().put(record.clone())
+                                    {
+                                        warn!(key = %key, error = %err, "failed to restore record to local store before republish");
+                                    }
+                                    if let Err(err) = swarm
                                         .behaviour_mut()
                                         .kademlia
                                         .put_record(record, kad::Quorum::One)
-                                        .ok();
+                                    {
+                                        warn!(key = %key, error = %err, "failed to start republish put_record");
+                                    }
                                 }
                             }
                         }
@@ -615,7 +661,8 @@ async fn main() -> Result<()> {
                     &rpc_tx,
                     &site_signing_key,
                     &local_pubkey_hex,
-                    &mut block_cache,
+                    &mut local_records,
+                    &local_records_path,
                 );
             }
         }
@@ -625,7 +672,7 @@ async fn main() -> Result<()> {
 fn handle_swarm_event(
     event: libp2p::swarm::SwarmEvent<LatticeBehaviourEvent>,
     swarm: &mut Swarm<LatticeBehaviour>,
-    pending_put: &mut HashMap<kad::QueryId, oneshot::Sender<Result<(), String>>>,
+    pending_put: &mut HashMap<kad::QueryId, PendingPut>,
     pending_get_text: &mut HashMap<kad::QueryId, PendingTextQuery>,
     pending_get_block: &mut HashMap<kad::QueryId, oneshot::Sender<Option<String>>>,
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
@@ -646,7 +693,8 @@ fn handle_swarm_event(
     rpc_tx: &mpsc::Sender<RpcCommand>,
     site_signing_key: &SigningKey,
     local_pubkey_hex: &str,
-    block_cache: &mut HashMap<String, Vec<u8>>,
+    local_records: &mut HashMap<String, Vec<u8>>,
+    local_records_path: &Path,
 ) {
     match event {
         libp2p::swarm::SwarmEvent::ConnectionEstablished {
@@ -723,15 +771,21 @@ fn handle_swarm_event(
             kad::Event::OutboundQueryProgressed { id, result, .. },
         )) => match result {
             kad::QueryResult::PutRecord(result) => {
-                if let Some(ch) = pending_put.remove(&id) {
+                if let Some(pending) = pending_put.remove(&id) {
                     match result {
                         Ok(ok) => {
                             info!(key = ?ok.key, "kademlia put_record succeeded");
-                            let _ = ch.send(Ok(()));
+                            remember_local_record(
+                                local_records,
+                                local_records_path,
+                                pending.key,
+                                pending.value,
+                            );
+                            let _ = pending.respond_to.send(Ok(()));
                         }
                         Err(err) => {
                             warn!(error = %err, "kademlia put_record failed");
-                            let _ = ch.send(Err(err.to_string()));
+                            let _ = pending.respond_to.send(Err(err.to_string()));
                         }
                     }
                 } else if let Some(publish_query) = publish_query_to_task.remove(&id) {
@@ -957,6 +1011,45 @@ fn handle_swarm_event(
                     let next_probe_count = pending.probe_count.saturating_add(1);
                     match publish_name_ownership(&pending.name, result, local_pubkey_hex) {
                         Ok(PublishNameOwnership::OwnedByLocal) => {
+                            {
+                                let mut guard = match owned_names.lock() {
+                                    Ok(guard) => guard,
+                                    Err(poisoned) => {
+                                        error!("owned_names mutex poisoned — recovering");
+                                        poisoned.into_inner()
+                                    }
+                                };
+                                guard.insert(pending.name.clone());
+                            }
+
+                            let refreshed = NameRecord::new_signed(
+                                local_pubkey_hex.to_string(),
+                                &pending.name,
+                                site_signing_key,
+                            );
+                            if let Ok(payload) = serde_json::to_vec(&refreshed) {
+                                let key = format!("name:{}", pending.name);
+                                remember_local_record(
+                                    local_records,
+                                    local_records_path,
+                                    key.clone(),
+                                    payload.clone(),
+                                );
+                                if let Err(err) = dht::put_record_bytes(
+                                    &mut swarm.behaviour_mut().kademlia,
+                                    key.clone(),
+                                    payload,
+                                ) {
+                                    warn!(
+                                        key = %key,
+                                        error = %err,
+                                        "failed to refresh name heartbeat before publish"
+                                    );
+                                }
+                            } else {
+                                warn!(name = %pending.name, "failed to encode name heartbeat before publish");
+                            }
+
                             let query_id = dht::get_record(
                                 &mut swarm.behaviour_mut().kademlia,
                                 format!("site:{}", pending.name),
@@ -1003,10 +1096,18 @@ fn handle_swarm_event(
                                         return;
                                     }
                                 };
-                                match dht::put_record(
+                                let key = format!("name:{}", pending.name);
+                                let payload_bytes = payload.into_bytes();
+                                remember_local_record(
+                                    local_records,
+                                    local_records_path,
+                                    key.clone(),
+                                    payload_bytes.clone(),
+                                );
+                                match dht::put_record_bytes(
                                     &mut swarm.behaviour_mut().kademlia,
-                                    format!("name:{}", pending.name),
-                                    payload,
+                                    key,
+                                    payload_bytes,
                                 ) {
                                     Ok(query_id) => {
                                         pending_publish_claim_put.insert(
@@ -1058,7 +1159,8 @@ fn handle_swarm_event(
                                                 publish_tasks,
                                                 publish_query_to_task,
                                                 next_publish_task_id,
-                                                block_cache,
+                                                local_records,
+                                                local_records_path,
                                             );
                                         }
                                     } else {
@@ -1070,7 +1172,8 @@ fn handle_swarm_event(
                                             publish_tasks,
                                             publish_query_to_task,
                                             next_publish_task_id,
-                                            block_cache,
+                                            local_records,
+                                            local_records_path,
                                         );
                                     }
                                 }
@@ -1134,6 +1237,8 @@ fn handle_swarm_event(
                             swarm,
                             pending_claim_put,
                             site_signing_key,
+                            local_records,
+                            local_records_path,
                         );
                     } else {
                         let rpc_tx_for_retry = rpc_tx.clone();
@@ -1338,10 +1443,18 @@ fn start_publish_task(
     publish_tasks: &mut HashMap<u64, PublishTask>,
     publish_query_to_task: &mut HashMap<kad::QueryId, PublishQuery>,
     next_publish_task_id: &mut u64,
-    block_cache: &mut HashMap<String, Vec<u8>>,
+    local_records: &mut HashMap<String, Vec<u8>>,
+    local_records_path: &Path,
 ) {
     let task_id = *next_publish_task_id;
     *next_publish_task_id = (*next_publish_task_id).saturating_add(1);
+
+    remember_local_record(
+        local_records,
+        local_records_path,
+        prepared.manifest_record.0.clone(),
+        prepared.manifest_record.1.clone(),
+    );
 
     let mut task = PublishTask {
         respond_to,
@@ -1362,7 +1475,12 @@ fn start_publish_task(
     }
 
     for (key, value) in prepared.block_records {
-        block_cache.insert(key.clone(), value.clone());
+        remember_local_record(
+            local_records,
+            local_records_path,
+            key.clone(),
+            value.clone(),
+        );
         match dht::put_record_bytes(&mut swarm.behaviour_mut().kademlia, key, value) {
             Ok(query_id) => {
                 task.remaining = task.remaining.saturating_add(1);
@@ -1561,6 +1679,8 @@ fn handle_claim_name_lookup_result(
     swarm: &mut Swarm<LatticeBehaviour>,
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
     site_signing_key: &SigningKey,
+    local_records: &mut HashMap<String, Vec<u8>>,
+    local_records_path: &Path,
 ) {
     let PendingClaimGet {
         name,
@@ -1605,11 +1725,16 @@ fn handle_claim_name_lookup_result(
         }
     };
 
-    match dht::put_record(
-        &mut swarm.behaviour_mut().kademlia,
-        format!("name:{name}"),
-        payload,
-    ) {
+    let key = format!("name:{name}");
+    let payload_bytes = payload.into_bytes();
+    remember_local_record(
+        local_records,
+        local_records_path,
+        key.clone(),
+        payload_bytes.clone(),
+    );
+
+    match dht::put_record_bytes(&mut swarm.behaviour_mut().kademlia, key, payload_bytes) {
         Ok(query_id) => {
             pending_claim_put.insert(query_id, PendingClaimPut { name, respond_to });
         }
@@ -1713,8 +1838,8 @@ fn handle_get_site_query_result(
                 return;
             };
 
-            let manifest = match task.manifest.as_ref() {
-                Some(manifest) => manifest,
+            let manifest_publisher_key = match task.manifest.as_ref() {
+                Some(manifest) => manifest.publisher_key.clone(),
                 None => {
                     let _ = task
                         .respond_to
@@ -1727,7 +1852,7 @@ fn handle_get_site_query_result(
                 Ok(kad::GetRecordOk::FoundRecord(record)) => {
                     if let Ok(value) = String::from_utf8(record.record.value) {
                         if let Some(owner) = parse_verified_name_record(&name, &value) {
-                            if !owner.is_expired() && owner.key != manifest.publisher_key {
+                            if !owner.is_expired() && owner.key != manifest_publisher_key {
                                 let _ =
                                     task.respond_to
                                         .send(Err("manifest publisher does not match name owner"
@@ -1735,7 +1860,7 @@ fn handle_get_site_query_result(
                                 return;
                             }
                         } else if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
-                            if legacy_owner_key != manifest.publisher_key {
+                            if legacy_owner_key != manifest_publisher_key {
                                 let _ =
                                     task.respond_to
                                         .send(Err("manifest publisher does not match name owner"
@@ -1765,37 +1890,63 @@ fn handle_get_site_query_result(
                 }
             }
 
-            if manifest.files.is_empty() {
+            let (manifest_name, manifest_version, has_files) = match task.manifest.as_ref() {
+                Some(manifest) => (
+                    manifest.name.clone(),
+                    manifest.version,
+                    !manifest.files.is_empty(),
+                ),
+                None => {
+                    let _ = task
+                        .respond_to
+                        .send(Err("site task missing manifest".to_string()));
+                    return;
+                }
+            };
+
+            if !has_files {
                 let response = GetSiteResponse {
-                    name: manifest.name.clone(),
-                    version: manifest.version,
+                    name: manifest_name,
+                    version: manifest_version,
                     files: Vec::new(),
                 };
                 let _ = task.respond_to.send(Ok(response));
                 return;
             }
 
-            let first = manifest.files[0].clone();
-            task.next_index = 1;
+            let next_block_hash = match start_next_file_download(&mut task) {
+                Ok(Some(hash)) => hash,
+                Ok(None) => {
+                    let response = GetSiteResponse {
+                        name: manifest_name,
+                        version: manifest_version,
+                        files: task.files,
+                    };
+                    let _ = task.respond_to.send(Ok(response));
+                    return;
+                }
+                Err(err) => {
+                    let _ = task.respond_to.send(Err(err));
+                    return;
+                }
+            };
 
             let query_id = dht::get_record_bytes(
                 &mut swarm.behaviour_mut().kademlia,
-                format!("block:{}", first.hash),
+                format!("block:{next_block_hash}"),
             );
             get_site_queries.insert(
                 query_id,
-                GetSiteQuery::Block {
+                GetSiteQuery::FileBlock {
                     task_id,
-                    hash: first.hash,
-                    path: first.path,
+                    block_hash: next_block_hash,
                 },
             );
             get_site_tasks.insert(task_id, task);
         }
-        GetSiteQuery::Block {
+        GetSiteQuery::FileBlock {
             task_id,
-            hash,
-            path,
+            block_hash,
         } => {
             let mut task = if let Some(task) = get_site_tasks.remove(&task_id) {
                 task
@@ -1806,17 +1957,19 @@ fn handle_get_site_query_result(
             let stored = match result {
                 Ok(kad::GetRecordOk::FoundRecord(record)) => record.record.value,
                 _ => {
-                    let _ = task.respond_to.send(Err(format!("block missing: {hash}")));
+                    let _ = task
+                        .respond_to
+                        .send(Err(format!("block missing: {block_hash}")));
                     return;
                 }
             };
 
-            let raw_bytes = resolve_block_bytes(&stored, &hash);
+            let raw_bytes = resolve_block_bytes(&stored, &block_hash);
             let actual_hash = hex::encode(Sha256::digest(&raw_bytes));
-            if actual_hash != hash {
+            if actual_hash != block_hash {
                 let _ = task.respond_to.send(Err(format!(
-                    "block hash mismatch for {}: expected {} got {}",
-                    path, hash, actual_hash
+                    "block hash mismatch for chunk {}: expected {} got {}",
+                    block_hash, block_hash, actual_hash
                 )));
                 return;
             }
@@ -1829,50 +1982,126 @@ fn handle_get_site_query_result(
             }
             task.total_bytes = next_total;
 
-            task.files.push(SiteFile {
-                path: path.clone(),
-                contents: BASE64_STANDARD.encode(raw_bytes),
-                mime_type: infer_mime_type(&path).to_string(),
-            });
-
-            let manifest = match task.manifest.as_ref() {
-                Some(manifest) => manifest,
-                None => {
+            let mut next_block_to_fetch: Option<String> = None;
+            let mut completed_file: Option<SiteFile> = None;
+            {
+                let Some(active) = task.active_file.as_mut() else {
                     let _ = task
                         .respond_to
-                        .send(Err("site task missing manifest".to_string()));
+                        .send(Err("site task missing active file".to_string()));
                     return;
+                };
+                active.bytes.extend_from_slice(&raw_bytes);
+
+                if active.next_block_index < active.block_hashes.len() {
+                    next_block_to_fetch =
+                        Some(active.block_hashes[active.next_block_index].clone());
+                    active.next_block_index += 1;
+                } else {
+                    let finished = task.active_file.take().expect("active file exists");
+                    let file_hash = hex::encode(Sha256::digest(&finished.bytes));
+                    if file_hash != finished.expected_hash {
+                        let _ = task.respond_to.send(Err(format!(
+                            "file hash mismatch for {}: expected {} got {}",
+                            finished.path, finished.expected_hash, file_hash
+                        )));
+                        return;
+                    }
+                    completed_file = Some(SiteFile {
+                        path: finished.path.clone(),
+                        contents: BASE64_STANDARD.encode(finished.bytes),
+                        mime_type: infer_mime_type(&finished.path).to_string(),
+                    });
+                }
+            }
+
+            if let Some(file) = completed_file {
+                task.files.push(file);
+            }
+
+            let next_block_hash = if let Some(next_hash) = next_block_to_fetch {
+                next_hash
+            } else {
+                match start_next_file_download(&mut task) {
+                    Ok(Some(hash)) => hash,
+                    Ok(None) => {
+                        let manifest = match task.manifest.as_ref() {
+                            Some(manifest) => manifest,
+                            None => {
+                                let _ = task
+                                    .respond_to
+                                    .send(Err("site task missing manifest".to_string()));
+                                return;
+                            }
+                        };
+                        let response = GetSiteResponse {
+                            name: manifest.name.clone(),
+                            version: manifest.version,
+                            files: task.files,
+                        };
+                        let _ = task.respond_to.send(Ok(response));
+                        return;
+                    }
+                    Err(err) => {
+                        let _ = task.respond_to.send(Err(err));
+                        return;
+                    }
                 }
             };
 
-            if task.next_index >= manifest.files.len() {
-                let response = GetSiteResponse {
-                    name: manifest.name.clone(),
-                    version: manifest.version,
-                    files: task.files,
-                };
-                let _ = task.respond_to.send(Ok(response));
-                return;
-            }
-
-            let next_file = manifest.files[task.next_index].clone();
-            task.next_index += 1;
-
             let query_id = dht::get_record_bytes(
                 &mut swarm.behaviour_mut().kademlia,
-                format!("block:{}", next_file.hash),
+                format!("block:{next_block_hash}"),
             );
             get_site_queries.insert(
                 query_id,
-                GetSiteQuery::Block {
+                GetSiteQuery::FileBlock {
                     task_id,
-                    hash: next_file.hash,
-                    path: next_file.path,
+                    block_hash: next_block_hash,
                 },
             );
             get_site_tasks.insert(task_id, task);
         }
     }
+}
+
+fn start_next_file_download(task: &mut GetSiteTask) -> std::result::Result<Option<String>, String> {
+    let manifest = task
+        .manifest
+        .as_ref()
+        .ok_or_else(|| "site task missing manifest".to_string())?;
+
+    if task.next_file_index >= manifest.files.len() {
+        task.active_file = None;
+        return Ok(None);
+    }
+
+    let file = manifest.files[task.next_file_index].clone();
+    task.next_file_index += 1;
+
+    let block_hashes = file_block_hashes(&file);
+    if block_hashes.is_empty() {
+        return Err(format!(
+            "invalid site manifest: {} has no chunks",
+            file.path
+        ));
+    }
+    let first_hash = block_hashes[0].clone();
+    task.active_file = Some(ActiveFileDownload {
+        path: file.path,
+        expected_hash: file.hash,
+        block_hashes,
+        next_block_index: 1,
+        bytes: Vec::new(),
+    });
+    Ok(Some(first_hash))
+}
+
+fn file_block_hashes(file: &lattice_site::manifest::FileEntry) -> Vec<String> {
+    if !file.chunks.is_empty() {
+        return file.chunks.clone();
+    }
+    vec![file.hash.clone()]
 }
 
 fn infer_mime_type(path: &str) -> &'static str {
@@ -1958,6 +2187,7 @@ fn prepare_publish(
     site_publisher::save_manifest(&manifest, site_dir)?;
 
     let mut block_records = Vec::new();
+    let mut seen_block_hashes: HashSet<String> = HashSet::new();
     for file in &manifest.files {
         let file_path = site_dir.join(&file.path);
         let contents = fs::read(&file_path)
@@ -1973,7 +2203,57 @@ fn prepare_publish(
             );
         }
 
-        block_records.push((format!("block:{}", file.hash), contents));
+        let block_hashes = file_block_hashes(file);
+        if block_hashes.len() == 1 {
+            let block_hash = block_hashes[0].clone();
+            let actual_block_hash = hash_bytes(&contents);
+            if actual_block_hash != block_hash {
+                bail!(
+                    "block hash mismatch for {}: manifest={}, actual={}",
+                    file.path,
+                    block_hash,
+                    actual_block_hash
+                );
+            }
+            if seen_block_hashes.insert(block_hash.clone()) {
+                block_records.push((format!("block:{block_hash}"), contents));
+            }
+            continue;
+        }
+
+        let chunk_size = file
+            .chunk_size
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(DEFAULT_CHUNK_SIZE_BYTES);
+        if chunk_size == 0 {
+            bail!("invalid chunk_size for {}", file.path);
+        }
+        let chunks: Vec<&[u8]> = contents.chunks(chunk_size).collect();
+        if chunks.len() != block_hashes.len() {
+            bail!(
+                "chunk count mismatch for {}: manifest={}, actual={}",
+                file.path,
+                block_hashes.len(),
+                chunks.len()
+            );
+        }
+
+        for (i, chunk_hash) in block_hashes.iter().enumerate() {
+            let chunk = chunks[i];
+            let actual_chunk_hash = hash_bytes(chunk);
+            if actual_chunk_hash != *chunk_hash {
+                bail!(
+                    "chunk hash mismatch for {} chunk {}: manifest={}, actual={}",
+                    file.path,
+                    i,
+                    chunk_hash,
+                    actual_chunk_hash
+                );
+            }
+            if seen_block_hashes.insert(chunk_hash.clone()) {
+                block_records.push((format!("block:{chunk_hash}"), chunk.to_vec()));
+            }
+        }
     }
 
     let manifest_json =
@@ -1996,4 +2276,150 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+fn load_local_records(path: &Path) -> HashMap<String, Vec<u8>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return HashMap::new(),
+    };
+
+    let persisted: PersistedLocalRecords = match serde_json::from_str(&contents) {
+        Ok(persisted) => persisted,
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to parse local records file"
+            );
+            return HashMap::new();
+        }
+    };
+
+    let mut out = HashMap::with_capacity(persisted.records.len());
+    for (key, value_b64) in persisted.records {
+        match BASE64_STANDARD.decode(value_b64.as_bytes()) {
+            Ok(value) => {
+                out.insert(key, value);
+            }
+            Err(err) => {
+                warn!(
+                    key = %key,
+                    error = %err,
+                    "failed to decode persisted local record value"
+                );
+            }
+        }
+    }
+    out
+}
+
+fn save_local_records(path: &Path, local_records: &HashMap<String, Vec<u8>>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create local records parent directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut encoded = HashMap::with_capacity(local_records.len());
+    for (key, value) in local_records {
+        encoded.insert(key.clone(), BASE64_STANDARD.encode(value));
+    }
+    let payload = PersistedLocalRecords { records: encoded };
+    let json = serde_json::to_vec_pretty(&payload).context("failed to encode local records")?;
+
+    let mut tmp_path = PathBuf::from(path);
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!("{ext}.tmp"))
+        .unwrap_or_else(|| "tmp".to_string());
+    tmp_path.set_extension(ext);
+
+    fs::write(&tmp_path, &json)
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to replace local records file {} with {}",
+            path.display(),
+            tmp_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn remember_local_record(
+    local_records: &mut HashMap<String, Vec<u8>>,
+    local_records_path: &Path,
+    key: String,
+    value: Vec<u8>,
+) {
+    let should_write = match local_records.get(&key) {
+        Some(existing) => existing != &value,
+        None => true,
+    };
+    if !should_write {
+        return;
+    }
+
+    local_records.insert(key.clone(), value);
+    if let Err(err) = save_local_records(local_records_path, local_records) {
+        warn!(
+            key = %key,
+            path = %local_records_path.display(),
+            error = %err,
+            "failed to persist local records"
+        );
+    }
+}
+
+fn restore_local_records_to_store(
+    swarm: &mut Swarm<LatticeBehaviour>,
+    local_records: &HashMap<String, Vec<u8>>,
+) {
+    for (key, value) in local_records {
+        let record = kad::Record::new(kad::RecordKey::new(key), value.clone());
+        if let Err(err) = swarm.behaviour_mut().kademlia.store_mut().put(record) {
+            warn!(
+                key = %key,
+                error = %err,
+                "failed to restore persisted record to local store"
+            );
+        }
+    }
+}
+
+fn owned_names_from_local_records(
+    local_records: &HashMap<String, Vec<u8>>,
+    local_pubkey_hex: &str,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for (key, value) in local_records {
+        let Some(name) = key.strip_prefix("name:") else {
+            continue;
+        };
+
+        let value_str = match std::str::from_utf8(value) {
+            Ok(value_str) => value_str,
+            Err(_) => continue,
+        };
+
+        if let Some(record) = parse_verified_name_record(name, value_str) {
+            if record.key == local_pubkey_hex {
+                names.insert(name.to_string());
+            }
+            continue;
+        }
+
+        if let Some(legacy_key) = parse_legacy_name_owner(value_str) {
+            if legacy_key == local_pubkey_hex {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
 }

@@ -1,4 +1,6 @@
-use crate::manifest::{hash_file, sign_manifest, FileEntry, SiteManifest};
+use crate::manifest::{
+    hash_bytes, sign_manifest, FileEntry, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::path::Path;
@@ -34,11 +36,11 @@ pub fn build_manifest(
             .to_string_lossy()
             .replace('\\', "/");
 
-        let hash = hash_file(path)?;
-        let size = entry
-            .metadata()
-            .with_context(|| format!("failed to read metadata for {}", path.display()))?
-            .len();
+        let contents =
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let hash = hash_bytes(&contents);
+        let size = contents.len() as u64;
+        let chunks = chunk_hashes(&contents);
         total_bytes = total_bytes.saturating_add(size);
         if total_bytes > MAX_SITE_BYTES {
             bail!("site exceeds maximum total size of 100MB");
@@ -51,6 +53,8 @@ pub fn build_manifest(
             path: relative,
             hash,
             size,
+            chunk_size: Some(DEFAULT_CHUNK_SIZE_BYTES as u64),
+            chunks,
         });
     }
 
@@ -71,6 +75,18 @@ pub fn build_manifest(
 
     sign_manifest(&mut manifest, keypair)?;
     Ok(manifest)
+}
+
+fn chunk_hashes(contents: &[u8]) -> Vec<String> {
+    let mut hashes = Vec::new();
+    for chunk in contents.chunks(DEFAULT_CHUNK_SIZE_BYTES) {
+        hashes.push(hash_bytes(chunk));
+    }
+    if hashes.is_empty() {
+        // Should never happen for normal files, but keep manifest consistent.
+        hashes.push(hash_bytes(&[]));
+    }
+    hashes
 }
 
 pub fn save_manifest(manifest: &SiteManifest, site_dir: &Path) -> Result<()> {

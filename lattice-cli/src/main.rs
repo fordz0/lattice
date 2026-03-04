@@ -4,7 +4,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use directories::BaseDirs;
 use ed25519_dalek::SigningKey;
-use lattice_site::manifest::{hash_bytes, hash_file, verify_manifest, FileEntry, SiteManifest};
+use lattice_site::manifest::{
+    hash_bytes, hash_file, verify_manifest, FileEntry, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES,
+};
 use lattice_site::publisher as site_publisher;
 use rpc::{DaemonNotRunning, RpcClient};
 use serde_json::Value;
@@ -254,12 +256,26 @@ async fn run() -> Result<()> {
                 .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
 
             for file in &manifest.files {
-                let block_result = client.get_block(&file.hash).await?;
-                let hex_contents = block_result.as_str().ok_or_else(|| {
-                    anyhow!("missing content block {} for {}", file.hash, file.path)
-                })?;
-                let contents = decode_hex(hex_contents)
-                    .with_context(|| format!("invalid block hex for {}", file.path))?;
+                let mut contents = Vec::new();
+                let block_hashes = file_block_hashes(file);
+                for block_hash in block_hashes {
+                    let block_result = client.get_block(&block_hash).await?;
+                    let hex_contents = block_result.as_str().ok_or_else(|| {
+                        anyhow!("missing content block {} for {}", block_hash, file.path)
+                    })?;
+                    let block_contents = decode_hex(hex_contents)
+                        .with_context(|| format!("invalid block hex for {}", file.path))?;
+                    let actual_block_hash = hash_bytes(&block_contents);
+                    if actual_block_hash != block_hash {
+                        bail!(
+                            "chunk hash mismatch for {}: expected {}, got {}",
+                            file.path,
+                            block_hash,
+                            actual_block_hash
+                        );
+                    }
+                    contents.extend_from_slice(&block_contents);
+                }
 
                 let actual_hash = hash_bytes(&contents);
                 if actual_hash != file.hash {
@@ -411,8 +427,10 @@ fn init_site(name: Option<String>, rating: &str) -> Result<()> {
         rating: rating.to_string(),
         files: vec![FileEntry {
             path: "index.html".to_string(),
-            hash: file_hash,
+            hash: file_hash.clone(),
             size: file_size,
+            chunks: vec![file_hash],
+            chunk_size: Some(DEFAULT_CHUNK_SIZE_BYTES as u64),
         }],
         signature: String::new(),
     };
@@ -509,4 +527,11 @@ fn hex_nibble(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => bail!("invalid hex character: {}", byte as char),
     }
+}
+
+fn file_block_hashes(file: &FileEntry) -> Vec<String> {
+    if !file.chunks.is_empty() {
+        return file.chunks.clone();
+    }
+    vec![file.hash.clone()]
 }

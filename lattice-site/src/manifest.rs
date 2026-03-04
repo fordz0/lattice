@@ -6,11 +6,17 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+pub const DEFAULT_CHUNK_SIZE_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
     pub hash: String,
     pub size: u64,
+    #[serde(default)]
+    pub chunks: Vec<String>,
+    #[serde(default)]
+    pub chunk_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

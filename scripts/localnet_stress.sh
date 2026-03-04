@@ -15,8 +15,13 @@ STRESS_DIR="${LATTICE_STRESS_DIR:-/tmp/lattice-stress}"
 KEEP_RUNNING="${LATTICE_STRESS_KEEP_RUNNING:-0}"
 ASSET_FILES="${LATTICE_STRESS_ASSET_FILES:-30}"
 ASSET_BYTES="${LATTICE_STRESS_ASSET_BYTES:-8192}"
+VIDEO_BYTES="${LATTICE_STRESS_VIDEO_BYTES:-1048576}"
 SETTLE_SECS="${LATTICE_STRESS_SETTLE_SECS:-0}"
+RANGE_CHECK="${LATTICE_STRESS_RANGE_CHECK:-1}"
+RESTART_CHECK="${LATTICE_STRESS_RESTART_CHECK:-1}"
+RESTART_SETTLE_SECS="${LATTICE_STRESS_RESTART_SETTLE_SECS:-5}"
 BASE_PORT="${LATTICE_LOCALNET_BASE_PORT:-19000}"
+LAST_SITE_DIR=""
 
 if ! [[ "$NODES" =~ ^[0-9]+$ ]] || (( NODES < 2 )); then
   echo "LATTICE_STRESS_NODES must be an integer >= 2"
@@ -34,8 +39,24 @@ if ! [[ "$ASSET_BYTES" =~ ^[0-9]+$ ]] || (( ASSET_BYTES < 1 )); then
   echo "LATTICE_STRESS_ASSET_BYTES must be an integer >= 1"
   exit 1
 fi
+if ! [[ "$VIDEO_BYTES" =~ ^[0-9]+$ ]] || (( VIDEO_BYTES < 1 )); then
+  echo "LATTICE_STRESS_VIDEO_BYTES must be an integer >= 1"
+  exit 1
+fi
 if ! [[ "$SETTLE_SECS" =~ ^[0-9]+$ ]]; then
   echo "LATTICE_STRESS_SETTLE_SECS must be an integer >= 0"
+  exit 1
+fi
+if ! [[ "$RESTART_SETTLE_SECS" =~ ^[0-9]+$ ]]; then
+  echo "LATTICE_STRESS_RESTART_SETTLE_SECS must be an integer >= 0"
+  exit 1
+fi
+if [[ "$RANGE_CHECK" != "0" && "$RANGE_CHECK" != "1" ]]; then
+  echo "LATTICE_STRESS_RANGE_CHECK must be 0 or 1"
+  exit 1
+fi
+if [[ "$RESTART_CHECK" != "0" && "$RESTART_CHECK" != "1" ]]; then
+  echo "LATTICE_STRESS_RESTART_CHECK must be 0 or 1"
   exit 1
 fi
 
@@ -72,8 +93,79 @@ EOF
     # Add enough content to exercise multi-block replication paths.
     head -c "$ASSET_BYTES" /dev/urandom | base64 >"$site_dir/assets/blob-$i.txt"
   done
+  # Binary payload used for HTTP byte-range checks.
+  head -c "$VIDEO_BYTES" /dev/urandom >"$site_dir/assets/video.bin"
 
   echo "$site_dir"
+}
+
+assert_range_bytes() {
+  local site_dir="$1"
+  local node_idx="$2"
+  local range_header="$3"
+  local expected_skip="$4"
+  local expected_count="$5"
+  local label="$6"
+  local http_port
+  http_port="$(node_http_port "$node_idx")"
+
+  local expected_file="$STRESS_DIR/expected-${label}-node${node_idx}.bin"
+  local actual_file="$STRESS_DIR/actual-${label}-node${node_idx}.bin"
+  local header_file="$STRESS_DIR/headers-${label}-node${node_idx}.txt"
+  dd if="$site_dir/assets/video.bin" of="$expected_file" bs=1 skip="$expected_skip" count="$expected_count" status=none
+  curl -fsS \
+    -D "$header_file" \
+    -H "Host: ${SITE_NAME}.lat" \
+    -H "Range: $range_header" \
+    "http://127.0.0.1:$http_port/assets/video.bin" \
+    -o "$actual_file"
+
+  if ! grep -q "206" "$header_file"; then
+    echo "range check $label on node$node_idx did not return HTTP 206"
+    return 1
+  fi
+  if ! cmp -s "$expected_file" "$actual_file"; then
+    echo "range check $label on node$node_idx returned unexpected bytes"
+    return 1
+  fi
+}
+
+run_range_checks() {
+  local site_dir="$1"
+  local fail_count="$2"
+  local check_nodes=(2 "$NODES")
+  local check_idx
+  for check_idx in "${check_nodes[@]}"; do
+    local first_count=128
+    if (( VIDEO_BYTES < first_count )); then
+      first_count="$VIDEO_BYTES"
+    fi
+    local mid_start=4096
+    if (( VIDEO_BYTES <= mid_start )); then
+      mid_start=$(( VIDEO_BYTES / 3 ))
+    fi
+    local mid_end=8191
+    if (( VIDEO_BYTES <= mid_end )); then
+      mid_end=$(( VIDEO_BYTES - 1 ))
+    fi
+    local mid_count=$((mid_end - mid_start + 1))
+    local suffix_count=512
+    if (( VIDEO_BYTES < suffix_count )); then
+      suffix_count="$VIDEO_BYTES"
+    fi
+
+    if ! assert_range_bytes "$site_dir" "$check_idx" "bytes=0-$((first_count - 1))" 0 "$first_count" "first"; then
+      fail_count=$((fail_count + 1))
+    fi
+    if ! assert_range_bytes "$site_dir" "$check_idx" "bytes=${mid_start}-${mid_end}" "$mid_start" "$mid_count" "middle"; then
+      fail_count=$((fail_count + 1))
+    fi
+    if ! assert_range_bytes "$site_dir" "$check_idx" "bytes=-${suffix_count}" "$((VIDEO_BYTES - suffix_count))" "$suffix_count" "suffix"; then
+      fail_count=$((fail_count + 1))
+    fi
+  done
+
+  echo "$fail_count"
 }
 
 run_round() {
@@ -84,6 +176,7 @@ run_round() {
 
   local site_dir
   site_dir="$(create_site_round "$round")"
+  LAST_SITE_DIR="$site_dir"
 
   echo "=== round $round: publish from node1 ==="
   "$CLI_BIN" --rpc-port "$(node_rpc_port 1)" publish --dir "$site_dir" --name "$SITE_NAME"
@@ -121,6 +214,11 @@ run_round() {
     fi
   done
 
+  if [[ "$RANGE_CHECK" == "1" ]]; then
+    echo "=== round $round: HTTP range checks ==="
+    fail_count="$(run_range_checks "$site_dir" "$fail_count")"
+  fi
+
   echo "round $round summary: fetch_ok=$ok_count fetch_fail=$fail_count"
   if (( fail_count > 0 )); then
     return 1
@@ -136,6 +234,47 @@ run_stress() {
   for ((round = 1; round <= ROUNDS; round++)); do
     run_round "$round"
   done
+
+  if [[ "$RESTART_CHECK" == "1" ]]; then
+    run_restart_check
+  fi
+}
+
+run_restart_check() {
+  if [[ -z "$LAST_SITE_DIR" || ! -d "$LAST_SITE_DIR" ]]; then
+    echo "restart check skipped: no prior site directory available"
+    return 0
+  fi
+
+  echo "=== restart check: restarting localnet ==="
+  export LATTICE_LOCALNET_NODES="$NODES"
+  "$LOCALNET_SCRIPT" restart
+  if (( RESTART_SETTLE_SECS > 0 )); then
+    sleep "$RESTART_SETTLE_SECS"
+  fi
+
+  echo "=== restart check: fetch from node2 ==="
+  local restart_out="$STRESS_DIR/restart-fetch-node2"
+  rm -rf "$restart_out"
+  "$CLI_BIN" --rpc-port "$(node_rpc_port 2)" fetch "$SITE_NAME" --out "$restart_out"
+
+  local http_port
+  http_port="$(node_http_port 2)"
+  curl -fsS -H "Host: ${SITE_NAME}.lat" "http://127.0.0.1:$http_port/" >/tmp/lattice-stress-restart-http.html
+
+  if [[ "$RANGE_CHECK" == "1" ]]; then
+    echo "=== restart check: HTTP range ==="
+    local restart_first=128
+    if (( VIDEO_BYTES < restart_first )); then
+      restart_first="$VIDEO_BYTES"
+    fi
+    local restart_suffix=512
+    if (( VIDEO_BYTES < restart_suffix )); then
+      restart_suffix="$VIDEO_BYTES"
+    fi
+    assert_range_bytes "$LAST_SITE_DIR" 2 "bytes=0-$((restart_first - 1))" 0 "$restart_first" "restart-first"
+    assert_range_bytes "$LAST_SITE_DIR" 2 "bytes=-${restart_suffix}" "$((VIDEO_BYTES - restart_suffix))" "$restart_suffix" "restart-suffix"
+  fi
 }
 
 teardown() {
@@ -155,7 +294,11 @@ Env vars:
   LATTICE_STRESS_KEEP_RUNNING  1 to keep localnet running after run (default: 0)
   LATTICE_STRESS_ASSET_FILES   Number of generated asset files per round (default: 30)
   LATTICE_STRESS_ASSET_BYTES   Random bytes per asset before base64 (default: 8192)
+  LATTICE_STRESS_VIDEO_BYTES   Binary test payload size in bytes (default: 1048576)
   LATTICE_STRESS_SETTLE_SECS   Delay after publish before fetch (default: 0)
+  LATTICE_STRESS_RANGE_CHECK   1 to validate HTTP Range bytes (default: 1)
+  LATTICE_STRESS_RESTART_CHECK 1 to restart nodes and verify persistence (default: 1)
+  LATTICE_STRESS_RESTART_SETTLE_SECS Delay after restart before checks (default: 5)
   LATTICE_LOCALNET_BASE_PORT   Base port for localnet (default: 19000)
 EOF
 }
