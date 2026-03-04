@@ -582,9 +582,18 @@ fn handle_swarm_event(
                                 info!(key = ?ok.key, "kademlia publish put_record succeeded");
                             }
                             Err(err) => {
-                                warn!(error = %err, "kademlia publish put_record failed");
-                                if task.failed.is_none() {
-                                    task.failed = Some(err.to_string());
+                                let err_str = err.to_string();
+                                if err_str.contains("quorum failed") {
+                                    warn!(
+                                        task_id,
+                                        error = %err,
+                                        "put_record quorum failed but record stored locally — continuing"
+                                    );
+                                } else {
+                                    warn!(task_id, error = %err, "kademlia publish put_record failed");
+                                    if task.failed.is_none() {
+                                        task.failed = Some(err_str);
+                                    }
                                 }
                             }
                         }
