@@ -1139,6 +1139,12 @@ fn handle_swarm_event(
         )) => {
             info!(peer = %peer_id, observed_addr = %info.observed_addr, "identify received");
             for addr in info.listen_addrs {
+                // Skip loopback and private addresses — adding them to
+                // Kademlia causes dial attempts to 127.0.0.1 which connect
+                // back to ourselves instead of the remote peer.
+                if addr_is_loopback_or_private(&addr) {
+                    continue;
+                }
                 swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
             }
         }
@@ -1454,6 +1460,28 @@ fn validate_site_dir(site_dir: &str) -> Result<std::path::PathBuf, String> {
         return Err("site_dir must be a directory".to_string());
     }
     Ok(canonical)
+}
+
+/// Returns true if the multiaddr contains a loopback (127.x) or private
+/// (10.x, 172.16-31.x, 192.168.x) IP address.  These must not be added to
+/// Kademlia for remote peers — dialling 127.0.0.1 connects back to ourselves.
+fn addr_is_loopback_or_private(addr: &Multiaddr) -> bool {
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ip) => {
+                if ip.is_loopback() || ip.is_private() {
+                    return true;
+                }
+            }
+            Protocol::Ip6(ip) => {
+                if ip.is_loopback() {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn build_bootstrap_peer_ids(bootstrap_peers: &[String]) -> HashSet<libp2p::PeerId> {
