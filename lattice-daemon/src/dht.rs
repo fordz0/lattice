@@ -4,10 +4,14 @@ use libp2p::kad::store::RecordStore;
 use libp2p::kad::{self, Behaviour, QueryId, Quorum, Record};
 use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
+use std::time::Duration;
 
 pub fn new_kademlia(local_peer_id: PeerId) -> Behaviour<MemoryStore> {
     let store = MemoryStore::new(local_peer_id);
-    let config = kad::Config::default();
+    let mut config = kad::Config::default();
+    config.set_record_ttl(Some(Duration::from_secs(48 * 60 * 60)));
+    config.set_replication_interval(Some(Duration::from_secs(20 * 60 * 60)));
+    config.set_provider_record_ttl(Some(Duration::from_secs(48 * 60 * 60)));
     let mut kad = Behaviour::with_config(local_peer_id, store, config);
     kad.set_mode(Some(kad::Mode::Server));
     kad
@@ -29,13 +33,13 @@ pub fn put_record_bytes(
     value: Vec<u8>,
 ) -> Result<QueryId> {
     let record = Record::new(key.into_bytes(), value);
-    let query_id = kad
-        .put_record(record.clone(), Quorum::One)
-        .context("failed to start put_record query")?;
-
     kad.store_mut()
-        .put(record)
+        .put(record.clone())
         .context("failed to store record locally")?;
+
+    let query_id = kad
+        .put_record(record, Quorum::One)
+        .context("failed to start put_record query")?;
 
     Ok(query_id)
 }

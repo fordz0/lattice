@@ -20,6 +20,7 @@ use libp2p::gossipsub;
 use libp2p::identify;
 use libp2p::kad;
 use libp2p::mdns;
+use libp2p::multiaddr::Protocol;
 use libp2p::relay;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, Swarm};
@@ -29,6 +30,7 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
@@ -37,6 +39,9 @@ const MAX_CONCURRENT_GET_SITE: usize = 50;
 const MAX_CONCURRENT_PUBLISH: usize = 10;
 const MAX_GET_SITE_FILES: usize = 1000;
 const MAX_GET_SITE_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+const PUBLISH_OWNERSHIP_PROBES: u32 = 3;
+const PUBLISH_OWNERSHIP_PROBE_DELAY_SECS: u64 = 5;
+const RELAY_RESERVATION_RETRY_SECS: u64 = 60;
 
 #[derive(NetworkBehaviour)]
 struct LatticeBehaviour {
@@ -46,6 +51,7 @@ struct LatticeBehaviour {
     identify: identify::Behaviour,
     autonat: autonat::Behaviour,
     relay: relay::Behaviour,
+    relay_client: relay::client::Behaviour,
     dcutr: dcutr::Behaviour,
 }
 
@@ -115,6 +121,7 @@ struct PendingNameProbe {
 struct PendingPublishOwnershipCheck {
     name: String,
     site_dir: String,
+    probe_count: u32,
     respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
 }
 
@@ -155,7 +162,10 @@ async fn main() -> Result<()> {
 
     let mut swarm = transport::build_swarm(
         node_identity.keypair,
-        |key| -> std::result::Result<LatticeBehaviour, Box<dyn std::error::Error + Send + Sync>> {
+        |key, relay_client| -> std::result::Result<
+            LatticeBehaviour,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
             let mut kademlia = dht::new_kademlia(peer_id);
             dht::add_bootstrap_peers(&mut kademlia, &config.bootstrap_peers);
 
@@ -179,6 +189,7 @@ async fn main() -> Result<()> {
                 identify,
                 autonat,
                 relay,
+                relay_client,
                 dcutr,
             })
         },
@@ -191,6 +202,11 @@ async fn main() -> Result<()> {
     let quic_addr: Multiaddr =
         Multiaddr::from_str(&format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port))?;
     swarm.listen_on(quic_addr)?;
+
+    let bootstrap_peer_ids = build_bootstrap_peer_ids(&config.bootstrap_peers);
+    let mut relay_reservations: HashSet<libp2p::PeerId> = HashSet::new();
+    let mut relay_reservation_requests: HashMap<libp2p::PeerId, Instant> = HashMap::new();
+    let mut relay_connection_counts: HashMap<libp2p::PeerId, usize> = HashMap::new();
 
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcCommand>(64);
     let _rpc_server = rpc::start_rpc_server(config.rpc_port, rpc_tx.clone()).await?;
@@ -352,6 +368,7 @@ async fn main() -> Result<()> {
                                 PendingPublishOwnershipCheck {
                                     name,
                                     site_dir: canonical_site_dir.to_string_lossy().into_owned(),
+                                    probe_count: 0,
                                     respond_to,
                                 },
                             );
@@ -478,6 +495,37 @@ async fn main() -> Result<()> {
                                 },
                             );
                         }
+                        RpcCommand::RetryPublishOwnershipCheck {
+                            name,
+                            site_dir,
+                            probe_count,
+                            respond_to,
+                        } => {
+                            if let Err(err) = validate_name(&name) {
+                                let _ = respond_to.send(Err(err));
+                                continue;
+                            }
+                            let canonical_site_dir = match validate_site_dir(&site_dir) {
+                                Ok(path) => path,
+                                Err(err) => {
+                                    let _ = respond_to.send(Err(err));
+                                    continue;
+                                }
+                            };
+                            let query_id = dht::get_record(
+                                &mut swarm.behaviour_mut().kademlia,
+                                format!("name:{name}"),
+                            );
+                            pending_publish_checks.insert(
+                                query_id,
+                                PendingPublishOwnershipCheck {
+                                    name,
+                                    site_dir: canonical_site_dir.to_string_lossy().into_owned(),
+                                    probe_count,
+                                    respond_to,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -498,6 +546,10 @@ async fn main() -> Result<()> {
                     &mut next_publish_task_id,
                     &mut get_site_tasks,
                     &mut get_site_queries,
+                    &bootstrap_peer_ids,
+                    &mut relay_reservations,
+                    &mut relay_reservation_requests,
+                    &mut relay_connection_counts,
                     &owned_names,
                     &rpc_tx,
                     &site_signing_key,
@@ -524,6 +576,10 @@ fn handle_swarm_event(
     next_publish_task_id: &mut u64,
     get_site_tasks: &mut HashMap<u64, GetSiteTask>,
     get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
+    bootstrap_peer_ids: &HashSet<libp2p::PeerId>,
+    relay_reservations: &mut HashSet<libp2p::PeerId>,
+    relay_reservation_requests: &mut HashMap<libp2p::PeerId, Instant>,
+    relay_connection_counts: &mut HashMap<libp2p::PeerId, usize>,
     owned_names: &Arc<Mutex<HashSet<String>>>,
     rpc_tx: &mpsc::Sender<RpcCommand>,
     site_signing_key: &SigningKey,
@@ -534,9 +590,50 @@ fn handle_swarm_event(
             peer_id, endpoint, ..
         } => {
             info!(peer = %peer_id, address = ?endpoint.get_remote_address(), "new peer connected");
+            if bootstrap_peer_ids.contains(&peer_id) {
+                let count = relay_connection_counts.entry(peer_id.clone()).or_insert(0);
+                *count = count.saturating_add(1);
+
+                if !relay_reservations.contains(&peer_id) {
+                    let should_request = match relay_reservation_requests.get(&peer_id) {
+                        Some(started_at) => {
+                            started_at.elapsed()
+                                >= Duration::from_secs(RELAY_RESERVATION_RETRY_SECS)
+                        }
+                        None => true,
+                    };
+
+                    if should_request {
+                        let relay_addr = build_relay_reservation_addr(
+                            endpoint.get_remote_address(),
+                            peer_id.clone(),
+                        );
+                        match swarm.listen_on(relay_addr.clone()) {
+                            Ok(_) => {
+                                relay_reservation_requests.insert(peer_id.clone(), Instant::now());
+                                info!(relay = %peer_id, relay_addr = %relay_addr, "requested relay reservation");
+                            }
+                            Err(err) => {
+                                warn!(relay = %peer_id, error = %err, "failed to request relay reservation");
+                            }
+                        }
+                    }
+                }
+            }
         }
         libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
             info!(peer = %peer_id, "peer disconnected");
+            if bootstrap_peer_ids.contains(&peer_id) {
+                if let Some(count) = relay_connection_counts.get_mut(&peer_id) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        relay_connection_counts.remove(&peer_id);
+                        relay_reservations.remove(&peer_id);
+                        relay_reservation_requests.remove(&peer_id);
+                    }
+                }
+            }
         }
         libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
             info!(address = %address, "node listening");
@@ -581,19 +678,17 @@ fn handle_swarm_event(
                             Ok(ok) => {
                                 info!(key = ?ok.key, "kademlia publish put_record succeeded");
                             }
+                            Err(kad::PutRecordError::QuorumFailed { key, .. }) => {
+                                warn!(
+                                    task_id,
+                                    key = ?key,
+                                    "put_record quorum failed but record stored locally — continuing"
+                                );
+                            }
                             Err(err) => {
-                                let err_str = err.to_string();
-                                if err_str.contains("quorum failed") {
-                                    warn!(
-                                        task_id,
-                                        error = %err,
-                                        "put_record quorum failed but record stored locally — continuing"
-                                    );
-                                } else {
-                                    warn!(task_id, error = %err, "kademlia publish put_record failed");
-                                    if task.failed.is_none() {
-                                        task.failed = Some(err_str);
-                                    }
+                                warn!(task_id, error = %err, "kademlia publish put_record failed");
+                                if task.failed.is_none() {
+                                    task.failed = Some(err.to_string());
                                 }
                             }
                         }
@@ -714,6 +809,7 @@ fn handle_swarm_event(
                         }
                     }
                 } else if let Some(pending) = pending_publish_checks.remove(&id) {
+                    let next_probe_count = pending.probe_count.saturating_add(1);
                     match publish_name_ownership(&pending.name, result, local_pubkey_hex) {
                         Ok(PublishNameOwnership::OwnedByLocal) => {
                             let query_id = dht::get_record(
@@ -731,37 +827,55 @@ fn handle_swarm_event(
                             );
                         }
                         Ok(PublishNameOwnership::Unclaimed) => {
-                            let record = NameRecord::new_signed(
-                                local_pubkey_hex.to_string(),
-                                &pending.name,
-                                site_signing_key,
-                            );
-                            let payload = match serde_json::to_string(&record) {
-                                Ok(payload) => payload,
-                                Err(err) => {
-                                    let _ = pending
-                                        .respond_to
-                                        .send(Err(format!("failed to encode name record: {err}")));
-                                    return;
-                                }
-                            };
-                            match dht::put_record(
-                                &mut swarm.behaviour_mut().kademlia,
-                                format!("name:{}", pending.name),
-                                payload,
-                            ) {
-                                Ok(query_id) => {
-                                    pending_publish_claim_put.insert(
-                                        query_id,
-                                        PendingPublishClaimPut {
+                            if next_probe_count < PUBLISH_OWNERSHIP_PROBES {
+                                let rpc_tx_for_retry = rpc_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(
+                                        PUBLISH_OWNERSHIP_PROBE_DELAY_SECS,
+                                    ))
+                                    .await;
+                                    let _ = rpc_tx_for_retry
+                                        .send(RpcCommand::RetryPublishOwnershipCheck {
                                             name: pending.name,
                                             site_dir: pending.site_dir,
+                                            probe_count: next_probe_count,
                                             respond_to: pending.respond_to,
-                                        },
-                                    );
-                                }
-                                Err(err) => {
-                                    let _ = pending.respond_to.send(Err(err.to_string()));
+                                        })
+                                        .await;
+                                });
+                            } else {
+                                let record = NameRecord::new_signed(
+                                    local_pubkey_hex.to_string(),
+                                    &pending.name,
+                                    site_signing_key,
+                                );
+                                let payload = match serde_json::to_string(&record) {
+                                    Ok(payload) => payload,
+                                    Err(err) => {
+                                        let _ = pending.respond_to.send(Err(format!(
+                                            "failed to encode name record: {err}"
+                                        )));
+                                        return;
+                                    }
+                                };
+                                match dht::put_record(
+                                    &mut swarm.behaviour_mut().kademlia,
+                                    format!("name:{}", pending.name),
+                                    payload,
+                                ) {
+                                    Ok(query_id) => {
+                                        pending_publish_claim_put.insert(
+                                            query_id,
+                                            PendingPublishClaimPut {
+                                                name: pending.name,
+                                                site_dir: pending.site_dir,
+                                                respond_to: pending.respond_to,
+                                            },
+                                        );
+                                    }
+                                    Err(err) => {
+                                        let _ = pending.respond_to.send(Err(err.to_string()));
+                                    }
                                 }
                             }
                         }
@@ -903,7 +1017,7 @@ fn handle_swarm_event(
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Identify(
             identify::Event::Received { peer_id, info, .. },
         )) => {
-            info!(peer = %peer_id, "identify received");
+            info!(peer = %peer_id, observed_addr = %info.observed_addr, "identify received");
             for addr in info.listen_addrs {
                 swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
             }
@@ -918,6 +1032,48 @@ fn handle_swarm_event(
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Relay(event)) => {
             info!(event = ?event, "relay event");
         }
+        libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::RelayClient(event)) => {
+            info!(event = ?event, "relay client event");
+            match event {
+                relay::client::Event::ReservationReqAccepted { relay_peer_id, .. } => {
+                    relay_reservations.insert(relay_peer_id);
+                    relay_reservation_requests.remove(&relay_peer_id);
+                    info!(
+                        relay = %relay_peer_id,
+                        "relay reservation accepted — node reachable via relay"
+                    );
+
+                    let names = {
+                        let guard = match owned_names.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => {
+                                error!("owned_names mutex poisoned — recovering");
+                                poisoned.into_inner()
+                            }
+                        };
+                        guard.iter().cloned().collect::<Vec<_>>()
+                    };
+
+                    if !names.is_empty() {
+                        let rpc_tx_for_refresh = rpc_tx.clone();
+                        tokio::spawn(async move {
+                            for name in names {
+                                let (tx, _rx) = oneshot::channel();
+                                let _ = rpc_tx_for_refresh
+                                    .send(RpcCommand::ClaimName {
+                                        name,
+                                        pubkey_hex: String::new(),
+                                        respond_to: tx,
+                                    })
+                                    .await;
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
         libp2p::swarm::SwarmEvent::Behaviour(LatticeBehaviourEvent::Dcutr(event)) => {
             info!(event = ?event, "dcutr event");
         }
@@ -928,7 +1084,24 @@ fn handle_swarm_event(
             warn!(error = %error, "incoming connection error");
         }
         libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+            if let Some(peer_id) = peer_id {
+                if bootstrap_peer_ids.contains(&peer_id) {
+                    if relay_reservation_requests.remove(&peer_id).is_some() {
+                        warn!(
+                            relay = %peer_id,
+                            error = %error,
+                            "relay reservation failed"
+                        );
+                    }
+                }
+            }
             warn!(peer = ?peer_id, error = %error, "outgoing connection error");
+        }
+        libp2p::swarm::SwarmEvent::ExternalAddrConfirmed { address } => {
+            info!(addr = %address, "external address confirmed");
+        }
+        libp2p::swarm::SwarmEvent::ExternalAddrExpired { address } => {
+            warn!(addr = %address, "external address expired");
         }
         libp2p::swarm::SwarmEvent::ListenerError { error, .. } => {
             error!(error = %error, "listener error");
@@ -1087,6 +1260,29 @@ fn validate_site_dir(site_dir: &str) -> Result<std::path::PathBuf, String> {
         return Err("site_dir must be a directory".to_string());
     }
     Ok(canonical)
+}
+
+fn build_bootstrap_peer_ids(bootstrap_peers: &[String]) -> HashSet<libp2p::PeerId> {
+    bootstrap_peers
+        .iter()
+        .filter_map(|entry| {
+            let mut ma: Multiaddr = entry.parse().ok()?;
+            match ma.pop() {
+                Some(Protocol::P2p(peer_id)) => Some(peer_id),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn build_relay_reservation_addr(peer_addr: &Multiaddr, peer_id: libp2p::PeerId) -> Multiaddr {
+    let mut relay_addr = peer_addr.clone();
+    if let Some(Protocol::P2p(_)) = relay_addr.iter().last() {
+        relay_addr.pop();
+    }
+    relay_addr.push(Protocol::P2p(peer_id));
+    relay_addr.push(Protocol::P2pCircuit);
+    relay_addr
 }
 
 fn normalize_get_record_value(key: &str, value: String) -> Option<String> {

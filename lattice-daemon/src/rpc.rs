@@ -79,6 +79,12 @@ pub enum RpcCommand {
         probe_count: u32,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
+    RetryPublishOwnershipCheck {
+        name: String,
+        site_dir: String,
+        probe_count: u32,
+        respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
