@@ -944,8 +944,6 @@ fn handle_swarm_event(
                             };
                             let _ = task.respond_to.send(response);
 
-                            // Even when we return an error for quorum failures, keep trying
-                            // to replicate local records in the background once peers settle.
                             if succeeded || task.had_quorum_failed {
                                 let rpc_tx_retry = rpc_tx.clone();
                                 tokio::spawn(async move {
@@ -1008,7 +1006,6 @@ fn handle_swarm_event(
                         }
                     }
                 } else {
-                    // Untracked put_record (e.g. from RepublishLocalRecords).
                     match result {
                         Ok(ok) => info!(key = ?ok.key, "republish put_record succeeded"),
                         Err(kad::PutRecordError::QuorumFailed {
@@ -1382,9 +1379,6 @@ fn handle_swarm_event(
         )) => {
             info!(peer = %peer_id, observed_addr = %info.observed_addr, "identify received");
             for addr in info.listen_addrs {
-                // Skip loopback and private addresses — adding them to
-                // Kademlia causes dial attempts to 127.0.0.1 which connect
-                // back to ourselves instead of the remote peer.
                 if addr_is_loopback_or_private(&addr) {
                     continue;
                 }
@@ -1439,9 +1433,6 @@ fn handle_swarm_event(
                     });
                 }
 
-                // Re-push all locally stored records now that we have a relay address.
-                // This ensures blocks and manifests published before the relay was ready
-                // get replicated to the DHT and are reachable by other peers.
                 info!(relay = %relay_peer_id, "relay reservation accepted — scheduling DHT record re-push");
                 let rpc_tx_relay = rpc_tx.clone();
                 tokio::spawn(async move {
@@ -1506,13 +1497,6 @@ fn publish_name_ownership(
                     return Ok(PublishNameOwnership::Unclaimed);
                 }
                 if existing.key == local_pubkey_hex {
-                    return Ok(PublishNameOwnership::OwnedByLocal);
-                }
-                return Ok(PublishNameOwnership::OwnedByOther);
-            }
-
-            if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
-                if legacy_owner_key == local_pubkey_hex {
                     return Ok(PublishNameOwnership::OwnedByLocal);
                 }
                 return Ok(PublishNameOwnership::OwnedByOther);
@@ -1665,25 +1649,6 @@ fn parse_verified_name_record(name: &str, value: &str) -> Option<NameRecord> {
     Some(record)
 }
 
-fn parse_legacy_name_owner(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let candidate = if trimmed.starts_with('"') {
-        serde_json::from_str::<String>(trimmed).ok()?
-    } else {
-        trimmed.to_string()
-    };
-
-    if candidate.len() == 64 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(candidate.to_ascii_lowercase())
-    } else {
-        None
-    }
-}
-
 fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("name cannot be empty".to_string());
@@ -1717,9 +1682,6 @@ fn validate_site_dir(site_dir: &str) -> Result<std::path::PathBuf, String> {
     Ok(canonical)
 }
 
-/// Returns true if the multiaddr contains a loopback (127.x) or private
-/// (10.x, 172.16-31.x, 192.168.x) IP address.  These must not be added to
-/// Kademlia for remote peers — dialling 127.0.0.1 connects back to ourselves.
 fn addr_is_loopback_or_private(addr: &Multiaddr) -> bool {
     for proto in addr.iter() {
         match proto {
@@ -1775,10 +1737,6 @@ fn normalize_get_record_value(key: &str, value: String) -> Option<String> {
         return Some(record.key);
     }
 
-    if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
-        return Some(legacy_owner_key);
-    }
-
     None
 }
 
@@ -1817,11 +1775,6 @@ fn handle_claim_name_lookup_result(
             if existing_record.key == pubkey_hex {
                 existing_record.refresh_signed(&name, site_signing_key);
                 record_to_store = existing_record;
-            }
-        } else if let Some(legacy_owner_key) = parse_legacy_name_owner(&existing_value) {
-            if legacy_owner_key != pubkey_hex {
-                let _ = respond_to.send(Err("name already claimed".to_string()));
-                return;
             }
         }
     }
@@ -1971,12 +1924,6 @@ fn handle_get_site_query_result(
 
                     let owner_key = if let Some(owner) = parse_verified_name_record(&name, &value) {
                         owner.key
-                    } else if let Some(legacy_owner_key) = parse_legacy_name_owner(&value) {
-                        warn!(
-                            name = %name,
-                            "using legacy unsigned name owner record for compatibility"
-                        );
-                        legacy_owner_key
                     } else {
                         let _ = task
                             .respond_to
@@ -2604,13 +2551,6 @@ fn owned_names_from_local_records(
 
         if let Some(record) = parse_verified_name_record(name, value_str) {
             if record.key == local_pubkey_hex {
-                names.insert(name.to_string());
-            }
-            continue;
-        }
-
-        if let Some(legacy_key) = parse_legacy_name_owner(value_str) {
-            if legacy_key == local_pubkey_hex {
                 names.insert(name.to_string());
             }
         }

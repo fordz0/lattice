@@ -13,6 +13,7 @@ ROUNDS="${LATTICE_STRESS_ROUNDS:-3}"
 SITE_NAME="${LATTICE_STRESS_NAME:-stress}"
 STRESS_DIR="${LATTICE_STRESS_DIR:-/tmp/lattice-stress}"
 KEEP_RUNNING="${LATTICE_STRESS_KEEP_RUNNING:-0}"
+RESET_LOCALNET="${LATTICE_STRESS_RESET_LOCALNET:-1}"
 ASSET_FILES="${LATTICE_STRESS_ASSET_FILES:-30}"
 ASSET_BYTES="${LATTICE_STRESS_ASSET_BYTES:-8192}"
 VIDEO_BYTES="${LATTICE_STRESS_VIDEO_BYTES:-1048576}"
@@ -21,6 +22,7 @@ RANGE_CHECK="${LATTICE_STRESS_RANGE_CHECK:-1}"
 RESTART_CHECK="${LATTICE_STRESS_RESTART_CHECK:-1}"
 RESTART_SETTLE_SECS="${LATTICE_STRESS_RESTART_SETTLE_SECS:-5}"
 BASE_PORT="${LATTICE_LOCALNET_BASE_PORT:-19000}"
+LOCALNET_ROOT="${LATTICE_LOCALNET_DIR:-/tmp/lattice-localnet}"
 LAST_SITE_DIR=""
 
 if ! [[ "$NODES" =~ ^[0-9]+$ ]] || (( NODES < 2 )); then
@@ -59,6 +61,10 @@ if [[ "$RESTART_CHECK" != "0" && "$RESTART_CHECK" != "1" ]]; then
   echo "LATTICE_STRESS_RESTART_CHECK must be 0 or 1"
   exit 1
 fi
+if [[ "$RESET_LOCALNET" != "0" && "$RESET_LOCALNET" != "1" ]]; then
+  echo "LATTICE_STRESS_RESET_LOCALNET must be 0 or 1"
+  exit 1
+fi
 
 node_rpc_port() {
   local idx="$1"
@@ -90,10 +96,8 @@ EOF
 
   local i
   for ((i = 1; i <= ASSET_FILES; i++)); do
-    # Add enough content to exercise multi-block replication paths.
     head -c "$ASSET_BYTES" /dev/urandom | base64 >"$site_dir/assets/blob-$i.txt"
   done
-  # Binary payload used for HTTP byte-range checks.
   head -c "$VIDEO_BYTES" /dev/urandom >"$site_dir/assets/video.bin"
 
   echo "$site_dir"
@@ -113,19 +117,22 @@ assert_range_bytes() {
   local actual_file="$STRESS_DIR/actual-${label}-node${node_idx}.bin"
   local header_file="$STRESS_DIR/headers-${label}-node${node_idx}.txt"
   dd if="$site_dir/assets/video.bin" of="$expected_file" bs=1 skip="$expected_skip" count="$expected_count" status=none
-  curl -fsS \
+  if ! curl -fsS \
     -D "$header_file" \
     -H "Host: ${SITE_NAME}.lat" \
     -H "Range: $range_header" \
     "http://127.0.0.1:$http_port/assets/video.bin" \
-    -o "$actual_file"
+    -o "$actual_file"; then
+    echo "range check $label on node$node_idx request failed" >&2
+    return 1
+  fi
 
   if ! grep -q "206" "$header_file"; then
-    echo "range check $label on node$node_idx did not return HTTP 206"
+    echo "range check $label on node$node_idx did not return HTTP 206" >&2
     return 1
   fi
   if ! cmp -s "$expected_file" "$actual_file"; then
-    echo "range check $label on node$node_idx returned unexpected bytes"
+    echo "range check $label on node$node_idx returned unexpected bytes" >&2
     return 1
   fi
 }
@@ -179,7 +186,10 @@ run_round() {
   LAST_SITE_DIR="$site_dir"
 
   echo "=== round $round: publish from node1 ==="
-  "$CLI_BIN" --rpc-port "$(node_rpc_port 1)" publish --dir "$site_dir" --name "$SITE_NAME"
+  if ! "$CLI_BIN" --rpc-port "$(node_rpc_port 1)" publish --dir "$site_dir" --name "$SITE_NAME"; then
+    echo "publish failed for ${SITE_NAME}.lat in round $round" >&2
+    return 1
+  fi
   if (( SETTLE_SECS > 0 )); then
     echo "=== round $round: settling for ${SETTLE_SECS}s before fetch ==="
     sleep "$SETTLE_SECS"
@@ -226,17 +236,26 @@ run_round() {
 }
 
 run_stress() {
+  if [[ "$RESET_LOCALNET" == "1" ]]; then
+    export LATTICE_LOCALNET_NODES="$NODES"
+    "$LOCALNET_SCRIPT" stop || true
+    rm -rf "$LOCALNET_ROOT" "$STRESS_DIR"
+  fi
   mkdir -p "$STRESS_DIR"
   export LATTICE_LOCALNET_NODES="$NODES"
   "$LOCALNET_SCRIPT" restart
 
   local round
   for ((round = 1; round <= ROUNDS; round++)); do
-    run_round "$round"
+    if ! run_round "$round"; then
+      return 1
+    fi
   done
 
   if [[ "$RESTART_CHECK" == "1" ]]; then
-    run_restart_check
+    if ! run_restart_check; then
+      return 1
+    fi
   fi
 }
 
@@ -292,6 +311,7 @@ Env vars:
   LATTICE_STRESS_NAME          Site name to publish/fetch (default: stress)
   LATTICE_STRESS_DIR           Working directory (default: /tmp/lattice-stress)
   LATTICE_STRESS_KEEP_RUNNING  1 to keep localnet running after run (default: 0)
+  LATTICE_STRESS_RESET_LOCALNET 1 to wipe localnet/state before run (default: 1)
   LATTICE_STRESS_ASSET_FILES   Number of generated asset files per round (default: 30)
   LATTICE_STRESS_ASSET_BYTES   Random bytes per asset before base64 (default: 8192)
   LATTICE_STRESS_VIDEO_BYTES   Binary test payload size in bytes (default: 1048576)

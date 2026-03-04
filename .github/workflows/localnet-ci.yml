@@ -32,6 +32,8 @@ jobs:
         env:
           LATTICE_STRESS_NODES: "4"
           LATTICE_STRESS_ROUNDS: "1"
+          LATTICE_STRESS_NAME: "stress-${{ github.run_id }}-${{ github.run_attempt }}"
+          LATTICE_STRESS_RESET_LOCALNET: "1"
           LATTICE_STRESS_ASSET_FILES: "12"
           LATTICE_STRESS_ASSET_BYTES: "4096"
           LATTICE_STRESS_VIDEO_BYTES: "524288"

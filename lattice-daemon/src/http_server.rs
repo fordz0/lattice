@@ -1,19 +1,20 @@
 use anyhow::{Context, Result};
+use axum::body::{Body, Bytes};
 use axum::extract::{Host, OriginalUri, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use sha2::{Digest, Sha256};
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::warn;
 
-use lattice_site::manifest::{
-    hash_bytes, verify_manifest, FileEntry, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES,
-};
+use lattice_site::manifest::{verify_manifest, FileEntry, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES};
 
 use crate::rpc::RpcCommand;
 
@@ -108,16 +109,21 @@ async fn serve_site(
     };
     let effective_range = requested_range.unwrap_or(full_range);
 
-    let bytes = match fetch_file_range(&rpc_tx, file, effective_range).await {
-        Ok(bytes) => bytes,
+    let content_length = if file.size == 0 {
+        0
+    } else {
+        effective_range.end - effective_range.start + 1
+    };
+    let body = match stream_file_range(rpc_tx.clone(), file.clone(), effective_range) {
+        Ok(body) => body,
         Err(response) => return fail(response),
     };
 
     let mime_type = infer_mime_type(&file.path);
     if let Some(range) = requested_range {
-        file_response(mime_type, bytes, file.size, Some(range))
+        file_response(mime_type, body, content_length, file.size, Some(range))
     } else {
-        file_response(mime_type, bytes, file.size, None)
+        file_response(mime_type, body, content_length, file.size, None)
     }
 }
 
@@ -306,11 +312,18 @@ fn parse_requested_range(
     }))
 }
 
-async fn fetch_file_range(
-    rpc_tx: &mpsc::Sender<RpcCommand>,
+#[derive(Clone)]
+struct ChunkSlice {
+    block_hash: String,
+    start: usize,
+    end: usize,
+}
+
+#[allow(clippy::result_large_err)]
+fn plan_range_slices(
     file: &FileEntry,
     range: ByteRange,
-) -> std::result::Result<Vec<u8>, Response> {
+) -> std::result::Result<Vec<ChunkSlice>, Response> {
     if file.size == 0 {
         return Ok(Vec::new());
     }
@@ -326,7 +339,7 @@ async fn fetch_file_range(
         .filter(|size| *size > 0)
         .unwrap_or(DEFAULT_CHUNK_SIZE_BYTES);
 
-    let expected_len_u64 = range.end - range.start + 1;
+    let expected_len_u64 = range.end.saturating_sub(range.start).saturating_add(1);
     if expected_len_u64 > MAX_HTTP_RESPONSE_BYTES {
         return Err(plain(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -335,8 +348,9 @@ async fn fetch_file_range(
     }
     let expected_len = usize::try_from(expected_len_u64)
         .map_err(|_| plain(StatusCode::PAYLOAD_TOO_LARGE, "requested range too large"))?;
-    let mut out = Vec::with_capacity(expected_len);
 
+    let mut slices = Vec::new();
+    let mut planned_len: usize = 0;
     for (chunk_index, block_hash) in block_hashes.iter().enumerate() {
         let chunk_start = if block_hashes.len() == 1 {
             0
@@ -361,53 +375,85 @@ async fn fetch_file_range(
             continue;
         }
 
-        let chunk_bytes = fetch_block_bytes(rpc_tx, block_hash).await?;
-        let actual_hash = hex::encode(Sha256::digest(&chunk_bytes));
-        if actual_hash != *block_hash {
-            return Err(plain_owned(
-                StatusCode::BAD_GATEWAY,
-                format!(
-                    "block hash mismatch for chunk {}: expected {} got {}",
-                    block_hash, block_hash, actual_hash
-                ),
-            ));
-        }
-
         let within_start = range.start.saturating_sub(chunk_start) as usize;
         let within_end = if range.end < chunk_end_from_manifest {
             range.end.saturating_sub(chunk_start) as usize
         } else {
-            chunk_bytes.len().saturating_sub(1)
+            usize::try_from(chunk_end_from_manifest.saturating_sub(chunk_start)).unwrap_or(0)
         };
 
-        if within_start >= chunk_bytes.len()
-            || within_end >= chunk_bytes.len()
-            || within_start > within_end
-        {
+        if within_start >= chunk_size || within_end >= chunk_size || within_start > within_end {
             return Err(plain(StatusCode::BAD_GATEWAY, "chunk bounds mismatch"));
         }
 
-        out.extend_from_slice(&chunk_bytes[within_start..=within_end]);
+        planned_len = planned_len.saturating_add(within_end.saturating_sub(within_start) + 1);
+        slices.push(ChunkSlice {
+            block_hash: block_hash.clone(),
+            start: within_start,
+            end: within_end,
+        });
     }
 
-    if out.len() != expected_len {
+    if planned_len != expected_len {
         return Err(plain(StatusCode::BAD_GATEWAY, "incomplete file range"));
     }
 
-    if range.start == 0 && range.end.saturating_add(1) == file.size {
-        let full_hash = hash_bytes(&out);
-        if full_hash != file.hash {
-            return Err(plain_owned(
-                StatusCode::BAD_GATEWAY,
-                format!(
-                    "file hash mismatch for {}: expected {} got {}",
-                    file.path, file.hash, full_hash
-                ),
-            ));
-        }
-    }
+    Ok(slices)
+}
 
-    Ok(out)
+#[allow(clippy::result_large_err)]
+fn stream_file_range(
+    rpc_tx: mpsc::Sender<RpcCommand>,
+    file: FileEntry,
+    range: ByteRange,
+) -> std::result::Result<Body, Response> {
+    if file.size == 0 {
+        return Ok(Body::empty());
+    }
+    let slices = plan_range_slices(&file, range)?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<Bytes, io::Error>>(8);
+
+    tokio::spawn(async move {
+        for slice in slices {
+            let chunk_bytes = match fetch_block_bytes(&rpc_tx, &slice.block_hash).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    let _ = tx
+                        .send(Err(io::Error::other("failed to fetch block bytes")))
+                        .await;
+                    break;
+                }
+            };
+
+            let actual_hash = hex::encode(Sha256::digest(&chunk_bytes));
+            if actual_hash != slice.block_hash {
+                let _ = tx.send(Err(io::Error::other("block hash mismatch"))).await;
+                break;
+            }
+
+            if slice.start >= chunk_bytes.len()
+                || slice.end >= chunk_bytes.len()
+                || slice.start > slice.end
+            {
+                let _ = tx
+                    .send(Err(io::Error::other("chunk bounds mismatch")))
+                    .await;
+                break;
+            }
+
+            if tx
+                .send(Ok(Bytes::copy_from_slice(
+                    &chunk_bytes[slice.start..=slice.end],
+                )))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    Ok(Body::from_stream(ReceiverStream::new(rx)))
 }
 
 async fn fetch_block_bytes(
@@ -569,7 +615,8 @@ fn infer_mime_type(path: &str) -> &'static str {
 
 fn file_response(
     mime_type: &str,
-    body: Vec<u8>,
+    body: Body,
+    content_length: u64,
     total_size: u64,
     range: Option<ByteRange>,
 ) -> Response {
@@ -583,7 +630,7 @@ fn file_response(
     );
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
-    let len_header = HeaderValue::from_str(&body.len().to_string())
+    let len_header = HeaderValue::from_str(&content_length.to_string())
         .unwrap_or_else(|_| HeaderValue::from_static("0"));
     headers.insert(header::CONTENT_LENGTH, len_header);
 

@@ -83,7 +83,6 @@ fn chunk_hashes(contents: &[u8]) -> Vec<String> {
         hashes.push(hash_bytes(chunk));
     }
     if hashes.is_empty() {
-        // Should never happen for normal files, but keep manifest consistent.
         hashes.push(hash_bytes(&[]));
     }
     hashes

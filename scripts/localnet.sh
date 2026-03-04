@@ -195,8 +195,6 @@ start_all() {
   fi
   local bootstrap_entry="/ip4/127.0.0.1/tcp/$(node_p2p_port 1)/p2p/$node1_peer_id"
 
-  # Reconfigure node1 to bootstrap locally, then restart it so the test net
-  # does not depend on external bootstrap nodes.
   write_config 1 "$bootstrap_entry"
   stop_node 1
   start_node 1
