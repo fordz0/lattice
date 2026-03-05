@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lattice Topology Viewer</title>
+  <style>
+    :root {
+      --bg: #0a1016;
+      --panel: #121a23;
+      --line: #203243;
+      --text: #d7e3ef;
+      --muted: #7f94a8;
+      --good: #28d17c;
+      --warn: #ff7d66;
+      --accent: #58b3ff;
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      background: radial-gradient(circle at top, #12202d 0%, var(--bg) 55%);
+      color: var(--text);
+    }
+    .app {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .header h1 {
+      font-size: 22px;
+      margin: 0;
+      letter-spacing: 0.03em;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .stats {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    #canvas-wrap {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(9, 14, 20, 0.85);
+      overflow: hidden;
+    }
+    canvas {
+      width: 100%;
+      height: 650px;
+      display: block;
+    }
+    .legend {
+      margin-top: 10px;
+      display: flex;
+      gap: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .dot-good { background: var(--good); }
+    .dot-warn { background: var(--warn); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="header">
+      <h1>Lattice Localnet Topology</h1>
+      <div class="controls">
+        <button id="load-default">Load topology.json</button>
+        <input id="file-input" type="file" accept="application/json">
+      </div>
+    </div>
+    <div id="stats" class="stats">No topology loaded.</div>
+    <div id="canvas-wrap"><canvas id="graph"></canvas></div>
+    <div class="legend">
+      <span><span class="dot dot-good"></span>healthy node</span>
+      <span><span class="dot dot-warn"></span>RPC error</span>
+    </div>
+  </div>
+  <script>
+    const canvas = document.getElementById("graph");
+    const ctx = canvas.getContext("2d");
+    const statsEl = document.getElementById("stats");
+    let graph = { nodes: [], edges: [] };
+    let simTimer = null;
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render();
+    }
+
+    function initSimulation(data) {
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      const nodes = data.nodes.map((n, i) => {
+        const angle = (Math.PI * 2 * i) / Math.max(data.nodes.length, 1);
+        const r = Math.min(width, height) * 0.35;
+        return {
+          ...n,
+          x: width / 2 + Math.cos(angle) * r,
+          y: height / 2 + Math.sin(angle) * r,
+          vx: 0,
+          vy: 0,
+        };
+      });
+      const byIndex = new Map(nodes.map(n => [n.index, n]));
+      const edges = data.edges.map(e => ({ a: byIndex.get(e.source), b: byIndex.get(e.target) }))
+        .filter(e => e.a && e.b);
+      graph = { nodes, edges };
+      if (simTimer) clearInterval(simTimer);
+      simTimer = setInterval(stepAndRender, 16);
+      setTimeout(() => {
+        clearInterval(simTimer);
+        simTimer = null;
+      }, 5000);
+      render();
+    }
+
+    function stepAndRender() {
+      const nodes = graph.nodes;
+      const edges = graph.edges;
+      if (!nodes.length) return;
+
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      const centerX = width / 2;
+      const centerY = height / 2;
+
+      for (const n of nodes) {
+        const dx = centerX - n.x;
+        const dy = centerY - n.y;
+        n.vx += dx * 0.0007;
+        n.vy += dy * 0.0007;
+      }
+
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i];
+          const b = nodes[j];
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          const d2 = dx * dx + dy * dy + 0.01;
+          const force = 2200 / d2;
+          const fx = dx * force * 0.0015;
+          const fy = dy * force * 0.0015;
+          a.vx += fx;
+          a.vy += fy;
+          b.vx -= fx;
+          b.vy -= fy;
+        }
+      }
+
+      for (const e of edges) {
+        const dx = e.b.x - e.a.x;
+        const dy = e.b.y - e.a.y;
+        const dist = Math.max(Math.hypot(dx, dy), 1);
+        const target = 140;
+        const stretch = (dist - target) * 0.0035;
+        const fx = (dx / dist) * stretch;
+        const fy = (dy / dist) * stretch;
+        e.a.vx += fx;
+        e.a.vy += fy;
+        e.b.vx -= fx;
+        e.b.vy -= fy;
+      }
+
+      for (const n of nodes) {
+        n.vx *= 0.9;
+        n.vy *= 0.9;
+        n.x += n.vx;
+        n.y += n.vy;
+        n.x = Math.max(25, Math.min(width - 25, n.x));
+        n.y = Math.max(25, Math.min(height - 25, n.y));
+      }
+      render();
+    }
+
+    function render() {
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      ctx.clearRect(0, 0, width, height);
+
+      for (const e of graph.edges) {
+        ctx.strokeStyle = "rgba(88,179,255,0.25)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(e.a.x, e.a.y);
+        ctx.lineTo(e.b.x, e.b.y);
+        ctx.stroke();
+      }
+
+      for (const n of graph.nodes) {
+        const bad = Boolean(n.error);
+        ctx.fillStyle = bad ? "#ff7d66" : "#28d17c";
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, 11, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = "#d7e3ef";
+        ctx.font = "12px ui-sans-serif, system-ui";
+        ctx.textAlign = "center";
+        ctx.fillText(n.label, n.x, n.y - 15);
+        ctx.fillStyle = "#7f94a8";
+        ctx.fillText(`rpc:${n.rpc_port}`, n.x, n.y + 24);
+      }
+    }
+
+    function setStats(data) {
+      const ok = data.nodes.filter(n => !n.error).length;
+      const edges = data.edges.length;
+      const generated = data.generated_at_unix
+        ? new Date(data.generated_at_unix * 1000).toLocaleString()
+        : "unknown";
+      statsEl.textContent = `nodes: ${data.nodes.length} (ok: ${ok})  edges: ${edges}  generated: ${generated}`;
+    }
+
+    function loadData(data) {
+      if (!data || !Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+        alert("Invalid topology JSON");
+        return;
+      }
+      setStats(data);
+      initSimulation(data);
+    }
+
+    async function loadDefault() {
+      try {
+        const res = await fetch("topology.json", { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        loadData(data);
+      } catch (err) {
+        statsEl.textContent = `Failed to load topology.json: ${err}`;
+      }
+    }
+
+    document.getElementById("load-default").addEventListener("click", loadDefault);
+    document.getElementById("file-input").addEventListener("change", async (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      loadData(JSON.parse(text));
+    });
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+  </script>
+</body>
+</html>

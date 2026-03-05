@@ -11,6 +11,7 @@ const RESERVED_PREFIXES: &[&str] = &["name:", "site:", "block:"];
 pub struct NodeInfoResponse {
     pub peer_id: String,
     pub connected_peers: u32,
+    pub connected_peer_ids: Vec<String>,
     pub listen_addrs: Vec<String>,
 }
 

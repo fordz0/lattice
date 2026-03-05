@@ -6,6 +6,7 @@ web-ext-artifacts/
 
 # Local runtime data and generated keys
 /.lattice/
+tools/topology-viewer/topology.json
 **/identity.key
 **/named_keys/
 

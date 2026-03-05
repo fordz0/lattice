@@ -449,9 +449,14 @@ async fn main() -> Result<()> {
                 if let Some(cmd) = maybe_cmd {
                     match cmd {
                         RpcCommand::NodeInfo { respond_to } => {
+                            let connected_peer_ids = swarm
+                                .connected_peers()
+                                .map(ToString::to_string)
+                                .collect();
                             let info = NodeInfoResponse {
                                 peer_id: peer_id.to_string(),
                                 connected_peers: swarm.connected_peers().count() as u32,
+                                connected_peer_ids,
                                 listen_addrs: swarm.listeners().map(ToString::to_string).collect(),
                             };
                             let _ = respond_to.send(info);
