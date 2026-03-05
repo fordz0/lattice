@@ -3,5 +3,7 @@ pub mod dht;
 pub mod http_server;
 pub mod names;
 pub mod node;
+pub mod proxy_server;
 pub mod rpc;
+pub mod tls;
 pub mod transport;

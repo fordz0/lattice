@@ -10,7 +10,7 @@ CLI_BIN="${LATTICE_CLI_BIN:-$REPO_ROOT/target/release/lattice-cli}"
 
 NODES="${LATTICE_STRESS_NODES:-12}"
 ROUNDS="${LATTICE_STRESS_ROUNDS:-3}"
-SITE_NAME="${LATTICE_STRESS_NAME:-stress}"
+SITE_NAME="${LATTICE_STRESS_NAME:-stress-${RANDOM}-$$}"
 STRESS_DIR="${LATTICE_STRESS_DIR:-/tmp/lattice-stress}"
 KEEP_RUNNING="${LATTICE_STRESS_KEEP_RUNNING:-0}"
 RESET_LOCALNET="${LATTICE_STRESS_RESET_LOCALNET:-1}"
@@ -19,6 +19,7 @@ ASSET_BYTES="${LATTICE_STRESS_ASSET_BYTES:-8192}"
 VIDEO_BYTES="${LATTICE_STRESS_VIDEO_BYTES:-1048576}"
 SETTLE_SECS="${LATTICE_STRESS_SETTLE_SECS:-0}"
 RANGE_CHECK="${LATTICE_STRESS_RANGE_CHECK:-1}"
+HTTPS_PROXY_CHECK="${LATTICE_STRESS_HTTPS_PROXY_CHECK:-1}"
 RESTART_CHECK="${LATTICE_STRESS_RESTART_CHECK:-1}"
 RESTART_SETTLE_SECS="${LATTICE_STRESS_RESTART_SETTLE_SECS:-5}"
 BASE_PORT="${LATTICE_LOCALNET_BASE_PORT:-19000}"
@@ -57,6 +58,10 @@ if [[ "$RANGE_CHECK" != "0" && "$RANGE_CHECK" != "1" ]]; then
   echo "LATTICE_STRESS_RANGE_CHECK must be 0 or 1"
   exit 1
 fi
+if [[ "$HTTPS_PROXY_CHECK" != "0" && "$HTTPS_PROXY_CHECK" != "1" ]]; then
+  echo "LATTICE_STRESS_HTTPS_PROXY_CHECK must be 0 or 1"
+  exit 1
+fi
 if [[ "$RESTART_CHECK" != "0" && "$RESTART_CHECK" != "1" ]]; then
   echo "LATTICE_STRESS_RESTART_CHECK must be 0 or 1"
   exit 1
@@ -74,6 +79,11 @@ node_rpc_port() {
 node_http_port() {
   local idx="$1"
   echo $((BASE_PORT + (idx - 1) * 10 + 2))
+}
+
+node_proxy_port() {
+  local idx="$1"
+  echo $((BASE_PORT + (idx - 1) * 10 + 4))
 }
 
 create_site_round() {
@@ -229,6 +239,23 @@ run_round() {
     fail_count="$(run_range_checks "$site_dir" "$fail_count")"
   fi
 
+  if [[ "$HTTPS_PROXY_CHECK" == "1" ]]; then
+    echo "=== round $round: HTTPS proxy checks ==="
+    for check_idx in "${check_nodes[@]}"; do
+      local proxy_port
+      local ca_path
+      proxy_port="$(node_proxy_port "$check_idx")"
+      ca_path="${LOCALNET_ROOT}/node${check_idx}/tls/lattice-local-ca.pem"
+      if ! curl -fsS \
+        --proxy "http://127.0.0.1:$proxy_port" \
+        --cacert "$ca_path" \
+        "https://${SITE_NAME}.loom/" >/tmp/lattice-stress-https-$check_idx.html; then
+        echo "https proxy check failed on node$check_idx proxy $proxy_port"
+        fail_count=$((fail_count + 1))
+      fi
+    done
+  fi
+
   echo "round $round summary: fetch_ok=$ok_count fetch_fail=$fail_count"
   if (( fail_count > 0 )); then
     return 1
@@ -294,6 +321,17 @@ run_restart_check() {
     assert_range_bytes "$LAST_SITE_DIR" 2 "bytes=0-$((restart_first - 1))" 0 "$restart_first" "restart-first"
     assert_range_bytes "$LAST_SITE_DIR" 2 "bytes=-${restart_suffix}" "$((VIDEO_BYTES - restart_suffix))" "$restart_suffix" "restart-suffix"
   fi
+
+  if [[ "$HTTPS_PROXY_CHECK" == "1" ]]; then
+    local proxy_port
+    local ca_path
+    proxy_port="$(node_proxy_port 2)"
+    ca_path="${LOCALNET_ROOT}/node2/tls/lattice-local-ca.pem"
+    curl -fsS \
+      --proxy "http://127.0.0.1:$proxy_port" \
+      --cacert "$ca_path" \
+      "https://${SITE_NAME}.loom/" >/tmp/lattice-stress-restart-https.html
+  fi
 }
 
 teardown() {
@@ -308,7 +346,7 @@ Usage: $(basename "$0") [run|stop]
 Env vars:
   LATTICE_STRESS_NODES         Number of local nodes (default: 12)
   LATTICE_STRESS_ROUNDS        Number of publish/fetch rounds (default: 3)
-  LATTICE_STRESS_NAME          Site name to publish/fetch (default: stress)
+  LATTICE_STRESS_NAME          Site name to publish/fetch (default: stress-<random>-<pid>)
   LATTICE_STRESS_DIR           Working directory (default: /tmp/lattice-stress)
   LATTICE_STRESS_KEEP_RUNNING  1 to keep localnet running after run (default: 0)
   LATTICE_STRESS_RESET_LOCALNET 1 to wipe localnet/state before run (default: 1)
@@ -317,6 +355,7 @@ Env vars:
   LATTICE_STRESS_VIDEO_BYTES   Binary test payload size in bytes (default: 1048576)
   LATTICE_STRESS_SETTLE_SECS   Delay after publish before fetch (default: 0)
   LATTICE_STRESS_RANGE_CHECK   1 to validate HTTP Range bytes (default: 1)
+  LATTICE_STRESS_HTTPS_PROXY_CHECK 1 to validate HTTPS via local proxy (default: 1)
   LATTICE_STRESS_RESTART_CHECK 1 to restart nodes and verify persistence (default: 1)
   LATTICE_STRESS_RESTART_SETTLE_SECS Delay after restart before checks (default: 5)
   LATTICE_LOCALNET_BASE_PORT   Base port for localnet (default: 19000)

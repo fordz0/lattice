@@ -7,9 +7,11 @@ use lattice_daemon::dht;
 use lattice_daemon::http_server;
 use lattice_daemon::names::NameRecord;
 use lattice_daemon::node::{load_or_create_identity, load_or_create_site_signing_key};
+use lattice_daemon::proxy_server;
 use lattice_daemon::rpc::{
     self, GetSiteResponse, NodeInfoResponse, PublishSiteOk, RpcCommand, SiteFile,
 };
+use lattice_daemon::tls;
 use lattice_daemon::transport;
 use lattice_site::manifest::{hash_bytes, verify_manifest, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES};
 use lattice_site::publisher as site_publisher;
@@ -196,6 +198,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let config = load_or_create_config()?;
     let had_separate_site_key = config.data_dir.join("site_signing.key").exists();
@@ -296,20 +299,59 @@ async fn main() -> Result<()> {
 
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcCommand>(64);
     let _rpc_server = rpc::start_rpc_server(config.rpc_port, rpc_tx.clone()).await?;
+    let tls_material = tls::load_or_create_local_tls(&config.data_dir)?;
+    info!(
+        path = %tls_material.ca_cert_path.display(),
+        "local HTTPS CA certificate ready"
+    );
     let http_port = config.http_port;
+    let https_port = config.https_port;
+    let proxy_port = config.proxy_port;
     let http_rpc_tx = rpc_tx.clone();
+    let http_ca_cert = Some(tls_material.ca_cert_pem.clone());
     let _http_server = tokio::spawn(async move {
-        if let Err(err) = http_server::start_http_server(http_port, http_rpc_tx).await {
+        if let Err(err) = http_server::start_http_server(http_port, http_rpc_tx, http_ca_cert).await
+        {
             error!(error = %err, "http server exited");
         }
     });
     info!(http_port, "HTTP server listening");
+    let https_rpc_tx = rpc_tx.clone();
+    let https_ca_cert = tls_material.ca_cert_pem.clone();
+    let https_cert_path = tls_material.server_cert_path.clone();
+    let https_key_path = tls_material.server_key_path.clone();
+    let _https_server = tokio::spawn(async move {
+        if let Err(err) = http_server::start_https_server(
+            https_port,
+            https_rpc_tx,
+            https_ca_cert,
+            https_cert_path,
+            https_key_path,
+        )
+        .await
+        {
+            error!(error = %err, "https server exited");
+        }
+    });
+    info!(https_port, "HTTPS server listening");
+    let proxy_http_port = http_port;
+    let proxy_ca_key_pem = tls_material.ca_key_pem.clone();
+    let _proxy_server = tokio::spawn(async move {
+        if let Err(err) =
+            proxy_server::start_proxy_server(proxy_port, proxy_http_port, proxy_ca_key_pem).await
+        {
+            error!(error = %err, "proxy server exited");
+        }
+    });
+    info!(proxy_port, "HTTP proxy server listening");
 
     info!(peer_id = %peer_id, "lattice daemon started");
     info!(
         port = config.listen_port,
         rpc_port = config.rpc_port,
         http_port = config.http_port,
+        https_port = config.https_port,
+        proxy_port = config.proxy_port,
         "listening and RPC configured"
     );
 

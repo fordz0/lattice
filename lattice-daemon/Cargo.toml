@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 axum = "0.7"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.22"
 directories = "5"
 ed25519-dalek = "2"
@@ -14,11 +15,14 @@ jsonrpsee = { version = "0.24", features = ["server"] }
 lattice-site = { path = "../lattice-site" }
 libp2p = { version = "0.56", features = ["tokio", "tcp", "quic", "noise", "yamux", "kad", "mdns", "gossipsub", "macros", "identify", "autonat", "relay", "dcutr"] }
 rand = "0.8"
+rcgen = "0.12"
+rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 sled = "0.34"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
 tokio-stream = "0.1"
 toml = "1"
 tower = "0.4"

@@ -5,8 +5,10 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use axum_server::tls_rustls::RustlsConfig;
 use sha2::{Digest, Sha256};
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
@@ -24,6 +26,8 @@ const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_FILES: usize = 1000;
 const MAX_MANIFEST_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_HTTP_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
+const LOOM_SUFFIX: &str = ".loom";
+const LOCAL_HTTPS_SUFFIX: &str = ".loom.lattice.localhost";
 
 static HTTP_REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -33,13 +37,31 @@ static HTTP_BLOCK_FETCH_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_BLOCK_FETCH_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_OWNER_MISMATCH_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-pub async fn start_http_server(port: u16, rpc_tx: mpsc::Sender<RpcCommand>) -> Result<()> {
-    let app = Router::new()
+#[derive(Clone)]
+struct AppState {
+    rpc_tx: mpsc::Sender<RpcCommand>,
+    ca_cert_pem: Option<String>,
+}
+
+fn build_app(state: AppState) -> Router {
+    Router::new()
         .route("/__lattice_metrics", get(metrics_endpoint))
+        .route("/__lattice_ca.pem", get(ca_cert_endpoint))
         .route("/", get(serve_site))
         .route("/*path", get(serve_site))
-        .with_state(rpc_tx)
-        .layer(CorsLayer::new().allow_origin(Any));
+        .with_state(state)
+        .layer(CorsLayer::new().allow_origin(Any))
+}
+
+pub async fn start_http_server(
+    port: u16,
+    rpc_tx: mpsc::Sender<RpcCommand>,
+    ca_cert_pem: Option<String>,
+) -> Result<()> {
+    let app = build_app(AppState {
+        rpc_tx,
+        ca_cert_pem,
+    });
 
     let listen_addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&listen_addr)
@@ -53,11 +75,37 @@ pub async fn start_http_server(port: u16, rpc_tx: mpsc::Sender<RpcCommand>) -> R
     Ok(())
 }
 
+pub async fn start_https_server(
+    port: u16,
+    rpc_tx: mpsc::Sender<RpcCommand>,
+    ca_cert_pem: String,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+) -> Result<()> {
+    let app = build_app(AppState {
+        rpc_tx,
+        ca_cert_pem: Some(ca_cert_pem),
+    });
+    let listen_addr = format!("127.0.0.1:{port}");
+    let addr: std::net::SocketAddr = listen_addr
+        .parse()
+        .with_context(|| format!("failed to parse HTTPS listen address {listen_addr}"))?;
+    let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+        .await
+        .context("failed to load HTTPS cert/key")?;
+
+    axum_server::bind_rustls(addr, tls_config)
+        .serve(app.into_make_service())
+        .await
+        .context("HTTPS server stopped unexpectedly")?;
+    Ok(())
+}
+
 async fn serve_site(
     Host(host): Host,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    State(rpc_tx): State<mpsc::Sender<RpcCommand>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
     HTTP_REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
     if headers.contains_key(header::RANGE) {
@@ -84,7 +132,7 @@ async fn serve_site(
         None => return fail(plain(StatusCode::BAD_REQUEST, "invalid path")),
     };
 
-    let manifest = match fetch_manifest(&rpc_tx, &site_name).await {
+    let manifest = match fetch_manifest(&state.rpc_tx, &site_name).await {
         Ok(manifest) => manifest,
         Err(response) => return fail(response),
     };
@@ -114,7 +162,7 @@ async fn serve_site(
     } else {
         effective_range.end - effective_range.start + 1
     };
-    let body = match stream_file_range(rpc_tx.clone(), file.clone(), effective_range) {
+    let body = match stream_file_range(state.rpc_tx.clone(), file.clone(), effective_range) {
         Ok(body) => body,
         Err(response) => return fail(response),
     };
@@ -638,10 +686,28 @@ fn parse_site_name_from_host(raw_host: &str) -> Option<String> {
         .next()
         .unwrap_or(raw_host)
         .to_ascii_lowercase();
-    match host.strip_suffix(".loom") {
-        Some(name) if !name.is_empty() => Some(name.to_string()),
-        _ => None,
+    if let Some(name) = host.strip_suffix(LOCAL_HTTPS_SUFFIX) {
+        if is_valid_site_label(name) {
+            return Some(name.to_string());
+        }
     }
+    if let Some(name) = host.strip_suffix(LOOM_SUFFIX) {
+        if is_valid_site_label(name) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn is_valid_site_label(name: &str) -> bool {
+    if name.is_empty() || name.len() > 63 {
+        return false;
+    }
+    if name.starts_with('-') || name.ends_with('-') || name.contains('.') {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 fn infer_mime_type(path: &str) -> &'static str {
@@ -766,6 +832,27 @@ async fn metrics_endpoint() -> Response {
     (StatusCode::OK, headers, body).into_response()
 }
 
+async fn ca_cert_endpoint(State(state): State<AppState>) -> Response {
+    let Some(ca_cert_pem) = state.ca_cert_pem else {
+        return plain(StatusCode::NOT_FOUND, "lattice local CA unavailable");
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-pem-file"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"lattice-local-ca.pem\""),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    (StatusCode::OK, headers, ca_cert_pem).into_response()
+}
+
 fn record_http_error(status: StatusCode) {
     if status.is_client_error() || status.is_server_error() {
         HTTP_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -869,5 +956,26 @@ mod tests {
     fn safe_manifest_path_rejects_backslashes_and_nul() {
         assert!(!is_safe_manifest_path("a\\b"));
         assert!(!is_safe_manifest_path("a\0b"));
+    }
+
+    #[test]
+    fn parses_loom_host_suffixes() {
+        assert_eq!(
+            parse_site_name_from_host("benjf.loom"),
+            Some("benjf".to_string())
+        );
+        assert_eq!(
+            parse_site_name_from_host("benjf.loom.lattice.localhost:7443"),
+            Some("benjf".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_loom_hosts() {
+        assert_eq!(parse_site_name_from_host("bad.name.loom"), None);
+        assert_eq!(parse_site_name_from_host("_bad.loom"), None);
+        assert_eq!(parse_site_name_from_host("-bad.loom"), None);
+        assert_eq!(parse_site_name_from_host("bad-.loom"), None);
+        assert_eq!(parse_site_name_from_host(".loom"), None);
     }
 }

@@ -28,6 +28,16 @@ jobs:
       - name: Build release binaries
         run: cargo build --release -p lattice-daemon -p lattice-cli -p lattice-site
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Dependency audit
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2025-0057 \
+            --ignore RUSTSEC-2024-0384 \
+            --ignore RUSTSEC-2024-0436
+
       - name: Run localnet stress (range + restart)
         env:
           LATTICE_STRESS_NODES: "4"

@@ -1,6 +1,9 @@
 # Rust build artifacts
 /target/
 
+# Extension build artifacts
+web-ext-artifacts/
+
 # Local runtime data and generated keys
 /.lattice/
 **/identity.key

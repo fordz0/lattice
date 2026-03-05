@@ -34,6 +34,16 @@ node_http_port() {
   echo $((BASE_PORT + (idx - 1) * 10 + 2))
 }
 
+node_https_port() {
+  local idx="$1"
+  echo $((BASE_PORT + (idx - 1) * 10 + 3))
+}
+
+node_proxy_port() {
+  local idx="$1"
+  echo $((BASE_PORT + (idx - 1) * 10 + 4))
+}
+
 node_dir() {
   local idx="$1"
   echo "$ROOT_DIR/node$idx"
@@ -85,11 +95,15 @@ write_config() {
   local p2p_port
   local rpc_port
   local http_port
+  local https_port
+  local proxy_port
   local dir
 
   p2p_port="$(node_p2p_port "$idx")"
   rpc_port="$(node_rpc_port "$idx")"
   http_port="$(node_http_port "$idx")"
+  https_port="$(node_https_port "$idx")"
+  proxy_port="$(node_proxy_port "$idx")"
   dir="$(node_dir "$idx")"
 
   mkdir -p "$dir"
@@ -97,6 +111,8 @@ write_config() {
 listen_port = $p2p_port
 rpc_port = $rpc_port
 http_port = $http_port
+https_port = $https_port
+proxy_port = $proxy_port
 listen_address = "127.0.0.1"
 data_dir = "$dir"
 bootstrap_peers = ["$bootstrap_entry"]
@@ -111,6 +127,8 @@ start_node() {
   local p2p_port
   local rpc_port
   local http_port
+  local https_port
+  local proxy_port
 
   pidfile="$(node_pidfile "$idx")"
   if [[ -f "$pidfile" ]]; then
@@ -128,18 +146,22 @@ start_node() {
   p2p_port="$(node_p2p_port "$idx")"
   rpc_port="$(node_rpc_port "$idx")"
   http_port="$(node_http_port "$idx")"
+  https_port="$(node_https_port "$idx")"
+  proxy_port="$(node_proxy_port "$idx")"
 
   mkdir -p "$dir"
   LATTICE_DATA_DIR="$dir" \
     LATTICE_PORT="$p2p_port" \
     LATTICE_RPC_PORT="$rpc_port" \
     LATTICE_HTTP_PORT="$http_port" \
+    LATTICE_HTTPS_PORT="$https_port" \
+    LATTICE_PROXY_PORT="$proxy_port" \
     RUST_LOG="$RUST_LOG_LEVEL" \
     "$DAEMON_BIN" >"$log_file" 2>&1 &
 
   local pid="$!"
   echo "$pid" >"$pidfile"
-  echo "started node$idx (pid $pid) p2p=$p2p_port rpc=$rpc_port http=$http_port"
+  echo "started node$idx (pid $pid) p2p=$p2p_port rpc=$rpc_port http=$http_port https=$https_port proxy=$proxy_port"
 }
 
 stop_node() {

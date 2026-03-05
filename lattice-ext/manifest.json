@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "Lattice",
   "version": "0.1.0",
-  "description": "Access .loom sites on the Lattice P2P network",
+  "description": "Access .loom sites over local HTTPS on the Lattice network",
   "permissions": [
     "proxy",
     "webRequest",

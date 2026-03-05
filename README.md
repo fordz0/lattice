@@ -61,6 +61,8 @@ mkdir mysite && cd mysite
 ### Visit .loom sites in Firefox
 
 - Firefox extension install steps: [lattice-ext/INSTALL.md](lattice-ext/INSTALL.md)
+- For secure lock icons, import the local Lattice CA (`/__lattice_ca.pem`) as documented.
+- The extension keeps `https://*.loom` in the URL bar while routing traffic through your local daemon proxy.
 - You can also use `lattice-cli fetch` to retrieve site content locally.
 
 ---
@@ -108,4 +110,4 @@ See [BOOTSTRAP.md](BOOTSTRAP.md).
 
 ## Licence
 
-MIT — do whatever you want with it.
+GPL-3.0 — see [LICENSE](LICENSE).

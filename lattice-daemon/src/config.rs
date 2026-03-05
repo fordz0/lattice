@@ -11,6 +11,10 @@ pub struct Config {
     pub rpc_port: u16,
     #[serde(default = "default_http_port")]
     pub http_port: u16,
+    #[serde(default = "default_https_port")]
+    pub https_port: u16,
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
     /// IP address to listen on.  Defaults to 0.0.0.0 (all interfaces).
     /// Set to a specific IP (e.g. the public IP on a VPS) to prevent
     /// loopback/private addresses from being advertised to the network.
@@ -35,6 +39,8 @@ impl Default for Config {
             listen_port: 7779,
             rpc_port: 7780,
             http_port: default_http_port(),
+            https_port: default_https_port(),
+            proxy_port: default_proxy_port(),
             listen_address: default_listen_address(),
             data_dir,
             bootstrap_peers: Config::default_bootstrap_peers(),
@@ -60,6 +66,8 @@ struct EnvOverrides {
     listen_port: Option<u16>,
     rpc_port: Option<u16>,
     http_port: Option<u16>,
+    https_port: Option<u16>,
+    proxy_port: Option<u16>,
     data_dir: Option<PathBuf>,
 }
 
@@ -69,6 +77,8 @@ impl EnvOverrides {
             listen_port: parse_env_port("LATTICE_PORT")?,
             rpc_port: parse_env_port("LATTICE_RPC_PORT")?,
             http_port: parse_env_port("LATTICE_HTTP_PORT")?,
+            https_port: parse_env_port("LATTICE_HTTPS_PORT")?,
+            proxy_port: parse_env_port("LATTICE_PROXY_PORT")?,
             data_dir: env::var("LATTICE_DATA_DIR").ok().map(PathBuf::from),
         })
     }
@@ -129,6 +139,14 @@ fn load_or_create_config_with_overrides(overrides: EnvOverrides) -> Result<Confi
         config.http_port = port;
     }
 
+    if let Some(port) = overrides.https_port {
+        config.https_port = port;
+    }
+
+    if let Some(port) = overrides.proxy_port {
+        config.proxy_port = port;
+    }
+
     if let Some(dir) = overrides.data_dir {
         config.data_dir = dir;
         fs::create_dir_all(&config.data_dir).with_context(|| {
@@ -155,6 +173,14 @@ fn load_or_create_config_with_overrides(overrides: EnvOverrides) -> Result<Confi
 
 fn default_http_port() -> u16 {
     7781
+}
+
+fn default_https_port() -> u16 {
+    7443
+}
+
+fn default_proxy_port() -> u16 {
+    7782
 }
 
 fn default_listen_address() -> String {
@@ -186,6 +212,8 @@ mod tests {
             listen_port: 10000,
             rpc_port: 10001,
             http_port: 10002,
+            https_port: 10443,
+            proxy_port: 10003,
             listen_address: "127.0.0.1".to_string(),
             data_dir: default_dir.clone(),
             bootstrap_peers: vec!["/ip4/1.1.1.1/tcp/7779/p2p/default".to_string()],
@@ -194,6 +222,8 @@ mod tests {
             listen_port: 19000,
             rpc_port: 19001,
             http_port: 19002,
+            https_port: 19443,
+            proxy_port: 19003,
             listen_address: "127.0.0.1".to_string(),
             data_dir: override_dir.clone(),
             bootstrap_peers: vec!["/ip4/127.0.0.1/tcp/19000/p2p/override".to_string()],
@@ -218,6 +248,8 @@ mod tests {
         assert_eq!(config.listen_port, 19000);
         assert_eq!(config.rpc_port, 19001);
         assert_eq!(config.http_port, 19002);
+        assert_eq!(config.https_port, 19443);
+        assert_eq!(config.proxy_port, 19003);
         assert_eq!(config.data_dir, override_dir);
         assert_eq!(
             config.bootstrap_peers,

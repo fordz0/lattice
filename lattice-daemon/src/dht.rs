@@ -30,7 +30,9 @@ pub fn new_kademlia(local_peer_id: PeerId) -> Behaviour<MemoryStore> {
     // include bootstrap/relay nodes even when other peers are XOR-closer
     // to the key.  Critical for NAT-traversed nodes that can only reach
     // bootstrap peers — the default K=20 can miss them entirely.
-    config.set_replication_factor(NonZeroUsize::new(200).unwrap());
+    if let Some(replication_factor) = NonZeroUsize::new(200) {
+        config.set_replication_factor(replication_factor);
+    }
     let mut kad = Behaviour::with_config(local_peer_id, store, config);
     kad.set_mode(Some(kad::Mode::Server));
     kad
