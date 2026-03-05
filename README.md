@@ -72,6 +72,10 @@ mkdir mysite && cd mysite
 Want to help keep the network alive by running a bootstrap node?
 See [BOOTSTRAP.md](BOOTSTRAP.md).
 
+## For App Builders
+
+Draft app-layer guidance lives in [APP_API.md](APP_API.md).
+
 ---
 
 ## How it works

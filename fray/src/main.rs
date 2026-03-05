@@ -16,16 +16,28 @@ async fn main() -> Result<()> {
         .and_then(|raw| raw.parse::<u16>().ok())
         .unwrap_or(8890);
     let data_dir = fray_data_dir()?;
+    let lattice_rpc_port = std::env::var("FRAY_LATTICE_RPC_PORT")
+        .ok()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .unwrap_or(7780);
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("failed to create {}", data_dir.display()))?;
 
     let store = FrayStore::open(&data_dir)?;
-    let app = app(AppState { store });
+    let app = app(AppState {
+        store,
+        lattice_rpc_port,
+    });
     let listen_addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&listen_addr)
         .await
         .with_context(|| format!("failed to bind fray api on {listen_addr}"))?;
-    info!(port, data_dir = %data_dir.display(), "fray api started");
+    info!(
+        port,
+        lattice_rpc_port,
+        data_dir = %data_dir.display(),
+        "fray api started"
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await

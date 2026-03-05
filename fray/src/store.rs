@@ -35,7 +35,7 @@ impl FrayStore {
             created_at,
         };
 
-        let key = format!("{POST_PREFIX}{id}");
+        let key = post_key(&id);
         let encoded = serde_json::to_vec(&post).context("failed to serialize post")?;
         self.db
             .insert(key.as_bytes(), encoded)
@@ -47,7 +47,7 @@ impl FrayStore {
     pub fn get_post(&self, fray: &str, post_id: &str) -> Result<Option<Post>> {
         FrayName::parse(fray).map_err(map_route_error)?;
         validate_post_id(post_id)?;
-        let key = format!("{POST_PREFIX}{post_id}");
+        let key = post_key(post_id);
         let Some(value) = self
             .db
             .get(key.as_bytes())
@@ -64,10 +64,14 @@ impl FrayStore {
     }
 
     pub fn list_posts(&self, fray: &str, limit: usize) -> Result<Vec<PostSummary>> {
+        let posts = self.list_posts_full(fray, limit)?;
+        Ok(posts.iter().map(PostSummary::from).collect())
+    }
+
+    pub fn list_posts_full(&self, fray: &str, limit: usize) -> Result<Vec<Post>> {
         let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
         let max = limit.clamp(1, 200);
         let mut posts = Vec::new();
-
         for item in self.db.scan_prefix(POST_PREFIX.as_bytes()) {
             let (_key, value) = item.context("failed to iterate posts")?;
             let post: Post = match serde_json::from_slice(&value) {
@@ -78,14 +82,38 @@ impl FrayStore {
                 posts.push(post);
             }
         }
-
         posts.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
                 .then_with(|| b.id.cmp(&a.id))
         });
         posts.truncate(max);
-        Ok(posts.iter().map(PostSummary::from).collect())
+        Ok(posts)
+    }
+
+    pub fn upsert_post(&self, post: Post) -> Result<()> {
+        FrayName::parse(&post.fray).map_err(map_route_error)?;
+        Username::parse(&post.author).map_err(map_route_error)?;
+        validate_title(&post.title)?;
+        validate_body(&post.body)?;
+        validate_post_id(&post.id)?;
+
+        let now = now_secs()?;
+        if post.created_at > now.saturating_add(300) {
+            return Err(anyhow!("post timestamp too far in the future"));
+        }
+
+        let key = post_key(&post.id);
+        let encoded = serde_json::to_vec(&post).context("failed to serialize post")?;
+        self.db
+            .insert(key.as_bytes(), encoded)
+            .context("failed to upsert post")?;
+        Ok(())
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        self.db.flush().context("failed to flush fray db")?;
+        Ok(())
     }
 }
 
@@ -131,6 +159,10 @@ fn new_post_id(ts: u64) -> Result<String> {
 
 fn map_route_error(err: FrayRouteError) -> anyhow::Error {
     anyhow!(err.to_string())
+}
+
+fn post_key(id: &str) -> String {
+    format!("{POST_PREFIX}{id}")
 }
 
 #[cfg(test)]
