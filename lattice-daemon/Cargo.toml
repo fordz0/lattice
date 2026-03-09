@@ -17,7 +17,7 @@ jsonrpsee = { version = "0.24", features = ["server", "http-client"] }
 lattice-core = { path = "../lattice-core" }
 lattice-site = { path = "../lattice-site" }
 libp2p = { version = "0.56", features = ["tokio", "tcp", "quic", "noise", "yamux", "kad", "mdns", "gossipsub", "macros", "identify", "autonat", "relay", "dcutr", "request-response", "cbor"] }
-lru = "0.12"
+lru = "0.16"
 rand = "0.8"
 rcgen = "0.12"
 rustls = "0.23"

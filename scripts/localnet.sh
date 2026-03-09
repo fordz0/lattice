@@ -107,6 +107,10 @@ write_config() {
   dir="$(node_dir "$idx")"
 
   mkdir -p "$dir"
+  local bootstrap_config="[]"
+  if [[ -n "$bootstrap_entry" ]]; then
+    bootstrap_config="[\"$bootstrap_entry\"]"
+  fi
   cat >"$dir/config.toml" <<EOF
 listen_port = $p2p_port
 rpc_port = $rpc_port
@@ -115,7 +119,8 @@ https_port = $https_port
 proxy_port = $proxy_port
 listen_address = "127.0.0.1"
 data_dir = "$dir"
-bootstrap_peers = ["$bootstrap_entry"]
+bootstrap_peers = $bootstrap_config
+mdns_enabled = false
 EOF
 }
 
@@ -203,6 +208,7 @@ start_all() {
   ensure_bins
   mkdir -p "$ROOT_DIR"
 
+  write_config 1 ""
   start_node 1
   if ! wait_for_rpc "$(node_rpc_port 1)"; then
     echo "node1 RPC did not come up. Check $(node_log 1)"
@@ -217,7 +223,7 @@ start_all() {
   fi
   local bootstrap_entry="/ip4/127.0.0.1/tcp/$(node_p2p_port 1)/p2p/$node1_peer_id"
 
-  write_config 1 "$bootstrap_entry"
+  write_config 1 ""
   stop_node 1
   start_node 1
   if ! wait_for_rpc "$(node_rpc_port 1)"; then

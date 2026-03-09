@@ -22,6 +22,8 @@ pub struct Config {
     pub listen_address: String,
     pub data_dir: PathBuf,
     pub bootstrap_peers: Vec<String>,
+    #[serde(default = "default_mdns_enabled")]
+    pub mdns_enabled: bool,
     #[serde(default = "default_mime_policy_strict")]
     pub mime_policy_strict: bool,
     #[serde(default = "default_session_cache_max_bytes")]
@@ -48,6 +50,7 @@ impl Default for Config {
             listen_address: default_listen_address(),
             data_dir,
             bootstrap_peers: Config::default_bootstrap_peers(),
+            mdns_enabled: default_mdns_enabled(),
             mime_policy_strict: default_mime_policy_strict(),
             session_cache_max_bytes: default_session_cache_max_bytes(),
         }
@@ -163,10 +166,6 @@ fn load_or_create_config_with_overrides(overrides: EnvOverrides) -> Result<Confi
         })?;
     }
 
-    if config.bootstrap_peers.is_empty() {
-        config.bootstrap_peers = Config::default_bootstrap_peers();
-    }
-
     fs::create_dir_all(&config.data_dir).with_context(|| {
         format!(
             "failed to ensure data_dir {} exists",
@@ -195,6 +194,10 @@ fn default_listen_address() -> String {
 
 fn default_mime_policy_strict() -> bool {
     false
+}
+
+fn default_mdns_enabled() -> bool {
+    true
 }
 
 fn default_session_cache_max_bytes() -> usize {
@@ -231,6 +234,7 @@ mod tests {
             listen_address: "127.0.0.1".to_string(),
             data_dir: default_dir.clone(),
             bootstrap_peers: vec!["/ip4/1.1.1.1/tcp/7779/p2p/default".to_string()],
+            mdns_enabled: true,
             mime_policy_strict: false,
             session_cache_max_bytes: default_session_cache_max_bytes(),
         };
@@ -243,6 +247,7 @@ mod tests {
             listen_address: "127.0.0.1".to_string(),
             data_dir: override_dir.clone(),
             bootstrap_peers: vec!["/ip4/127.0.0.1/tcp/19000/p2p/override".to_string()],
+            mdns_enabled: false,
             mime_policy_strict: true,
             session_cache_max_bytes: 123456,
         };

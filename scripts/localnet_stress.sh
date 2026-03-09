@@ -22,8 +22,11 @@ RANGE_CHECK="${LATTICE_STRESS_RANGE_CHECK:-1}"
 HTTPS_PROXY_CHECK="${LATTICE_STRESS_HTTPS_PROXY_CHECK:-1}"
 RESTART_CHECK="${LATTICE_STRESS_RESTART_CHECK:-1}"
 RESTART_SETTLE_SECS="${LATTICE_STRESS_RESTART_SETTLE_SECS:-5}"
-BASE_PORT="${LATTICE_LOCALNET_BASE_PORT:-19000}"
-LOCALNET_ROOT="${LATTICE_LOCALNET_DIR:-/tmp/lattice-localnet}"
+FETCH_RETRIES="${LATTICE_STRESS_FETCH_RETRIES:-10}"
+FETCH_RETRY_SECS="${LATTICE_STRESS_FETCH_RETRY_SECS:-1}"
+DEFAULT_BASE_PORT=$((20000 + (RANDOM % 20000)))
+BASE_PORT="${LATTICE_LOCALNET_BASE_PORT:-$DEFAULT_BASE_PORT}"
+LOCALNET_ROOT="${LATTICE_LOCALNET_DIR:-/tmp/lattice-localnet-${SITE_NAME}}"
 LAST_SITE_DIR=""
 
 if ! [[ "$NODES" =~ ^[0-9]+$ ]] || (( NODES < 2 )); then
@@ -52,6 +55,14 @@ if ! [[ "$SETTLE_SECS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$RESTART_SETTLE_SECS" =~ ^[0-9]+$ ]]; then
   echo "LATTICE_STRESS_RESTART_SETTLE_SECS must be an integer >= 0"
+  exit 1
+fi
+if ! [[ "$FETCH_RETRIES" =~ ^[0-9]+$ ]] || (( FETCH_RETRIES < 1 )); then
+  echo "LATTICE_STRESS_FETCH_RETRIES must be an integer >= 1"
+  exit 1
+fi
+if ! [[ "$FETCH_RETRY_SECS" =~ ^[0-9]+$ ]]; then
+  echo "LATTICE_STRESS_FETCH_RETRY_SECS must be an integer >= 0"
   exit 1
 fi
 if [[ "$RANGE_CHECK" != "0" && "$RANGE_CHECK" != "1" ]]; then
@@ -209,7 +220,19 @@ run_round() {
   for ((node_idx = 2; node_idx <= NODES; node_idx++)); do
     local out_dir="$STRESS_DIR/fetch-round-$round-node-$node_idx"
     rm -rf "$out_dir"
-    if "$CLI_BIN" --rpc-port "$(node_rpc_port "$node_idx")" fetch "$SITE_NAME" --out "$out_dir" >/tmp/lattice-stress-fetch-$node_idx.log 2>&1; then
+    local attempt
+    local fetched=0
+    for ((attempt = 1; attempt <= FETCH_RETRIES; attempt++)); do
+      if "$CLI_BIN" --rpc-port "$(node_rpc_port "$node_idx")" fetch "$SITE_NAME" --out "$out_dir" >/tmp/lattice-stress-fetch-$node_idx.log 2>&1; then
+        fetched=1
+        break
+      fi
+      rm -rf "$out_dir"
+      if (( attempt < FETCH_RETRIES )) && (( FETCH_RETRY_SECS > 0 )); then
+        sleep "$FETCH_RETRY_SECS"
+      fi
+    done
+    if (( fetched == 1 )); then
       ok_count=$((ok_count + 1))
     else
       fail_count=$((fail_count + 1))
@@ -263,6 +286,8 @@ run_round() {
 }
 
 run_stress() {
+  export LATTICE_LOCALNET_BASE_PORT="$BASE_PORT"
+  export LATTICE_LOCALNET_DIR="$LOCALNET_ROOT"
   if [[ "$RESET_LOCALNET" == "1" ]]; then
     export LATTICE_LOCALNET_NODES="$NODES"
     "$LOCALNET_SCRIPT" stop || true
@@ -287,6 +312,8 @@ run_stress() {
 }
 
 run_restart_check() {
+  export LATTICE_LOCALNET_BASE_PORT="$BASE_PORT"
+  export LATTICE_LOCALNET_DIR="$LOCALNET_ROOT"
   if [[ -z "$LAST_SITE_DIR" || ! -d "$LAST_SITE_DIR" ]]; then
     echo "restart check skipped: no prior site directory available"
     return 0
@@ -302,7 +329,19 @@ run_restart_check() {
   echo "=== restart check: fetch from node2 ==="
   local restart_out="$STRESS_DIR/restart-fetch-node2"
   rm -rf "$restart_out"
-  "$CLI_BIN" --rpc-port "$(node_rpc_port 2)" fetch "$SITE_NAME" --out "$restart_out"
+  local attempt
+  for ((attempt = 1; attempt <= FETCH_RETRIES; attempt++)); do
+    if "$CLI_BIN" --rpc-port "$(node_rpc_port 2)" fetch "$SITE_NAME" --out "$restart_out"; then
+      break
+    fi
+    rm -rf "$restart_out"
+    if (( attempt == FETCH_RETRIES )); then
+      return 1
+    fi
+    if (( FETCH_RETRY_SECS > 0 )); then
+      sleep "$FETCH_RETRY_SECS"
+    fi
+  done
 
   local http_port
   http_port="$(node_http_port 2)"
@@ -335,6 +374,8 @@ run_restart_check() {
 }
 
 teardown() {
+  export LATTICE_LOCALNET_BASE_PORT="$BASE_PORT"
+  export LATTICE_LOCALNET_DIR="$LOCALNET_ROOT"
   export LATTICE_LOCALNET_NODES="$NODES"
   "$LOCALNET_SCRIPT" stop
 }
@@ -358,6 +399,8 @@ Env vars:
   LATTICE_STRESS_HTTPS_PROXY_CHECK 1 to validate HTTPS via local proxy (default: 1)
   LATTICE_STRESS_RESTART_CHECK 1 to restart nodes and verify persistence (default: 1)
   LATTICE_STRESS_RESTART_SETTLE_SECS Delay after restart before checks (default: 5)
+  LATTICE_STRESS_FETCH_RETRIES Number of fetch attempts before failing (default: 10)
+  LATTICE_STRESS_FETCH_RETRY_SECS Delay between fetch attempts (default: 1)
   LATTICE_LOCALNET_BASE_PORT   Base port for localnet (default: 19000)
 EOF
 }
