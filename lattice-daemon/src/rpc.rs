@@ -2,10 +2,13 @@ use anyhow::Result;
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
+use lattice_core::moderation::ModerationRule;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 const RESERVED_PREFIXES: &[&str] = &["name:", "site:", "block:"];
+const MAX_PUT_KEY_BYTES: usize = 256;
+const MAX_PUT_VALUE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeInfoResponse {
@@ -36,6 +39,66 @@ pub struct GetSiteResponse {
     pub files: Vec<SiteFile>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetSiteManifestResponse {
+    pub manifest_json: String,
+    pub trust: TrustState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustState {
+    pub status: String,
+    pub explicitly_trusted: bool,
+    pub first_seen_at: Option<u64>,
+    pub previous_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModerationCheck {
+    pub kind: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedPublisher {
+    pub publisher_b64: String,
+    pub label: String,
+    pub added_at: u64,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnownPublisher {
+    pub site_name: String,
+    pub publisher_b64: String,
+    pub first_seen_at: u64,
+    pub explicitly_trusted: bool,
+    pub explicitly_trusted_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KnownPublisherStatus {
+    FirstSeen,
+    Matches,
+    KeyChanged {
+        previous_key: String,
+        first_seen_at: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantineEntryResponse {
+    pub id: String,
+    pub created_at: u64,
+    pub matched_rule_id: String,
+    pub matched_kind: String,
+    pub matched_value: String,
+    pub record_key: Option<String>,
+    pub publisher: Option<String>,
+    pub content_hash: Option<String>,
+    pub site_name: Option<String>,
+}
+
 pub enum RpcCommand {
     NodeInfo {
         respond_to: oneshot::Sender<NodeInfoResponse>,
@@ -56,10 +119,11 @@ pub enum RpcCommand {
     },
     GetSiteManifest {
         name: String,
-        respond_to: oneshot::Sender<Option<String>>,
+        respond_to: oneshot::Sender<Option<GetSiteManifestResponse>>,
     },
     GetBlock {
         hash: String,
+        site_key: Option<String>,
         respond_to: oneshot::Sender<Option<String>>,
     },
     GetSite {
@@ -73,6 +137,79 @@ pub enum RpcCommand {
     },
     ListNames {
         respond_to: oneshot::Sender<Vec<String>>,
+    },
+    PinSite {
+        name: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    UnpinSite {
+        name: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ListPinned {
+        respond_to: oneshot::Sender<Vec<String>>,
+    },
+    ModAddRule {
+        kind: String,
+        value: String,
+        action: String,
+        note: Option<String>,
+        respond_to: oneshot::Sender<Result<String, String>>,
+    },
+    ModRemoveRule {
+        id: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ModListRules {
+        respond_to: oneshot::Sender<Vec<ModerationRule>>,
+    },
+    ModPurgeLocal {
+        kind: String,
+        value: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ModQuarantineList {
+        respond_to: oneshot::Sender<Vec<QuarantineEntryResponse>>,
+    },
+    ModCheck {
+        kind: String,
+        value: String,
+        respond_to: oneshot::Sender<Option<String>>,
+    },
+    ModCheckMany {
+        checks: Vec<ModerationCheck>,
+        respond_to: oneshot::Sender<Option<String>>,
+    },
+    TrustAdd {
+        publisher_b64: String,
+        label: String,
+        note: Option<String>,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    TrustRemove {
+        publisher_b64: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    TrustList {
+        respond_to: oneshot::Sender<Vec<TrustedPublisher>>,
+    },
+    TrustCheck {
+        publisher_b64: String,
+        respond_to: oneshot::Sender<Option<TrustedPublisher>>,
+    },
+    TrustSite {
+        name: String,
+        pin: bool,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    UntrustSite {
+        name: String,
+        unpin: bool,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    KnownPublisherStatus {
+        name: String,
+        respond_to: oneshot::Sender<Option<KnownPublisher>>,
     },
     RetryNameProbe {
         name: String,
@@ -127,6 +264,65 @@ struct ClaimNameParams {
     pubkey_hex: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SiteNameParams {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModAddRuleParams {
+    kind: String,
+    value: String,
+    action: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModRemoveRuleParams {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModPurgeLocalParams {
+    kind: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModCheckParams {
+    kind: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModCheckManyParams {
+    checks: Vec<ModerationCheck>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustAddParams {
+    publisher_b64: String,
+    label: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustPublisherParams {
+    publisher_b64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrustSiteParams {
+    name: String,
+    pin: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UntrustSiteParams {
+    name: String,
+    unpin: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct PutRecordResponse {
     status: String,
@@ -167,6 +363,16 @@ pub async fn start_rpc_server(
 
     module.register_async_method("put_record", |params, ctx, _| async move {
         let PutRecordParams { key, value } = params.parse()?;
+
+        if let Err(err) = validate_record_key(&key) {
+            return Err(internal_error(err));
+        }
+        if value.len() > MAX_PUT_VALUE_BYTES {
+            return Err(internal_error(format!(
+                "value exceeds maximum size of {} bytes",
+                MAX_PUT_VALUE_BYTES
+            )));
+        }
 
         if let Some(name) = key.strip_prefix("name:") {
             if let Err(err) = validate_name(name) {
@@ -282,6 +488,7 @@ pub async fn start_rpc_server(
 
         ctx.send(RpcCommand::GetBlock {
             hash,
+            site_key: None,
             respond_to: resp_tx,
         })
         .await
@@ -357,6 +564,369 @@ pub async fn start_rpc_server(
         Ok::<_, ErrorObjectOwned>(names)
     })?;
 
+    module.register_async_method("pin_site", |params, ctx, _| async move {
+        let SiteNameParams { name } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::PinSite {
+            name,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch pin_site: {e}")))?;
+
+        let result = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("pin_site response dropped: {e}")))?;
+        match result {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("unpin_site", |params, ctx, _| async move {
+        let SiteNameParams { name } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::UnpinSite {
+            name,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch unpin_site: {e}")))?;
+
+        let result = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("unpin_site response dropped: {e}")))?;
+        match result {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("list_pinned", |_, ctx, _| async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ListPinned {
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch list_pinned: {e}")))?;
+
+        let sites = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("list_pinned response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(sites)
+    })?;
+
+    module.register_async_method("mod_add_rule", |params, ctx, _| async move {
+        let ModAddRuleParams {
+            kind,
+            value,
+            action,
+            note,
+        } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ModAddRule {
+            kind,
+            value,
+            action,
+            note,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch mod_add_rule: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("mod_add_rule response dropped: {e}")))?
+        {
+            Ok(rule_id) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "status": "ok",
+                "id": rule_id,
+            })),
+            Err(err) => Ok::<_, ErrorObjectOwned>(serde_json::json!({
+                "status": "err",
+                "error": err,
+            })),
+        }
+    })?;
+
+    module.register_async_method("mod_remove_rule", |params, ctx, _| async move {
+        let ModRemoveRuleParams { id } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ModRemoveRule {
+            id,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch mod_remove_rule: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("mod_remove_rule response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("mod_list_rules", |_, ctx, _| async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ModListRules {
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch mod_list_rules: {e}")))?;
+
+        let rules = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("mod_list_rules response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(rules)
+    })?;
+
+    module.register_async_method("mod_purge_local", |params, ctx, _| async move {
+        let ModPurgeLocalParams { kind, value } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ModPurgeLocal {
+            kind,
+            value,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch mod_purge_local: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("mod_purge_local response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("mod_quarantine_list", |_, ctx, _| async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ModQuarantineList {
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch mod_quarantine_list: {e}")))?;
+
+        let quarantined = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("mod_quarantine_list response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(quarantined)
+    })?;
+
+    module.register_async_method("mod_check", |params, ctx, _| async move {
+        let ModCheckParams { kind, value } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ModCheck {
+            kind,
+            value,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch mod_check: {e}")))?;
+
+        let result = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("mod_check response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(result)
+    })?;
+
+    module.register_async_method("mod_check_many", |params, ctx, _| async move {
+        let ModCheckManyParams { checks } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::ModCheckMany {
+            checks,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch mod_check_many: {e}")))?;
+
+        let result = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("mod_check_many response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(result)
+    })?;
+
+    module.register_async_method("trust_add", |params, ctx, _| async move {
+        let TrustAddParams {
+            publisher_b64,
+            label,
+            note,
+        } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::TrustAdd {
+            publisher_b64,
+            label,
+            note,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch trust_add: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("trust_add response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("trust_remove", |params, ctx, _| async move {
+        let TrustPublisherParams { publisher_b64 } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::TrustRemove {
+            publisher_b64,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch trust_remove: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("trust_remove response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("trust_list", |_, ctx, _| async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::TrustList {
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch trust_list: {e}")))?;
+
+        let trusted = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("trust_list response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(trusted)
+    })?;
+
+    module.register_async_method("trust_check", |params, ctx, _| async move {
+        let TrustPublisherParams { publisher_b64 } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::TrustCheck {
+            publisher_b64,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch trust_check: {e}")))?;
+
+        let trusted = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("trust_check response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(trusted)
+    })?;
+
+    module.register_async_method("trust_site", |params, ctx, _| async move {
+        let TrustSiteParams { name, pin } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::TrustSite {
+            name,
+            pin,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch trust_site: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("trust_site response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("untrust_site", |params, ctx, _| async move {
+        let UntrustSiteParams { name, unpin } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::UntrustSite {
+            name,
+            unpin,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch untrust_site: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("untrust_site response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("known_publisher_status", |params, ctx, _| async move {
+        let SiteNameParams { name } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::KnownPublisherStatus {
+            name,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch known_publisher_status: {e}")))?;
+
+        let known = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("known_publisher_status response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(known)
+    })?;
+
     let handle = server.start(module);
     Ok(handle)
 }
@@ -380,6 +950,31 @@ fn validate_name(name: &str) -> Result<(), String> {
     }
     if name.starts_with('-') || name.ends_with('-') {
         return Err("name cannot start or end with a hyphen".to_string());
+    }
+    Ok(())
+}
+
+fn validate_record_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("key cannot be empty".to_string());
+    }
+    if key.len() > MAX_PUT_KEY_BYTES {
+        return Err(format!(
+            "key exceeds maximum length of {} bytes",
+            MAX_PUT_KEY_BYTES
+        ));
+    }
+    if key.contains('\0') || key.contains('\n') || key.contains('\r') || key.contains('\\') {
+        return Err("key contains invalid characters".to_string());
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == ':' || c == '-' || c == '_')
+    {
+        return Err(
+            "key may only contain lowercase letters, digits, colon, hyphen, and underscore"
+                .to_string(),
+        );
     }
     Ok(())
 }

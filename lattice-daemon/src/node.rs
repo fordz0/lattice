@@ -99,3 +99,38 @@ pub fn load_or_create_site_signing_key(data_dir: &Path) -> Result<SigningKey> {
     info!(path = ?key_path, "generated new site signing key");
     Ok(signing_key)
 }
+
+pub fn load_or_create_block_cache_key(data_dir: &Path) -> Result<[u8; 32]> {
+    let key_path = data_dir.join("block_cache.key");
+
+    if key_path.exists() {
+        let bytes = fs::read(&key_path).context("failed to read block cache key")?;
+        let key_bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("invalid block cache key length"))?;
+        return Ok(key_bytes);
+    }
+
+    fs::create_dir_all(data_dir)
+        .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+
+    let mut rng = OsRng;
+    let mut secret = [0_u8; 32];
+    rng.fill_bytes(&mut secret);
+    fs::write(&key_path, secret)
+        .with_context(|| format!("failed to write block cache key {}", key_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "failed to set permissions on block cache key {}",
+                key_path.display()
+            )
+        })?;
+    }
+
+    info!(path = ?key_path, "generated new block cache encryption key");
+    Ok(secret)
+}

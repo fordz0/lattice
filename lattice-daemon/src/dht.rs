@@ -6,10 +6,18 @@ use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 use std::num::NonZeroUsize;
 use std::time::Duration;
+use tracing::warn;
 
 const MAX_RECORD_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_KAD_PACKET_BYTES: usize = 2 * 1024 * 1024;
 const KAD_SUBSTREAM_TIMEOUT_SECS: u64 = 30;
+
+pub fn is_allowed_dht_key(key: &str) -> bool {
+    key.starts_with("name:")
+        || key.starts_with("peer:")
+        || key.starts_with("site:")
+        || key.starts_with("app:")
+}
 
 pub fn new_kademlia(local_peer_id: PeerId) -> Behaviour<MemoryStore> {
     // Allow block records up to 1 MiB (default 65 KiB is too small for site files).
@@ -56,6 +64,10 @@ pub fn put_record_bytes(
     key: String,
     value: Vec<u8>,
 ) -> Result<QueryId> {
+    if !is_allowed_dht_key(&key) {
+        warn!(key = %key, "rejected disallowed DHT record key");
+        anyhow::bail!("disallowed DHT key");
+    }
     let record = Record::new(key.into_bytes(), value);
     kad.store_mut()
         .put(record.clone())
@@ -78,4 +90,32 @@ pub fn get_record(kad: &mut Behaviour<MemoryStore>, key: String) -> QueryId {
 
 pub fn get_record_bytes(kad: &mut Behaviour<MemoryStore>, key: String) -> QueryId {
     get_record(kad, key)
+}
+
+pub fn start_providing(kad: &mut Behaviour<MemoryStore>, key: String) -> Result<QueryId> {
+    if !is_allowed_dht_key(&key) {
+        warn!(key = %key, "rejected disallowed provider key");
+        anyhow::bail!("disallowed provider key");
+    }
+    kad.start_providing(kad::RecordKey::new(&key))
+        .context("failed to start providing key")
+}
+
+pub fn get_providers(kad: &mut Behaviour<MemoryStore>, key: String) -> QueryId {
+    kad.get_providers(kad::RecordKey::new(&key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_dht_key;
+
+    #[test]
+    fn allows_expected_dht_prefixes() {
+        assert!(is_allowed_dht_key("name:lattice"));
+        assert!(is_allowed_dht_key("peer:abc"));
+        assert!(is_allowed_dht_key("site:lattice"));
+        assert!(is_allowed_dht_key("app:fray:feed:lattice"));
+        assert!(!is_allowed_dht_key("block:deadbeef"));
+        assert!(!is_allowed_dht_key("comment:abc"));
+    }
 }

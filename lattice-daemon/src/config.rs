@@ -22,6 +22,10 @@ pub struct Config {
     pub listen_address: String,
     pub data_dir: PathBuf,
     pub bootstrap_peers: Vec<String>,
+    #[serde(default = "default_mime_policy_strict")]
+    pub mime_policy_strict: bool,
+    #[serde(default = "default_session_cache_max_bytes")]
+    pub session_cache_max_bytes: usize,
 }
 
 impl Default for Config {
@@ -44,6 +48,8 @@ impl Default for Config {
             listen_address: default_listen_address(),
             data_dir,
             bootstrap_peers: Config::default_bootstrap_peers(),
+            mime_policy_strict: default_mime_policy_strict(),
+            session_cache_max_bytes: default_session_cache_max_bytes(),
         }
     }
 }
@@ -187,6 +193,14 @@ fn default_listen_address() -> String {
     "0.0.0.0".to_string()
 }
 
+fn default_mime_policy_strict() -> bool {
+    false
+}
+
+fn default_session_cache_max_bytes() -> usize {
+    100 * 1024 * 1024
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +231,8 @@ mod tests {
             listen_address: "127.0.0.1".to_string(),
             data_dir: default_dir.clone(),
             bootstrap_peers: vec!["/ip4/1.1.1.1/tcp/7779/p2p/default".to_string()],
+            mime_policy_strict: false,
+            session_cache_max_bytes: default_session_cache_max_bytes(),
         };
         let override_cfg = Config {
             listen_port: 19000,
@@ -227,6 +243,8 @@ mod tests {
             listen_address: "127.0.0.1".to_string(),
             data_dir: override_dir.clone(),
             bootstrap_peers: vec!["/ip4/127.0.0.1/tcp/19000/p2p/override".to_string()],
+            mime_policy_strict: true,
+            session_cache_max_bytes: 123456,
         };
         fs::write(
             default_dir.join("config.toml"),
@@ -255,6 +273,8 @@ mod tests {
             config.bootstrap_peers,
             vec!["/ip4/127.0.0.1/tcp/19000/p2p/override".to_string()]
         );
+        assert!(config.mime_policy_strict);
+        assert_eq!(config.session_cache_max_bytes, 123456);
 
         let _ = fs::remove_dir_all(&default_dir);
         let _ = fs::remove_dir_all(&config.data_dir);
@@ -272,6 +292,7 @@ mod tests {
 
         assert_eq!(config.data_dir, override_dir);
         assert!(config.data_dir.join("config.toml").exists());
+        assert_eq!(config.session_cache_max_bytes, 104_857_600);
 
         let _ = fs::remove_dir_all(&config.data_dir);
     }

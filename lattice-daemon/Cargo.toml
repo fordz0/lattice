@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1"
 axum = "0.7"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
@@ -11,9 +12,12 @@ base64 = "0.22"
 directories = "5"
 ed25519-dalek = "2"
 hex = "0.4"
-jsonrpsee = { version = "0.24", features = ["server"] }
+infer = "0.19"
+jsonrpsee = { version = "0.24", features = ["server", "http-client"] }
+lattice-core = { path = "../lattice-core" }
 lattice-site = { path = "../lattice-site" }
-libp2p = { version = "0.56", features = ["tokio", "tcp", "quic", "noise", "yamux", "kad", "mdns", "gossipsub", "macros", "identify", "autonat", "relay", "dcutr"] }
+libp2p = { version = "0.56", features = ["tokio", "tcp", "quic", "noise", "yamux", "kad", "mdns", "gossipsub", "macros", "identify", "autonat", "relay", "dcutr", "request-response", "cbor"] }
+lru = "0.12"
 rand = "0.8"
 rcgen = "0.12"
 rustls = "0.23"
@@ -29,3 +33,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3"
