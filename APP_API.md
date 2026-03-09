@@ -57,6 +57,14 @@ Reserved key prefixes remain owned by core protocol:
   - `fray: string`
   - `generated_at: u64`
   - `posts: Post[]`
+  - `comments: Comment[]`
+
+Current implementation guardrails:
+- feed max size: 256 KiB
+- max posts per feed publish: 20
+- max comments per feed publish: 200 (10 per post)
+- post body max: 4000 chars
+- comment body max: 1200 chars
 
 ## RPC Usage (Current)
 
