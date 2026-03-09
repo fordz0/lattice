@@ -108,7 +108,6 @@ Draft app-layer guidance lives in [APP_API.md](APP_API.md).
 - [x] Firefox extension
 - [x] Relay-assisted NAT reachability
 - [x] Name heartbeat and expiry enforcement
-- [ ] Loom chat protocol
 
 ---
 
