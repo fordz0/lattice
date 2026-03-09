@@ -99,8 +99,12 @@ impl RpcClient {
             .await
     }
 
-    pub async fn get_block(&self, hash: &str) -> Result<Value> {
-        self.call("get_block", json!({ "hash": hash })).await
+    pub async fn get_block(&self, hash: &str, site_key: Option<&str>) -> Result<Value> {
+        let mut params = json!({ "hash": hash });
+        if let Some(site_key) = site_key {
+            params["site_key"] = Value::String(site_key.to_string());
+        }
+        self.call("get_block", params).await
     }
 
     pub async fn claim_name(&self, name: &str, pubkey_hex: &str) -> Result<Value> {

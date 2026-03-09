@@ -251,6 +251,7 @@ struct GetSiteManifestParams {
 #[derive(Debug, Deserialize)]
 struct GetBlockParams {
     hash: String,
+    site_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,12 +484,12 @@ pub async fn start_rpc_server(
     })?;
 
     module.register_async_method("get_block", |params, ctx, _| async move {
-        let GetBlockParams { hash } = params.parse()?;
+        let GetBlockParams { hash, site_key } = params.parse()?;
         let (resp_tx, resp_rx) = oneshot::channel();
 
         ctx.send(RpcCommand::GetBlock {
             hash,
-            site_key: None,
+            site_key,
             respond_to: resp_tx,
         })
         .await

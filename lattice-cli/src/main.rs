@@ -248,7 +248,8 @@ async fn run() -> Result<()> {
 
             let manifest_result = client.get_site_manifest(&name).await?;
             let manifest_json = manifest_result
-                .as_str()
+                .get("manifest_json")
+                .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("site {}.loom not found", name))?;
 
             let manifest: SiteManifest = serde_json::from_str(manifest_json)
@@ -287,11 +288,12 @@ async fn run() -> Result<()> {
             fs::create_dir_all(&out_dir)
                 .with_context(|| format!("failed to create output dir {}", out_dir.display()))?;
 
+            let site_key = format!("site:{name}");
             for file in &manifest.files {
                 let mut contents = Vec::new();
                 let block_hashes = file_block_hashes(file);
                 for block_hash in block_hashes {
-                    let block_result = client.get_block(&block_hash).await?;
+                    let block_result = client.get_block(&block_hash, Some(&site_key)).await?;
                     let hex_contents = block_result.as_str().ok_or_else(|| {
                         anyhow!("missing content block {} for {}", block_hash, file.path)
                     })?;
