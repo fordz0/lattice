@@ -4,14 +4,18 @@ use lattice_core::identity::{canonical_json_bytes, SignedRecord};
 use lattice_core::moderation::{ModerationEngine, ModerationRule, RuleAction, RuleKind};
 use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
 use lattice_daemon::mime::{self, ALLOWED_MIME_TYPES, MAX_FILE_BYTES};
+use lattice_daemon::moderation_helpers::{
+    block_ingest_rule, hide_block_rule, hide_record_rule, ingest_rule, purge_local_matches,
+    quarantine_record, republish_rule, validate_put_record_request,
+};
+use lattice_daemon::publish::validate_site_file_mime_policy;
 use lattice_daemon::rpc::{self, RpcCommand};
+use lattice_daemon::site_helpers::pin_cached_site_blocks;
+use lattice_daemon::store::LocalRecordStore;
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::rpc_params;
 use tempfile::tempdir;
-
-#[path = "../src/main.rs"]
-mod daemon_main;
 
 fn rule(id: &str, kind: RuleKind, value: &str, action: RuleAction) -> ModerationRule {
     ModerationRule {
@@ -45,7 +49,7 @@ fn moderation_record_ingest_reject_rule_is_caught_by_validation_and_engine() {
         RuleAction::RejectIngest,
     )]);
 
-    daemon_main::validate_put_record_request(key, &value)
+    validate_put_record_request(key, &value)
         .expect("generic app key should pass validation");
     assert_eq!(engine.check_key(key), Some(&RuleAction::RejectIngest));
 }
@@ -53,7 +57,7 @@ fn moderation_record_ingest_reject_rule_is_caught_by_validation_and_engine() {
 #[test]
 fn moderation_record_ingest_quarantine_rule_writes_entry() {
     let dir = tempdir().expect("tempdir");
-    let store = daemon_main::LocalRecordStore::open(dir.path(), [9; 32]).expect("open store");
+    let store = LocalRecordStore::open(dir.path(), [9; 32]).expect("open store");
     let signed = signed_record(11, serde_json::json!({"fray": "lattice"}));
     let value = serde_json::to_vec(&signed).expect("encode signed record");
     let key = "app:fray:feed:lattice";
@@ -64,12 +68,12 @@ fn moderation_record_ingest_quarantine_rule_writes_entry() {
         RuleAction::Quarantine,
     )]);
 
-    daemon_main::validate_put_record_request(key, &value).expect("signed app record accepted");
-    let matched = daemon_main::ingest_rule(&engine, key, Some(&signed.publisher_b64()))
+    validate_put_record_request(key, &value).expect("signed app record accepted");
+    let matched = ingest_rule(&engine, key, Some(&signed.publisher_b64()))
         .expect("publisher quarantine rule should match");
     assert_eq!(matched.action, RuleAction::Quarantine);
 
-    daemon_main::quarantine_record(
+    quarantine_record(
         &store,
         matched,
         Some(key.to_string()),
@@ -96,9 +100,9 @@ fn moderation_hide_record_rule_matches_only_target_key() {
         RuleAction::Hide,
     )]);
 
-    let matched = daemon_main::hide_record_rule(&engine, key, None).expect("rule should match");
+    let matched = hide_record_rule(&engine, key, None).expect("rule should match");
     assert_eq!(matched.id, "hide-record");
-    assert!(daemon_main::hide_record_rule(&engine, "app:fray:feed:other", None).is_none());
+    assert!(hide_record_rule(&engine, "app:fray:feed:other", None).is_none());
 }
 
 #[test]
@@ -130,7 +134,7 @@ fn publisher_hide_rule_matches_site_manifest_publisher_key() {
         RuleAction::Hide,
     )]);
 
-    let matched = daemon_main::hide_record_rule(&engine, site_key, Some(&extracted_publisher))
+    let matched = hide_record_rule(&engine, site_key, Some(&extracted_publisher))
         .expect("publisher hide rule should match");
     assert_eq!(matched.id, "hide-publisher");
 }
@@ -162,15 +166,15 @@ fn moderation_block_rules_cover_ingest_hide_and_republish() {
         ),
     ]);
 
-    let ingest = daemon_main::block_ingest_rule(&engine, site_name, reject_hash)
+    let ingest = block_ingest_rule(&engine, site_name, reject_hash)
         .expect("block ingest rule should match");
     assert_eq!(ingest.id, "reject-block");
-    assert!(daemon_main::block_ingest_rule(&engine, site_name, "other").is_none());
+    assert!(block_ingest_rule(&engine, site_name, "other").is_none());
 
-    let hide = daemon_main::hide_block_rule(&engine, site_name, hide_hash).expect("hide rule");
+    let hide = hide_block_rule(&engine, site_name, hide_hash).expect("hide rule");
     assert_eq!(hide.id, "hide-block");
 
-    let republish = daemon_main::republish_rule(&engine, &site_key, None, Some(site_name))
+    let republish = republish_rule(&engine, &site_key, None, Some(site_name))
         .expect("republish rule should match");
     assert_eq!(republish.id, "refuse-site");
 }
@@ -186,7 +190,7 @@ fn publisher_refuse_republish_rule_matches_site_manifest_key() {
         RuleAction::RefuseRepublish,
     )]);
 
-    let matched = daemon_main::republish_rule(&engine, site_key, Some(&publisher_b64), Some("lattice"))
+    let matched = republish_rule(&engine, site_key, Some(&publisher_b64), Some("lattice"))
         .expect("publisher republish rule should match");
     assert_eq!(matched.id, "refuse-publisher");
 }
@@ -194,9 +198,11 @@ fn publisher_refuse_republish_rule_matches_site_manifest_key() {
 #[tokio::test]
 async fn moderation_purge_local_removes_matching_records_and_blocks() {
     let dir = tempdir().expect("tempdir");
-    let store = daemon_main::LocalRecordStore::open(dir.path(), [3; 32]).expect("open store");
+    let store = LocalRecordStore::open(dir.path(), [3; 32]).expect("open store");
     let mut local_records = std::collections::HashMap::new();
-    let mut swarm = daemon_main::build_test_swarm().expect("build test swarm");
+    let identity = libp2p::identity::Keypair::generate_ed25519();
+    let peer_id = identity.public().to_peer_id();
+    let mut kademlia = lattice_daemon::dht::new_kademlia(peer_id);
 
     let record_key = "app:fray:feed:lattice".to_string();
     let record_value = serde_json::to_vec(&signed_record(5, serde_json::json!({"fray": "lattice"})))
@@ -206,10 +212,10 @@ async fn moderation_purge_local_removes_matching_records_and_blocks() {
         .expect("persist record");
     local_records.insert(record_key.clone(), record_value.clone());
 
-    daemon_main::purge_local_matches(
+    purge_local_matches(
         &store,
         &mut local_records,
-        &mut swarm,
+        &mut kademlia,
         &RuleKind::RecordKey,
         &record_key,
     )
@@ -221,10 +227,10 @@ async fn moderation_purge_local_removes_matching_records_and_blocks() {
     store
         .put_block(block_hash, block_bytes, "lattice.loom", CachePolicy::Pinned)
         .expect("persist block");
-    daemon_main::purge_local_matches(
+    purge_local_matches(
         &store,
         &mut local_records,
-        &mut swarm,
+        &mut kademlia,
         &RuleKind::ContentHash,
         block_hash,
     )
@@ -242,10 +248,10 @@ async fn moderation_purge_local_removes_matching_records_and_blocks() {
     local_records.insert(key_a.clone(), value_a);
     local_records.insert(key_b.clone(), value_b);
 
-    daemon_main::purge_local_matches(
+    purge_local_matches(
         &store,
         &mut local_records,
-        &mut swarm,
+        &mut kademlia,
         &RuleKind::PublisherKey,
         &signed_a.publisher_b64(),
     )
@@ -274,7 +280,7 @@ fn session_cache_enforces_byte_limit_and_evicts_lru() {
 #[test]
 fn block_cache_encryption_stores_ciphertext_and_roundtrips_plaintext() {
     let dir = tempdir().expect("tempdir");
-    let store = daemon_main::LocalRecordStore::open(dir.path(), [42; 32]).expect("open store");
+    let store = LocalRecordStore::open(dir.path(), [42; 32]).expect("open store");
     let hash = "feedface";
     let plaintext = b"known plaintext bytes";
 
@@ -298,7 +304,7 @@ fn block_cache_encryption_stores_ciphertext_and_roundtrips_plaintext() {
 #[test]
 fn trusted_publishers_add_list_check_and_remove() {
     let dir = tempdir().expect("tempdir");
-    let store = daemon_main::LocalRecordStore::open(dir.path(), [5; 32]).expect("open store");
+    let store = LocalRecordStore::open(dir.path(), [5; 32]).expect("open store");
     let trusted_key = signed_record(19, serde_json::json!({"kind": "publisher"})).publisher_b64();
     let other_key = signed_record(20, serde_json::json!({"kind": "publisher"})).publisher_b64();
 
@@ -334,7 +340,7 @@ fn trusted_publishers_add_list_check_and_remove() {
 #[test]
 fn known_publisher_status_transitions_first_seen_matches_and_key_changed() {
     let dir = tempdir().expect("tempdir");
-    let store = daemon_main::LocalRecordStore::open(dir.path(), [6; 32]).expect("open store");
+    let store = LocalRecordStore::open(dir.path(), [6; 32]).expect("open store");
     let site_name = "lattice";
     let key_a = signed_record(40, serde_json::json!({"publisher": "a"})).publisher_b64();
     let key_b = signed_record(41, serde_json::json!({"publisher": "b"})).publisher_b64();
@@ -367,7 +373,7 @@ fn known_publisher_status_transitions_first_seen_matches_and_key_changed() {
 #[test]
 fn known_publisher_explicit_trust_persists() {
     let dir = tempdir().expect("tempdir");
-    let store = daemon_main::LocalRecordStore::open(dir.path(), [7; 32]).expect("open store");
+    let store = LocalRecordStore::open(dir.path(), [7; 32]).expect("open store");
     let site_name = "lattice";
     let publisher = signed_record(42, serde_json::json!({"publisher": "trusted"})).publisher_b64();
 
@@ -399,7 +405,7 @@ fn known_publisher_explicit_trust_persists() {
 #[tokio::test]
 async fn trust_site_rpc_with_pin_true_sets_trust_and_persists_blocks() {
     let dir = tempdir().expect("tempdir");
-    let store = daemon_main::LocalRecordStore::open(dir.path(), [8; 32]).expect("open store");
+    let store = LocalRecordStore::open(dir.path(), [8; 32]).expect("open store");
     let site_name = "lattice";
     let publisher = signed_record(43, serde_json::json!({"publisher": "known"})).publisher_b64();
     store
@@ -452,7 +458,7 @@ async fn trust_site_rpc_with_pin_true_sets_trust_and_persists_blocks() {
                 } => {
                     let result = (|| -> Result<(), String> {
                         if pin {
-                            let count = daemon_main::pin_cached_site_blocks(
+                            let count = pin_cached_site_blocks(
                                 &loop_store,
                                 &mut session_cache,
                                 &name,
@@ -520,7 +526,7 @@ fn app_record_signature_validation_accepts_valid_and_rejects_tampering() {
     let signed = signed_record(31, payload.clone());
     let signed_json = serde_json::to_vec(&signed).expect("serialize signed record");
 
-    daemon_main::validate_put_record_request("app:fray:feed:lattice", &signed_json)
+    validate_put_record_request("app:fray:feed:lattice", &signed_json)
         .expect("valid signed app record");
 
     let mut tampered: serde_json::Value =
@@ -531,16 +537,16 @@ fn app_record_signature_validation_accepts_valid_and_rejects_tampering() {
         *payload_b64 = serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(replacement));
     }
     let tampered_json = serde_json::to_vec(&tampered).expect("serialize tampered record");
-    let err = daemon_main::validate_put_record_request("app:fray:feed:lattice", &tampered_json)
+    let err = validate_put_record_request("app:fray:feed:lattice", &tampered_json)
         .expect_err("tampered signature should fail");
     assert!(err.contains("signature verification failed"));
 
     let plain_json = br#"{"payload":"not signed"}"#.to_vec();
-    let err = daemon_main::validate_put_record_request("app:fray:feed:lattice", &plain_json)
+    let err = validate_put_record_request("app:fray:feed:lattice", &plain_json)
         .expect_err("plain json should fail SignedRecord decode");
     assert!(err.contains("SignedRecord JSON"));
 
-    daemon_main::validate_put_record_request("name:foo", &signed_json)
+    validate_put_record_request("name:foo", &signed_json)
         .expect("non-app keys do not require SignedRecord validation");
 }
 
@@ -563,11 +569,11 @@ fn mime_policy_detects_magic_bytes_fallbacks_and_violations() {
     );
     assert_eq!(mime::violation_reason("video/mp4", 1024), Some("wrong_type"));
 
-    let err = daemon_main::validate_site_file_mime_policy("movie.mp4", b"not really video", true)
+    let err = validate_site_file_mime_policy("movie.mp4", b"not really video", true)
         .expect_err("strict MIME policy should reject");
     assert!(err
         .to_string()
         .contains("rejected: movie.mp4"));
-    daemon_main::validate_site_file_mime_policy("movie.mp4", b"not really video", false)
+    validate_site_file_mime_policy("movie.mp4", b"not really video", false)
         .expect("warn mode should allow MIME violation");
 }
