@@ -253,9 +253,10 @@ pub fn validate_put_record_request(key: &str, value: &[u8]) -> Result<(), String
     if !key.starts_with("app:") {
         return Ok(());
     }
-    validate_app_key(key)?;
     if key.starts_with("app:fray:") {
         validate_fray_dht_key(key)?;
+    } else {
+        validate_app_key(key)?;
     }
     let value_str = std::str::from_utf8(value)
         .map_err(|_| "app record value must be valid utf-8 json".to_string())?;

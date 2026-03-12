@@ -2,6 +2,8 @@ use crate::model::{
     Comment, CommentSummary, CreateCommentRequest, CreatePostRequest, Post, PostSummary,
 };
 use crate::routes::{FrayName, FrayRouteError, Username};
+use crate::directory::SignedFrayDirectory;
+use crate::trust::{KeyRecord, KeyStanding, SignedTrustRecord};
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +12,10 @@ const POST_PREFIX: &str = "post:";
 const COMMENT_PREFIX: &str = "comment:";
 const POST_INDEX_PREFIX: &str = "idx:post:";
 const COMMENT_INDEX_PREFIX: &str = "idx:comment:";
+const TRUST_PREFIX: &str = "trust:";
+const TRUST_RECORD_PREFIX: &str = "trust_record:";
+const DIRECTORY_KEY: &str = "directory:current";
+const OWNERSHIP_PREFIX: &str = "owner:";
 
 #[derive(Clone)]
 pub struct FrayStore {
@@ -38,6 +44,7 @@ impl FrayStore {
             title: req.title.trim().to_string(),
             body: req.body.trim().to_string(),
             created_at,
+            publisher_key_b64: None,
             hidden: false,
         };
 
@@ -121,6 +128,7 @@ impl FrayStore {
             author: author.as_str().to_string(),
             body: req.body.trim().to_string(),
             created_at,
+            publisher_key_b64: None,
             hidden: false,
         };
 
@@ -194,6 +202,138 @@ impl FrayStore {
     pub fn flush(&self) -> Result<()> {
         self.db.flush().context("failed to flush fray db")?;
         Ok(())
+    }
+
+    pub fn set_key_standing(&self, fray: &str, key_b64: &str, standing: KeyStanding) -> Result<()> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let record = KeyRecord {
+            key_b64: key_b64.to_string(),
+            standing,
+            label: None,
+            updated_at: now_secs()?,
+        };
+        let key = trust_key(fray_name.as_str(), key_b64);
+        let value = serde_json::to_vec(&record).context("failed to serialize key standing")?;
+        self.db
+            .insert(key.as_bytes(), value)
+            .context("failed to write key standing")?;
+        self.db.flush().context("failed to flush key standing")?;
+        Ok(())
+    }
+
+    pub fn store_trust_record(&self, fray: &str, trust: &SignedTrustRecord) -> Result<()> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let key = trust_record_key(fray_name.as_str());
+        let value = serde_json::to_vec(trust).context("failed to serialize trust record")?;
+        self.db
+            .insert(key.as_bytes(), value)
+            .context("failed to store trust record")?;
+        self.db.flush().context("failed to flush trust record write")?;
+        Ok(())
+    }
+
+    pub fn load_trust_record(&self, fray: &str) -> Result<Option<SignedTrustRecord>> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let key = trust_record_key(fray_name.as_str());
+        let Some(value) = self.db.get(key.as_bytes()).context("failed to read trust record")? else {
+            return Ok(None);
+        };
+        let record: SignedTrustRecord =
+            serde_json::from_slice(&value).context("failed to decode trust record")?;
+        Ok(Some(record))
+    }
+
+    pub fn store_key_record(&self, fray: &str, record: KeyRecord) -> Result<()> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let key = trust_key(fray_name.as_str(), &record.key_b64);
+        let value = serde_json::to_vec(&record).context("failed to serialize key record")?;
+        self.db
+            .insert(key.as_bytes(), value)
+            .context("failed to store key record")?;
+        self.db.flush().context("failed to flush key record write")?;
+        Ok(())
+    }
+
+    pub fn get_key_standing(&self, fray: &str, key_b64: &str) -> Result<Option<KeyStanding>> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let key = trust_key(fray_name.as_str(), key_b64);
+        let Some(value) = self.db.get(key.as_bytes()).context("failed to read key standing")? else {
+            return Ok(None);
+        };
+        let record: KeyRecord =
+            serde_json::from_slice(&value).context("failed to decode key standing")?;
+        Ok(Some(record.standing))
+    }
+
+    pub fn list_key_standings(&self, fray: &str) -> Result<Vec<KeyRecord>> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let prefix = trust_prefix(fray_name.as_str());
+        let mut out = Vec::new();
+        for item in self.db.scan_prefix(prefix.as_bytes()) {
+            let (_key, value) = item.context("failed to iterate trust standings")?;
+            let record: KeyRecord =
+                serde_json::from_slice(&value).context("failed to decode trust standing")?;
+            out.push(record);
+        }
+        out.sort_by(|a, b| a.key_b64.cmp(&b.key_b64));
+        Ok(out)
+    }
+
+    pub fn store_directory(&self, dir: &SignedFrayDirectory) -> Result<()> {
+        let value = serde_json::to_vec(dir).context("failed to serialize directory")?;
+        self.db
+            .insert(DIRECTORY_KEY.as_bytes(), value)
+            .context("failed to store directory")?;
+        self.db.flush().context("failed to flush directory store")?;
+        Ok(())
+    }
+
+    pub fn load_directory(&self) -> Result<Option<SignedFrayDirectory>> {
+        let Some(value) = self
+            .db
+            .get(DIRECTORY_KEY.as_bytes())
+            .context("failed to load directory")?
+        else {
+            return Ok(None);
+        };
+        let directory: SignedFrayDirectory =
+            serde_json::from_slice(&value).context("failed to decode directory")?;
+        Ok(Some(directory))
+    }
+
+    pub fn store_fray_ownership(&self, fray: &str, owner_key_b64: &str) -> Result<()> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let key = ownership_key(fray_name.as_str());
+        self.db
+            .insert(key.as_bytes(), owner_key_b64.as_bytes())
+            .context("failed to store fray ownership")?;
+        self.db.flush().context("failed to flush fray ownership")?;
+        Ok(())
+    }
+
+    pub fn get_fray_ownership(&self, fray: &str) -> Result<Option<String>> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let key = ownership_key(fray_name.as_str());
+        let Some(value) = self.db.get(key.as_bytes()).context("failed to read fray ownership")? else {
+            return Ok(None);
+        };
+        let owner = std::str::from_utf8(&value)
+            .context("invalid fray ownership encoding")?
+            .to_string();
+        Ok(Some(owner))
+    }
+
+    pub fn list_owned_frays(&self) -> Result<Vec<String>> {
+        let mut frays = Vec::new();
+        for item in self.db.scan_prefix(OWNERSHIP_PREFIX.as_bytes()) {
+            let (key, _value) = item.context("failed to iterate ownership entries")?;
+            let key_str = std::str::from_utf8(&key).context("invalid ownership key encoding")?;
+            if let Some(fray) = key_str.strip_prefix(OWNERSHIP_PREFIX) {
+                frays.push(fray.to_string());
+            }
+        }
+        frays.sort();
+        Ok(frays)
     }
 
     fn get_comment(&self, comment_id: &str) -> Result<Option<Comment>> {
@@ -356,6 +496,22 @@ fn comment_index_key(fray: &str, post_id: &str, created_at: u64, id: &str) -> Re
     ))
 }
 
+fn trust_prefix(fray: &str) -> String {
+    format!("{TRUST_PREFIX}{fray}:")
+}
+
+fn trust_key(fray: &str, key_b64: &str) -> String {
+    format!("{TRUST_PREFIX}{fray}:{key_b64}")
+}
+
+fn trust_record_key(fray: &str) -> String {
+    format!("{TRUST_RECORD_PREFIX}{fray}")
+}
+
+fn ownership_key(fray: &str) -> String {
+    format!("{OWNERSHIP_PREFIX}{fray}")
+}
+
 fn reverse_ts(ts: u64) -> Result<u64> {
     validate_timestamp(ts)?;
     Ok(u64::MAX - ts)
@@ -418,6 +574,25 @@ mod tests {
             .expect("list comments");
         assert_eq!(listed_comments.len(), 1);
         assert_eq!(listed_comments[0].id, comment.id);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn trust_standing_roundtrip() {
+        let path = temp_db_path();
+        let store = FrayStore::open(&path).expect("open db");
+        store
+            .set_key_standing("lattice", "key-abc", KeyStanding::Trusted)
+            .expect("set standing");
+        assert_eq!(
+            store
+                .get_key_standing("lattice", "key-abc")
+                .expect("get standing"),
+            Some(KeyStanding::Trusted)
+        );
+        let standings = store.list_key_standings("lattice").expect("list standings");
+        assert_eq!(standings.len(), 1);
+        assert_eq!(standings[0].key_b64, "key-abc");
         let _ = std::fs::remove_dir_all(path);
     }
 }

@@ -1,15 +1,28 @@
+use crate::blocklist::ContentBlocklist;
+use crate::directory::{
+    sign_directory, validate_directory, verify_signed_directory, FrayDirectory, SignedFrayDirectory,
+};
 use crate::model::{Comment, Post};
+use crate::store::FrayStore;
+use crate::trust::{
+    sign_trust_record, validate_trust_record, verify_signed_trust_record, FrayTrustRecord,
+    KeyStanding, SignedTrustRecord,
+};
 use anyhow::{anyhow, bail, Context, Result};
+use blake3::Hasher;
 use ed25519_dalek::SigningKey;
 use lattice_core::identity::{canonical_json_bytes, SignedRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::Duration;
 
 const FRAY_FEED_VERSION: u8 = 1;
 const MAX_FEED_BYTES: usize = 256 * 1024;
 const MAX_FEED_POSTS: usize = 64;
 const MAX_FEED_COMMENTS: usize = 256;
+const TRUST_RECORD_KEY_PREFIX: &str = "app:fray:trust:";
+const DIRECTORY_RECORD_KEY: &str = "app:fray:directory";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrayFeedRecord {
@@ -24,6 +37,18 @@ pub struct FrayFeedRecord {
 pub struct SignedFrayFeedRecord {
     pub signed: SignedRecord,
     pub feed: FrayFeedRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetSiteManifestResult {
+    trust: SiteTrustState,
+    pinned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SiteTrustState {
+    status: String,
+    explicitly_trusted: bool,
 }
 
 pub async fn publish_feed(
@@ -51,52 +76,20 @@ pub async fn publish_feed(
         bail!("fray feed exceeds maximum payload size");
     }
 
-    let key = format!("app:fray:feed:{fray}");
-    let result = rpc_call(
-        rpc_port,
-        "put_record",
-        json!({
-            "key": key,
-            "value": payload,
-        }),
-    )
-    .await?;
-    let status = result
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("err");
-    if status != "ok" {
-        let reason = result
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("put_record failed");
-        bail!("{reason}");
-    }
-    Ok(())
+    put_record(rpc_port, &format!("app:fray:feed:{fray}"), payload).await
 }
 
 pub async fn fetch_feed(rpc_port: u16, fray: &str) -> Result<Option<SignedFrayFeedRecord>> {
     let key = format!("app:fray:feed:{fray}");
-    let result = rpc_call(
-        rpc_port,
-        "get_record",
-        json!({
-            "key": key,
-        }),
-    )
-    .await?;
-    if result.is_null() {
+    let Some(raw) = get_record(rpc_port, &key).await? else {
         return Ok(None);
-    }
-    let raw = result
-        .as_str()
-        .ok_or_else(|| anyhow!("fray feed record is not a string"))?;
+    };
     if raw.len() > MAX_FEED_BYTES {
         bail!("fray feed payload is too large");
     }
 
     let signed: SignedRecord =
-        serde_json::from_str(raw).context("failed to decode signed fray feed record")?;
+        serde_json::from_str(&raw).context("failed to decode signed fray feed record")?;
     let decoded: FrayFeedRecord = signed
         .payload_json()
         .context("failed to decode fray feed payload")?;
@@ -111,6 +104,103 @@ pub async fn fetch_feed(rpc_port: u16, fray: &str) -> Result<Option<SignedFrayFe
         signed,
         feed: decoded,
     }))
+}
+
+pub async fn check_frayloom_stake(lattice_rpc_port: u16) -> Result<bool> {
+    let known = match rpc_call(
+        lattice_rpc_port,
+        "known_publisher_status",
+        json!({ "name": "fray" }),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    if known.is_null() {
+        return Ok(false);
+    }
+    let explicitly_trusted = known
+        .get("explicitly_trusted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !explicitly_trusted {
+        return Ok(false);
+    }
+
+    let manifest = match rpc_call(
+        lattice_rpc_port,
+        "get_site_manifest",
+        json!({ "name": "fray" }),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    if manifest.is_null() {
+        return Ok(false);
+    }
+    let manifest: GetSiteManifestResult = match serde_json::from_value(manifest) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    if manifest.trust.status != "matches" || !manifest.trust.explicitly_trusted {
+        return Ok(false);
+    }
+    Ok(manifest.pinned)
+}
+
+pub async fn publish_trust_record(
+    fray: &str,
+    record: &FrayTrustRecord,
+    signing_key: &SigningKey,
+    lattice_rpc_port: u16,
+) -> Result<()> {
+    validate_trust_record(record).map_err(anyhow::Error::msg)?;
+    let signed = sign_trust_record(record, signing_key)?;
+    let payload = serde_json::to_string(&signed).context("failed to encode trust record")?;
+    put_record(
+        lattice_rpc_port,
+        &format!("{TRUST_RECORD_KEY_PREFIX}{fray}"),
+        payload,
+    )
+    .await
+}
+
+pub async fn fetch_trust_record(
+    fray: &str,
+    lattice_rpc_port: u16,
+) -> Result<Option<SignedTrustRecord>> {
+    let key = format!("{TRUST_RECORD_KEY_PREFIX}{fray}");
+    let Some(raw) = get_record(lattice_rpc_port, &key).await? else {
+        return Ok(None);
+    };
+    let signed: SignedTrustRecord =
+        serde_json::from_str(&raw).context("failed to decode signed trust record")?;
+    verify_signed_trust_record(&signed)?;
+    Ok(Some(signed))
+}
+
+pub async fn publish_directory(
+    dir: &FrayDirectory,
+    signing_key: &SigningKey,
+    lattice_rpc_port: u16,
+) -> Result<()> {
+    validate_directory(dir).map_err(anyhow::Error::msg)?;
+    let signed = sign_directory(dir, signing_key)?;
+    let payload = serde_json::to_string(&signed).context("failed to encode directory")?;
+    put_record(lattice_rpc_port, DIRECTORY_RECORD_KEY, payload).await
+}
+
+pub async fn fetch_directory(lattice_rpc_port: u16) -> Result<Option<SignedFrayDirectory>> {
+    let Some(raw) = get_record(lattice_rpc_port, DIRECTORY_RECORD_KEY).await? else {
+        return Ok(None);
+    };
+    let signed: SignedFrayDirectory =
+        serde_json::from_str(&raw).context("failed to decode fray directory")?;
+    verify_signed_directory(&signed)?;
+    Ok(Some(signed))
 }
 
 pub async fn moderation_check_many(
@@ -138,6 +228,49 @@ pub async fn moderation_check_many(
     Ok(Some(action.to_string()))
 }
 
+pub fn import_trust_record(store: &FrayStore, signed: &SignedTrustRecord) -> Result<()> {
+    verify_signed_trust_record(signed)?;
+    store.store_trust_record(&signed.record.fray, signed)?;
+    for entry in &signed.record.entries {
+        store.store_key_record(&signed.record.fray, entry.clone())?;
+    }
+    Ok(())
+}
+
+pub fn standing_map(record: Option<&SignedTrustRecord>) -> HashMap<String, KeyStanding> {
+    let mut out = HashMap::new();
+    if let Some(record) = record {
+        for entry in &record.record.entries {
+            out.insert(entry.key_b64.clone(), entry.standing.clone());
+        }
+    }
+    out
+}
+
+pub fn standing_hides_publisher(
+    standings: &HashMap<String, KeyStanding>,
+    publisher_b64: &str,
+) -> bool {
+    matches!(
+        standings.get(publisher_b64),
+        Some(KeyStanding::Restricted { .. })
+    )
+}
+
+pub fn content_hash_hex(body: &str) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(body.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+pub fn post_should_drop(blocklist: &ContentBlocklist, post: &Post) -> bool {
+    blocklist.contains(&content_hash_hex(&post.body))
+}
+
+pub fn comment_should_drop(blocklist: &ContentBlocklist, comment: &Comment) -> bool {
+    blocklist.contains(&content_hash_hex(&comment.body))
+}
+
 fn validate_feed_record(feed: &FrayFeedRecord) -> Result<()> {
     if feed.posts.len() > MAX_FEED_POSTS {
         bail!("too many posts in feed");
@@ -158,7 +291,49 @@ fn validate_feed_record(feed: &FrayFeedRecord) -> Result<()> {
     Ok(())
 }
 
-async fn rpc_call(rpc_port: u16, method: &str, params: Value) -> Result<Value> {
+pub async fn put_record(rpc_port: u16, key: &str, value: String) -> Result<()> {
+    let result = rpc_call(
+        rpc_port,
+        "put_record",
+        json!({
+            "key": key,
+            "value": value,
+        }),
+    )
+    .await?;
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("err");
+    if status != "ok" {
+        let reason = result
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("put_record failed");
+        bail!("{reason}");
+    }
+    Ok(())
+}
+
+pub async fn get_record(rpc_port: u16, key: &str) -> Result<Option<String>> {
+    let result = rpc_call(
+        rpc_port,
+        "get_record",
+        json!({
+            "key": key,
+        }),
+    )
+    .await?;
+    if result.is_null() {
+        return Ok(None);
+    }
+    let raw = result
+        .as_str()
+        .ok_or_else(|| anyhow!("record is not a string"))?;
+    Ok(Some(raw.to_string()))
+}
+
+pub async fn rpc_call(rpc_port: u16, method: &str, params: Value) -> Result<Value> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -186,4 +361,91 @@ async fn rpc_call(rpc_port: u16, method: &str, params: Value) -> Result<Value> {
         .get("result")
         .cloned()
         .ok_or_else(|| anyhow!("rpc result missing"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trust::{unix_ts, FrayTrustRecord};
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine as _;
+
+    fn sample_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    #[tokio::test]
+    async fn stake_check_returns_false_when_rpc_is_unreachable() {
+        assert!(!check_frayloom_stake(9).await.expect("stake check"));
+    }
+
+    #[test]
+    fn restricted_posts_are_hidden_after_trust_import() {
+        let owner = sample_key(1);
+        let restricted = BASE64_STANDARD.encode(sample_key(2).verifying_key().as_bytes());
+        let signed = sign_trust_record(
+            &FrayTrustRecord {
+                version: 1,
+                fray: "lattice".into(),
+                owner_key_b64: BASE64_STANDARD.encode(owner.verifying_key().as_bytes()),
+                moderator_keys: Vec::new(),
+                entries: vec![crate::trust::KeyRecord {
+                    key_b64: restricted.clone(),
+                    standing: KeyStanding::Restricted { reason: None },
+                    label: None,
+                    updated_at: unix_ts(),
+                }],
+                generated_at: unix_ts(),
+            },
+            &owner,
+        )
+        .expect("sign trust");
+        let standings = standing_map(Some(&signed));
+        assert!(standing_hides_publisher(&standings, &restricted));
+    }
+
+    #[test]
+    fn trusted_posts_are_not_hidden_by_trust_record_alone() {
+        let trusted = BASE64_STANDARD.encode(sample_key(3).verifying_key().as_bytes());
+        let signed = sign_trust_record(
+            &FrayTrustRecord {
+                version: 1,
+                fray: "lattice".into(),
+                owner_key_b64: BASE64_STANDARD.encode(sample_key(1).verifying_key().as_bytes()),
+                moderator_keys: Vec::new(),
+                entries: vec![crate::trust::KeyRecord {
+                    key_b64: trusted.clone(),
+                    standing: KeyStanding::Trusted,
+                    label: None,
+                    updated_at: unix_ts(),
+                }],
+                generated_at: unix_ts(),
+            },
+            &sample_key(1),
+        )
+        .expect("sign");
+        let standings = standing_map(Some(&signed));
+        let standing = standings.get(&trusted).cloned();
+        assert_eq!(standing, Some(KeyStanding::Trusted));
+        assert!(!standing_hides_publisher(&standings, &trusted));
+    }
+
+    #[test]
+    fn blocklist_drops_matching_post_bodies() {
+        let blocklist = ContentBlocklist::new();
+        let body = "blocked body";
+        let hash = content_hash_hex(body);
+        blocklist.add(&hash).expect("add blocklist");
+        let post = Post {
+            id: "abc123-abcdef".into(),
+            fray: "lattice".into(),
+            author: "fordz0".into(),
+            title: "hello".into(),
+            body: body.into(),
+            created_at: unix_ts(),
+            publisher_key_b64: None,
+            hidden: false,
+        };
+        assert!(post_should_drop(&blocklist, &post));
+    }
 }

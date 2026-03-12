@@ -1,0 +1,14 @@
+{
+  "name": "fray",
+  "version": 0,
+  "publisher_key": "",
+  "rating": "general",
+  "app": {
+    "proxy_port": 8890,
+    "proxy_paths": [
+      "/api"
+    ]
+  },
+  "files": [],
+  "signature": ""
+}
