@@ -20,6 +20,7 @@ VIDEO_BYTES="${LATTICE_STRESS_VIDEO_BYTES:-1048576}"
 SETTLE_SECS="${LATTICE_STRESS_SETTLE_SECS:-0}"
 RANGE_CHECK="${LATTICE_STRESS_RANGE_CHECK:-1}"
 HTTPS_PROXY_CHECK="${LATTICE_STRESS_HTTPS_PROXY_CHECK:-1}"
+DIRECT_HTTPS_CHECK="${LATTICE_STRESS_DIRECT_HTTPS_CHECK:-1}"
 RESTART_CHECK="${LATTICE_STRESS_RESTART_CHECK:-1}"
 RESTART_SETTLE_SECS="${LATTICE_STRESS_RESTART_SETTLE_SECS:-5}"
 FETCH_RETRIES="${LATTICE_STRESS_FETCH_RETRIES:-10}"
@@ -73,6 +74,10 @@ if [[ "$HTTPS_PROXY_CHECK" != "0" && "$HTTPS_PROXY_CHECK" != "1" ]]; then
   echo "LATTICE_STRESS_HTTPS_PROXY_CHECK must be 0 or 1"
   exit 1
 fi
+if [[ "$DIRECT_HTTPS_CHECK" != "0" && "$DIRECT_HTTPS_CHECK" != "1" ]]; then
+  echo "LATTICE_STRESS_DIRECT_HTTPS_CHECK must be 0 or 1"
+  exit 1
+fi
 if [[ "$RESTART_CHECK" != "0" && "$RESTART_CHECK" != "1" ]]; then
   echo "LATTICE_STRESS_RESTART_CHECK must be 0 or 1"
   exit 1
@@ -95,6 +100,11 @@ node_http_port() {
 node_proxy_port() {
   local idx="$1"
   echo $((BASE_PORT + (idx - 1) * 10 + 4))
+}
+
+node_https_port() {
+  local idx="$1"
+  echo $((BASE_PORT + (idx - 1) * 10 + 3))
 }
 
 create_site_round() {
@@ -279,6 +289,24 @@ run_round() {
     done
   fi
 
+  if [[ "$DIRECT_HTTPS_CHECK" == "1" ]]; then
+    echo "=== round $round: direct HTTPS checks ==="
+    for check_idx in "${check_nodes[@]}"; do
+      local https_port
+      local ca_path
+      https_port="$(node_https_port "$check_idx")"
+      ca_path="${LOCALNET_ROOT}/node${check_idx}/tls/lattice-local-ca.pem"
+      if ! curl -fsS \
+        --resolve "${SITE_NAME}.loom.lattice.localhost:${https_port}:127.0.0.1" \
+        --cacert "$ca_path" \
+        "https://${SITE_NAME}.loom.lattice.localhost:${https_port}/" \
+        >/tmp/lattice-stress-direct-https-$check_idx.html; then
+        echo "direct https check failed on node$check_idx https $https_port"
+        fail_count=$((fail_count + 1))
+      fi
+    done
+  fi
+
   echo "round $round summary: fetch_ok=$ok_count fetch_fail=$fail_count"
   if (( fail_count > 0 )); then
     return 1
@@ -371,6 +399,18 @@ run_restart_check() {
       --cacert "$ca_path" \
       "https://${SITE_NAME}.loom/" >/tmp/lattice-stress-restart-https.html
   fi
+
+  if [[ "$DIRECT_HTTPS_CHECK" == "1" ]]; then
+    local https_port
+    local ca_path
+    https_port="$(node_https_port 2)"
+    ca_path="${LOCALNET_ROOT}/node2/tls/lattice-local-ca.pem"
+    curl -fsS \
+      --resolve "${SITE_NAME}.loom.lattice.localhost:${https_port}:127.0.0.1" \
+      --cacert "$ca_path" \
+      "https://${SITE_NAME}.loom.lattice.localhost:${https_port}/" \
+      >/tmp/lattice-stress-restart-direct-https.html
+  fi
 }
 
 teardown() {
@@ -397,6 +437,7 @@ Env vars:
   LATTICE_STRESS_SETTLE_SECS   Delay after publish before fetch (default: 0)
   LATTICE_STRESS_RANGE_CHECK   1 to validate HTTP Range bytes (default: 1)
   LATTICE_STRESS_HTTPS_PROXY_CHECK 1 to validate HTTPS via local proxy (default: 1)
+  LATTICE_STRESS_DIRECT_HTTPS_CHECK 1 to validate direct HTTPS on :7443 (default: 1)
   LATTICE_STRESS_RESTART_CHECK 1 to restart nodes and verify persistence (default: 1)
   LATTICE_STRESS_RESTART_SETTLE_SECS Delay after restart before checks (default: 5)
   LATTICE_STRESS_FETCH_RETRIES Number of fetch attempts before failing (default: 10)
