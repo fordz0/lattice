@@ -47,11 +47,6 @@ pub struct ListQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct ClaimFrayRequest {
-    owner_key_b64: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct StandingRequest {
     key_b64: String,
     standing: String,
@@ -123,7 +118,10 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/frays/{fray}/posts/{post_id}/comments",
             get(list_comments).post(create_comment),
         )
-        .route("/api/v1/frays/{fray}/claim", post(claim_fray))
+        .route(
+            "/api/v1/frays/{fray}/claim",
+            get(get_fray_claim_status).post(claim_fray),
+        )
         .route("/api/v1/frays/{fray}/trust", get(get_trust_record))
         .route(
             "/api/v1/frays/{fray}/trust/standings",
@@ -178,6 +176,7 @@ async fn info(State(state): State<AppState>) -> impl IntoResponse {
         "GET /api/v1/identity/{handle}",
         "GET /api/v1/directory",
         "POST /api/v1/directory/sync",
+        "GET /api/v1/frays/{fray}/claim",
         "POST /api/v1/frays/{fray}/claim",
         "GET /api/v1/frays/{fray}/trust",
         "POST /api/v1/frays/{fray}/trust/standings",
@@ -478,11 +477,7 @@ async fn list_comments(
     }
 }
 
-async fn claim_fray(
-    State(state): State<AppState>,
-    Path(fray): Path<String>,
-    Json(request): Json<ClaimFrayRequest>,
-) -> Response {
+async fn claim_fray(State(state): State<AppState>, Path(fray): Path<String>) -> Response {
     match network::check_frayloom_stake(state.lattice_rpc_port).await {
         Ok(true) => {}
         Ok(false) => return (
@@ -493,8 +488,9 @@ async fn claim_fray(
         Err(err) => return bad_gateway(err.to_string()),
     }
 
+    let local_key = signing_key_b64(state.signing_key.as_ref());
     if let Ok(Some(existing)) = state.store.get_fray_ownership(&fray) {
-        if existing != request.owner_key_b64 {
+        if existing != local_key {
             return (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "fray is already claimed" })),
@@ -503,19 +499,10 @@ async fn claim_fray(
         }
     }
 
-    let local_key = signing_key_b64(state.signing_key.as_ref());
-    if request.owner_key_b64 != local_key {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "claim owner key must match the local signing key" })),
-        )
-            .into_response();
-    }
-
     let trust_record = FrayTrustRecord {
         version: 1,
         fray: fray.clone(),
-        owner_key_b64: request.owner_key_b64.clone(),
+        owner_key_b64: local_key.clone(),
         moderator_keys: Vec::new(),
         entries: Vec::new(),
         generated_at: unix_ts(),
@@ -537,14 +524,39 @@ async fn claim_fray(
     if let Err(err) = state.store.store_trust_record(&fray, &signed) {
         return bad_request(err.to_string());
     }
-    if let Err(err) = state
-        .store
-        .store_fray_ownership(&fray, &request.owner_key_b64)
-    {
+    if let Err(err) = state.store.store_fray_ownership(&fray, &local_key) {
         return bad_request(err.to_string());
     }
 
-    Json(json!({ "status": "ok", "fray": fray })).into_response()
+    Json(json!({ "status": "ok", "fray": fray, "owner_key_b64": local_key })).into_response()
+}
+
+async fn get_fray_claim_status(
+    State(state): State<AppState>,
+    Path(fray): Path<String>,
+) -> Response {
+    if let Some(owner_key_b64) = match state.store.get_fray_ownership(&fray) {
+        Ok(owner_key_b64) => owner_key_b64,
+        Err(err) => return bad_request(err.to_string()),
+    } {
+        return Json(json!({
+            "claimed": true,
+            "owner_key_b64": owner_key_b64,
+            "local": true,
+        }))
+        .into_response();
+    };
+
+    match network::fetch_trust_record(&fray, state.lattice_rpc_port).await {
+        Ok(Some(record)) => Json(json!({
+            "claimed": true,
+            "owner_key_b64": record.record.record.owner_key_b64,
+            "local": false,
+        }))
+        .into_response(),
+        Ok(None) => Json(json!({ "claimed": false })).into_response(),
+        Err(err) => bad_gateway(err.to_string()),
+    }
 }
 
 async fn get_trust_record(State(state): State<AppState>, Path(fray): Path<String>) -> Response {
@@ -710,11 +722,11 @@ async fn pull_fray(State(state): State<AppState>, Path(fray): Path<String>) -> R
         Err(err) => return bad_gateway(err.to_string()),
     };
     if let Some(ref trust_record) = trust_record {
-        if let Err(err) = network::import_trust_record(&state.store, trust_record) {
+        if let Err(err) = network::import_trust_record(&state.store, &trust_record.record) {
             return bad_request(err.to_string());
         }
     }
-    let standings = network::standing_map(trust_record.as_ref());
+    let standings = network::standing_map(trust_record.as_ref().map(|record| &record.record));
 
     let mut imported_posts = 0usize;
     for mut post in signed_feed.feed.posts {
@@ -1459,7 +1471,12 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::body::Body;
+    use axum::extract::State as ExtractState;
     use axum::http::Request;
+    use axum::routing::post as route_post;
+    use axum::{Json as AxumJson, Router as AxumRouter};
+    use std::collections::HashMap;
+    use tokio::sync::{oneshot, Mutex};
     use tower::util::ServiceExt;
 
     fn temp_db_path() -> std::path::PathBuf {
@@ -1491,6 +1508,84 @@ mod tests {
         Signature::from_slice(&bytes).expect("parse signature")
     }
 
+    async fn spawn_claim_rpc_server() -> (u16, oneshot::Sender<()>) {
+        let records = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+        let app = AxumRouter::new()
+            .route("/", route_post(mock_claim_rpc))
+            .with_state(records);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock rpc");
+        });
+        (port, shutdown_tx)
+    }
+
+    async fn mock_claim_rpc(
+        ExtractState(records): ExtractState<Arc<Mutex<HashMap<String, String>>>>,
+        AxumJson(request): AxumJson<Value>,
+    ) -> AxumJson<Value> {
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let result = match method {
+            "known_publisher_status" => json!({
+                "explicitly_trusted": true,
+            }),
+            "get_site_manifest" => json!({
+                "trust": {
+                    "status": "matches",
+                    "explicitly_trusted": true,
+                },
+                "pinned": true,
+            }),
+            "put_record" => {
+                let key = params
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .expect("put_record key");
+                let value = params
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .expect("put_record value");
+                records
+                    .lock()
+                    .await
+                    .insert(key.to_string(), value.to_string());
+                json!({ "status": "ok" })
+            }
+            "get_record" => {
+                let key = params
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .expect("get_record key");
+                records
+                    .lock()
+                    .await
+                    .get(key)
+                    .cloned()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        };
+        AxumJson(json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id").cloned().unwrap_or(json!(1)),
+            "result": result,
+        }))
+    }
+
     #[tokio::test]
     async fn claim_returns_403_when_stake_check_fails() {
         let app = app(app_state());
@@ -1499,15 +1594,113 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/frays/lattice/claim")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({ "owner_key_b64": BASE64_STANDARD.encode(SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes()) }).to_string(),
-                    ))
+                    .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_claim_status_returns_false_for_unclaimed_fray() {
+        let (rpc_port, shutdown_tx) = spawn_claim_rpc_server().await;
+        let app = app(app_state_with_rpc_port(rpc_port));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/frays/lattice/claim")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let value: Value = serde_json::from_slice(&body).expect("decode response");
+        assert_eq!(value, json!({ "claimed": false }));
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn get_claim_status_returns_remote_owner_from_dht() {
+        let (rpc_port, shutdown_tx) = spawn_claim_rpc_server().await;
+        let state = app_state_with_rpc_port(rpc_port);
+        let owner = SigningKey::from_bytes(&[5; 32]);
+        let owner_key_b64 = BASE64_STANDARD.encode(owner.verifying_key().as_bytes());
+        let trust_record = FrayTrustRecord {
+            version: 1,
+            fray: "lattice".to_string(),
+            owner_key_b64: owner_key_b64.clone(),
+            moderator_keys: Vec::new(),
+            entries: Vec::new(),
+            generated_at: unix_ts(),
+        };
+        network::publish_trust_record("lattice", &trust_record, &owner, rpc_port)
+            .await
+            .expect("publish trust record");
+
+        let app = app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/frays/lattice/claim")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let value: Value = serde_json::from_slice(&body).expect("decode response");
+        assert_eq!(
+            value,
+            json!({
+                "claimed": true,
+                "owner_key_b64": owner_key_b64,
+                "local": false,
+            })
+        );
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn claim_succeeds_without_request_body() {
+        let (rpc_port, shutdown_tx) = spawn_claim_rpc_server().await;
+        let state = app_state_with_rpc_port(rpc_port);
+        let expected_owner = signing_key_b64(state.signing_key.as_ref());
+        let app = app(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/frays/lattice/claim")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .store
+                .get_fray_ownership("lattice")
+                .expect("get ownership"),
+            Some(expected_owner.clone())
+        );
+        let trust = state
+            .store
+            .load_trust_record("lattice")
+            .expect("load trust record")
+            .expect("stored trust record");
+        assert_eq!(trust.record.owner_key_b64, expected_owner);
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]

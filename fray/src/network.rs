@@ -46,6 +46,11 @@ pub struct SignedFrayHandleRecord {
     pub record: FrayHandleRecord,
 }
 
+pub struct SignedFrayTrustRecord {
+    pub signed: SignedRecord,
+    pub record: SignedTrustRecord,
+}
+
 #[derive(Debug, Deserialize)]
 struct GetSiteManifestResult {
     trust: SiteTrustState,
@@ -166,7 +171,7 @@ pub async fn publish_trust_record(
 ) -> Result<()> {
     validate_trust_record(record).map_err(anyhow::Error::msg)?;
     let signed = sign_trust_record(record, signing_key)?;
-    let payload = serde_json::to_string(&signed).context("failed to encode trust record")?;
+    let payload = encode_trust_record_value(signing_key, &signed)?;
     put_record(
         lattice_rpc_port,
         &format!("{TRUST_RECORD_KEY_PREFIX}{fray}"),
@@ -237,15 +242,12 @@ pub async fn publisher_owns_handle(
 pub async fn fetch_trust_record(
     fray: &str,
     lattice_rpc_port: u16,
-) -> Result<Option<SignedTrustRecord>> {
+) -> Result<Option<SignedFrayTrustRecord>> {
     let key = format!("{TRUST_RECORD_KEY_PREFIX}{fray}");
     let Some(raw) = get_record(lattice_rpc_port, &key).await? else {
         return Ok(None);
     };
-    let signed: SignedTrustRecord =
-        serde_json::from_str(&raw).context("failed to decode signed trust record")?;
-    verify_signed_trust_record(&signed)?;
-    Ok(Some(signed))
+    Ok(Some(decode_trust_record_value(fray, &raw)?))
 }
 
 pub async fn publish_directory(
@@ -301,6 +303,35 @@ pub fn import_trust_record(store: &FrayStore, signed: &SignedTrustRecord) -> Res
         store.store_key_record(&signed.record.fray, entry.clone())?;
     }
     Ok(())
+}
+
+fn encode_trust_record_value(
+    signing_key: &SigningKey,
+    record: &SignedTrustRecord,
+) -> Result<String> {
+    let payload =
+        canonical_json_bytes(record).context("failed to canonicalize signed trust record")?;
+    let signed = SignedRecord::sign(signing_key, payload);
+    serde_json::to_string(&signed).context("failed to encode wrapped trust record")
+}
+
+fn decode_trust_record_value(fray: &str, raw: &str) -> Result<SignedFrayTrustRecord> {
+    let signed: SignedRecord =
+        serde_json::from_str(raw).context("failed to decode wrapped trust record")?;
+    if !signed.verify() {
+        bail!("trust record wrapper signature verification failed");
+    }
+    let record: SignedTrustRecord = signed
+        .payload_json()
+        .context("failed to decode signed trust payload")?;
+    verify_signed_trust_record(&record)?;
+    if record.record.fray != fray {
+        bail!("trust record mismatch");
+    }
+    if signed.publisher_b64() != record.record.owner_key_b64 {
+        bail!("trust record owner does not match wrapper signer");
+    }
+    Ok(SignedFrayTrustRecord { signed, record })
 }
 
 pub fn standing_map(record: Option<&SignedTrustRecord>) -> HashMap<String, KeyStanding> {
@@ -433,16 +464,155 @@ pub async fn rpc_call(rpc_port: u16, method: &str, params: Value) -> Result<Valu
 mod tests {
     use super::*;
     use crate::trust::{unix_ts, FrayTrustRecord};
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::{Json, Router};
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::{oneshot, Mutex};
 
     fn sample_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
     }
 
+    fn sample_trust_record() -> FrayTrustRecord {
+        FrayTrustRecord {
+            version: 1,
+            fray: "lattice".into(),
+            owner_key_b64: BASE64_STANDARD.encode(sample_key(1).verifying_key().as_bytes()),
+            moderator_keys: Vec::new(),
+            entries: vec![crate::trust::KeyRecord {
+                key_b64: BASE64_STANDARD.encode(sample_key(2).verifying_key().as_bytes()),
+                standing: KeyStanding::Trusted,
+                label: Some("peer".into()),
+                updated_at: unix_ts(),
+            }],
+            generated_at: unix_ts(),
+        }
+    }
+
+    async fn spawn_mock_rpc_server() -> (
+        u16,
+        Arc<Mutex<HashMap<String, String>>>,
+        oneshot::Sender<()>,
+    ) {
+        let records = Arc::new(Mutex::new(HashMap::new()));
+        let app = Router::new()
+            .route("/", post(mock_rpc))
+            .with_state(records.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock rpc");
+        });
+        (port, records, shutdown_tx)
+    }
+
+    async fn mock_rpc(
+        State(records): State<Arc<Mutex<HashMap<String, String>>>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let result = match method {
+            "put_record" => {
+                let key = params
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .expect("put_record key");
+                let value = params
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .expect("put_record value");
+                records
+                    .lock()
+                    .await
+                    .insert(key.to_string(), value.to_string());
+                json!({ "status": "ok" })
+            }
+            "get_record" => {
+                let key = params
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .expect("get_record key");
+                records
+                    .lock()
+                    .await
+                    .get(key)
+                    .map(|value| Value::String(value.clone()))
+                    .unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        };
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id").cloned().unwrap_or(json!(1)),
+            "result": result,
+        }))
+    }
+
     #[tokio::test]
     async fn stake_check_returns_false_when_rpc_is_unreachable() {
         assert!(!check_frayloom_stake(9).await.expect("stake check"));
+    }
+
+    #[tokio::test]
+    async fn publish_trust_record_wraps_signed_record_payload() {
+        let (port, records, shutdown_tx) = spawn_mock_rpc_server().await;
+        let owner = sample_key(1);
+        let record = sample_trust_record();
+        publish_trust_record("lattice", &record, &owner, port)
+            .await
+            .expect("publish trust record");
+
+        let stored = records
+            .lock()
+            .await
+            .get("app:fray:trust:lattice")
+            .cloned()
+            .expect("stored trust record");
+        let outer: SignedRecord =
+            serde_json::from_str(&stored).expect("decode outer signed record");
+        assert!(outer.verify());
+        let inner: SignedTrustRecord = outer.payload_json().expect("decode inner trust record");
+        verify_signed_trust_record(&inner).expect("verify inner trust record");
+        assert_eq!(inner.record, record);
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn fetch_trust_record_roundtrips_wrapped_record() {
+        let (port, _records, shutdown_tx) = spawn_mock_rpc_server().await;
+        let owner = sample_key(1);
+        let record = sample_trust_record();
+        publish_trust_record("lattice", &record, &owner, port)
+            .await
+            .expect("publish trust record");
+
+        let fetched = fetch_trust_record("lattice", port)
+            .await
+            .expect("fetch trust record")
+            .expect("wrapped trust record");
+        assert!(fetched.signed.verify());
+        verify_signed_trust_record(&fetched.record).expect("verify signed trust record");
+        assert_eq!(fetched.record.record, record);
+
+        let _ = shutdown_tx.send(());
     }
 
     #[test]

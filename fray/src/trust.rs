@@ -17,7 +17,7 @@ pub enum KeyStanding {
     Restricted { reason: Option<String> },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeyRecord {
     pub key_b64: String,
     pub standing: KeyStanding,
@@ -25,7 +25,7 @@ pub struct KeyRecord {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FrayTrustRecord {
     // Field order is canonical — do not reorder.
     pub version: u64,

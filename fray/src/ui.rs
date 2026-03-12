@@ -495,6 +495,16 @@ pub fn page_html() -> &'static str {
       color: var(--text);
     }
 
+    .claim-panel {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-alt);
+    }
+
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -668,6 +678,14 @@ pub fn page_html() -> &'static str {
               </div>
             </div>
 
+            <div id="fray-claim-panel" class="claim-panel hidden">
+              <div id="fray-owned" class="chip good hidden"><span class="dot"></span>You own this fray</div>
+              <div id="fray-claim-copy" class="muted">Claim this fray to manage trust and moderation locally.</div>
+              <div class="inline-actions">
+                <button id="claim-fray" class="btn-primary hidden" type="button">Claim Fray</button>
+              </div>
+            </div>
+
             <div id="posts" class="posts"></div>
           </section>
 
@@ -772,6 +790,7 @@ pub fn page_html() -> &'static str {
       fray: "lattice",
       postId: null,
       posts: [],
+      frayClaim: null,
       identity: null,
       identityModalMode: "onboarding",
       onboardingSkipped: localStorage.getItem("fray-handle-skipped") === "1"
@@ -895,6 +914,7 @@ pub fn page_html() -> &'static str {
         const data = await api(`/api/v1/frays/${state.fray}/posts?limit=50`);
         state.posts = data.posts || [];
         renderPosts();
+        await loadFrayClaimStatus();
         setStatus(`Loaded ${state.posts.length} threads`, "ok");
         routeTo();
         if (state.postId) await loadThread(state.postId);
@@ -921,6 +941,49 @@ pub fn page_html() -> &'static str {
       posts.querySelectorAll(".post-title").forEach((node) => {
         node.addEventListener("click", () => loadThread(node.dataset.id));
       });
+    }
+
+    function renderFrayClaimStatus() {
+      const panel = el("fray-claim-panel");
+      const claimButton = el("claim-fray");
+      const owned = el("fray-owned");
+      const copy = el("fray-claim-copy");
+      const claim = state.frayClaim;
+
+      if (!claim) {
+        panel.classList.add("hidden");
+        claimButton.classList.add("hidden");
+        owned.classList.add("hidden");
+        return;
+      }
+
+      if (claim.claimed === false) {
+        panel.classList.remove("hidden");
+        claimButton.classList.remove("hidden");
+        owned.classList.add("hidden");
+        copy.textContent = "Claim this fray to manage trust and moderation locally.";
+        return;
+      }
+
+      panel.classList.remove("hidden");
+      claimButton.classList.add("hidden");
+      if (claim.local) {
+        owned.classList.remove("hidden");
+        copy.textContent = "This fray is claimed on this node. Open the mod panel to manage trust and moderation.";
+        return;
+      }
+
+      owned.classList.add("hidden");
+      copy.textContent = `This fray is claimed by another node (${esc((claim.owner_key_b64 || "").slice(0, 16))}...).`;
+    }
+
+    async function loadFrayClaimStatus() {
+      try {
+        state.frayClaim = await api(`/api/v1/frays/${state.fray}/claim`);
+      } catch (_) {
+        state.frayClaim = null;
+      }
+      renderFrayClaimStatus();
     }
 
     async function loadThread(postId) {
@@ -1112,6 +1175,16 @@ pub fn page_html() -> &'static str {
       }
     }
 
+    async function claimFray() {
+      try {
+        await api(`/api/v1/frays/${state.fray}/claim`, { method: "POST" });
+        await loadFrayClaimStatus();
+        setStatus(`claimed /f/${state.fray}`, "ok");
+      } catch (err) {
+        setStatus(err.message, "err");
+      }
+    }
+
     function renderIdentity() {
       const identity = state.identity;
       const hasHandle = identity && identity.handle;
@@ -1271,6 +1344,7 @@ pub fn page_html() -> &'static str {
     el("comment-create").addEventListener("click", createComment);
     el("sync-pull").addEventListener("click", syncPull);
     el("sync-publish").addEventListener("click", syncPublish);
+    el("claim-fray").addEventListener("click", claimFray);
     el("directory-publish").addEventListener("click", publishDirectoryEntry);
     el("trust-save").addEventListener("click", saveStanding);
     el("moderator-add").addEventListener("click", addModerator);
