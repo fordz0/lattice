@@ -1,10 +1,13 @@
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
+use jsonrpsee::core::client::ClientT;
+use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::rpc_params;
 use lattice_core::identity::{canonical_json_bytes, SignedRecord};
 use lattice_core::moderation::{ModerationEngine, ModerationRule, RuleAction, RuleKind};
 use lattice_core::registry::{is_registry_operator, REGISTRY_OPERATOR_KEY_B64};
-use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
 use lattice_daemon::app_ownership::enforce_app_record_ownership;
+use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
 use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
 use lattice_daemon::mime::{self, ALLOWED_MIME_TYPES, MAX_FILE_BYTES};
 use lattice_daemon::moderation_helpers::{
@@ -16,9 +19,6 @@ use lattice_daemon::rpc::{self, RpcCommand};
 use lattice_daemon::site_helpers::pin_cached_site_blocks;
 use lattice_daemon::store::LocalRecordStore;
 use lattice_site::manifest::{validate_app_manifest, AppManifest};
-use jsonrpsee::core::client::ClientT;
-use jsonrpsee::http_client::HttpClientBuilder;
-use jsonrpsee::rpc_params;
 use std::process::Command;
 use std::{fs, path::PathBuf};
 use tempfile::tempdir;
@@ -45,11 +45,15 @@ fn signed_record(seed: u8, payload: serde_json::Value) -> SignedRecord {
 
 fn operator_signing_key() -> Option<SigningKey> {
     let home = std::env::var_os("HOME")?;
-    let key_path: PathBuf = PathBuf::from(home).join(".lattice").join("site_signing.key");
+    let key_path: PathBuf = PathBuf::from(home)
+        .join(".lattice")
+        .join("site_signing.key");
     let bytes = fs::read(key_path).ok()?;
     let key_bytes: [u8; 32] = bytes.try_into().ok()?;
     let signing_key = SigningKey::from_bytes(&key_bytes);
-    if is_registry_operator(&base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())) {
+    if is_registry_operator(
+        &base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes()),
+    ) {
         Some(signing_key)
     } else {
         None
@@ -82,8 +86,7 @@ fn moderation_record_ingest_reject_rule_is_caught_by_validation_and_engine() {
         RuleAction::RejectIngest,
     )]);
 
-    validate_put_record_request(key, &value)
-        .expect("generic app key should pass validation");
+    validate_put_record_request(key, &value).expect("generic app key should pass validation");
     assert_eq!(engine.check_key(key), Some(&RuleAction::RejectIngest));
 }
 
@@ -160,8 +163,8 @@ fn registry_record_put_accepts_operator_key() {
     let dir = tempdir().expect("tempdir");
     let store = LocalRecordStore::open(dir.path(), [13; 32]).expect("open store");
     let key = "app:lattice:registry:fray";
-    let payload = canonical_json_bytes(&serde_json::json!({"app_id": "fray"}))
-        .expect("encode payload");
+    let payload =
+        canonical_json_bytes(&serde_json::json!({"app_id": "fray"})).expect("encode payload");
     let signed = SignedRecord::sign(&signing_key, payload);
     assert_eq!(signed.publisher_b64(), REGISTRY_OPERATOR_KEY_B64);
     let value = serde_json::to_vec(&signed).expect("encode record");
@@ -300,9 +303,8 @@ fn publisher_hide_rule_matches_site_manifest_publisher_key() {
     .to_string();
     let manifest: lattice_site::manifest::SiteManifest =
         serde_json::from_str(&manifest_json).expect("decode manifest");
-    let extracted_publisher = base64::engine::general_purpose::STANDARD.encode(
-        hex::decode(&manifest.publisher_key).expect("decode manifest publisher hex"),
-    );
+    let extracted_publisher = base64::engine::general_purpose::STANDARD
+        .encode(hex::decode(&manifest.publisher_key).expect("decode manifest publisher hex"));
     let engine = ModerationEngine::load(vec![rule(
         "hide-publisher",
         RuleKind::PublisherKey,
@@ -342,8 +344,8 @@ fn moderation_block_rules_cover_ingest_hide_and_republish() {
         ),
     ]);
 
-    let ingest = block_ingest_rule(&engine, site_name, reject_hash)
-        .expect("block ingest rule should match");
+    let ingest =
+        block_ingest_rule(&engine, site_name, reject_hash).expect("block ingest rule should match");
     assert_eq!(ingest.id, "reject-block");
     assert!(block_ingest_rule(&engine, site_name, "other").is_none());
 
@@ -381,8 +383,9 @@ async fn moderation_purge_local_removes_matching_records_and_blocks() {
     let mut kademlia = lattice_daemon::dht::new_kademlia(peer_id);
 
     let record_key = "app:fray:feed:lattice".to_string();
-    let record_value = serde_json::to_vec(&signed_record(5, serde_json::json!({"fray": "lattice"})))
-        .expect("encode record");
+    let record_value =
+        serde_json::to_vec(&signed_record(5, serde_json::json!({"fray": "lattice"})))
+            .expect("encode record");
     store
         .put_record(&record_key, &record_value, false)
         .expect("persist record");
@@ -396,7 +399,10 @@ async fn moderation_purge_local_removes_matching_records_and_blocks() {
         &record_key,
     )
     .expect("purge record");
-    assert!(!store.load_records().expect("load records").contains_key(&record_key));
+    assert!(!store
+        .load_records()
+        .expect("load records")
+        .contains_key(&record_key));
 
     let block_hash = "deadbeef";
     let block_bytes = b"secret pinned block";
@@ -419,8 +425,12 @@ async fn moderation_purge_local_removes_matching_records_and_blocks() {
     let key_b = "app:fray:feed:b".to_string();
     let value_a = serde_json::to_vec(&signed_a).expect("encode record a");
     let value_b = serde_json::to_vec(&signed_b).expect("encode record b");
-    store.put_record(&key_a, &value_a, false).expect("persist a");
-    store.put_record(&key_b, &value_b, false).expect("persist b");
+    store
+        .put_record(&key_a, &value_a, false)
+        .expect("persist a");
+    store
+        .put_record(&key_b, &value_b, false)
+        .expect("persist b");
     local_records.insert(key_a.clone(), value_a);
     local_records.insert(key_b.clone(), value_b);
 
@@ -448,7 +458,10 @@ fn session_cache_enforces_byte_limit_and_evicts_lru() {
     cache.insert("c".to_string(), vec![3; 400]);
 
     assert!(cache.bytes() <= 1024);
-    assert!(cache.get("a").is_none(), "oldest entry should have been evicted");
+    assert!(
+        cache.get("a").is_none(),
+        "oldest entry should have been evicted"
+    );
     assert!(cache.get("b").is_some());
     assert!(cache.get("c").is_some());
 }
@@ -492,8 +505,12 @@ fn trusted_publishers_add_list_check_and_remove() {
         )
         .expect("add trusted publisher");
 
-    assert!(store.is_trusted_publisher(&trusted_key).expect("trusted lookup"));
-    assert!(!store.is_trusted_publisher(&other_key).expect("other lookup"));
+    assert!(store
+        .is_trusted_publisher(&trusted_key)
+        .expect("trusted lookup"));
+    assert!(!store
+        .is_trusted_publisher(&other_key)
+        .expect("other lookup"));
 
     let listed = store
         .list_trusted_publishers()
@@ -687,7 +704,7 @@ async fn trust_site_rpc_with_pin_true_sets_trust_and_persists_blocks() {
     assert!(known.explicitly_trusted);
 
     let pinned: Vec<String> = client
-        .request("list_pinned", rpc_params! [])
+        .request("list_pinned", rpc_params![])
         .await
         .expect("list_pinned request");
     assert_eq!(pinned, vec![site_name.to_string()]);
@@ -708,9 +725,12 @@ fn app_record_signature_validation_accepts_valid_and_rejects_tampering() {
     let mut tampered: serde_json::Value =
         serde_json::from_slice(&signed_json).expect("deserialize signed record json");
     if let Some(payload_b64) = tampered.get_mut("payload") {
-        let replacement = canonical_json_bytes(&serde_json::json!({"type": "feed", "fray": "evil"}))
-            .expect("encode tampered payload");
-        *payload_b64 = serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(replacement));
+        let replacement =
+            canonical_json_bytes(&serde_json::json!({"type": "feed", "fray": "evil"}))
+                .expect("encode tampered payload");
+        *payload_b64 = serde_json::Value::String(
+            base64::engine::general_purpose::STANDARD.encode(replacement),
+        );
     }
     let tampered_json = serde_json::to_vec(&tampered).expect("serialize tampered record");
     let err = validate_put_record_request("app:fray:feed:lattice", &tampered_json)
@@ -728,9 +748,7 @@ fn app_record_signature_validation_accepts_valid_and_rejects_tampering() {
 
 #[test]
 fn mime_policy_detects_magic_bytes_fallbacks_and_violations() {
-    let png_bytes = vec![
-        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
-    ];
+    let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
     assert_eq!(mime::detect_mime("wrong.txt", &png_bytes), "image/png");
 
     let random_bytes = b"definitely not html but unknown bytes";
@@ -743,13 +761,14 @@ fn mime_policy_detects_magic_bytes_fallbacks_and_violations() {
         mime::violation_reason("text/html", MAX_FILE_BYTES + 1),
         Some("too_large")
     );
-    assert_eq!(mime::violation_reason("video/mp4", 1024), Some("wrong_type"));
+    assert_eq!(
+        mime::violation_reason("video/mp4", 1024),
+        Some("wrong_type")
+    );
 
     let err = validate_site_file_mime_policy("movie.mp4", b"not really video", true)
         .expect_err("strict MIME policy should reject");
-    assert!(err
-        .to_string()
-        .contains("rejected: movie.mp4"));
+    assert!(err.to_string().contains("rejected: movie.mp4"));
     validate_site_file_mime_policy("movie.mp4", b"not really video", false)
         .expect("warn mode should allow MIME violation");
 }
@@ -822,9 +841,7 @@ fn app_unregister_with_correct_pid_succeeds() {
     registry
         .register(app_registration("fray", pid))
         .expect("register app");
-    registry
-        .unregister("fray", pid)
-        .expect("unregister app");
+    registry.unregister("fray", pid).expect("unregister app");
     assert!(registry.get("fray").is_none());
 }
 

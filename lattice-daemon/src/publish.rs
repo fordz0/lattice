@@ -237,7 +237,8 @@ pub fn start_publish_task(
     }
 
     for (hash, value) in prepared.blocks {
-        if let Err(err) = local_record_store.put_block(&hash, &value, site_name, CachePolicy::Pinned)
+        if let Err(err) =
+            local_record_store.put_block(&hash, &value, site_name, CachePolicy::Pinned)
         {
             if task.failed.is_none() {
                 task.failed = Some(err.to_string());

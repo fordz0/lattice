@@ -1,5 +1,5 @@
-pub mod app_registry;
 pub mod app_ownership;
+pub mod app_registry;
 pub mod block_fetch;
 pub mod cache;
 pub mod config;
@@ -9,8 +9,8 @@ pub mod mime;
 pub mod moderation_helpers;
 pub mod names;
 pub mod node;
-pub mod publish;
 pub mod proxy_server;
+pub mod publish;
 pub mod rpc;
 pub mod site_helpers;
 pub mod store;

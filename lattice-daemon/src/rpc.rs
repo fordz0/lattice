@@ -1,8 +1,8 @@
+use crate::app_registry::LocalAppRegistration;
 use anyhow::Result;
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
-use crate::app_registry::LocalAppRegistration;
 use lattice_core::moderation::ModerationRule;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -581,7 +581,6 @@ pub async fn start_rpc_server(
 
         Ok::<_, ErrorObjectOwned>(response)
     })?;
-
     module.register_async_method("list_names", |_, ctx, _| async move {
         let (resp_tx, resp_rx) = oneshot::channel();
         ctx.send(RpcCommand::ListNames {

@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use directories::BaseDirs;
-use fray::blocklist::ContentBlocklist;
-use fray::api::{app, AppState};
-use fray::store::FrayStore;
 use ed25519_dalek::SigningKey;
+use fray::api::{app, AppState};
+use fray::blocklist::ContentBlocklist;
+use fray::store::FrayStore;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,7 +99,10 @@ fn load_signing_key() -> Result<SigningKey> {
     } else {
         let base_dirs = BaseDirs::new()
             .ok_or_else(|| anyhow::anyhow!("failed to resolve user home directory"))?;
-        base_dirs.home_dir().join(".lattice").join("site_signing.key")
+        base_dirs
+            .home_dir()
+            .join(".lattice")
+            .join("site_signing.key")
     };
     let bytes = std::fs::read(&key_path)
         .with_context(|| format!("failed to read signing key {}", key_path.display()))?;

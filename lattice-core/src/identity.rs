@@ -26,7 +26,9 @@ impl SignedRecord {
     }
 
     pub fn verify(&self) -> bool {
-        self.publisher_key.verify(&self.payload, &self.signature).is_ok()
+        self.publisher_key
+            .verify(&self.payload, &self.signature)
+            .is_ok()
     }
 
     pub fn publisher_b64(&self) -> String {
@@ -53,7 +55,10 @@ impl Serialize for SignedRecord {
             &BASE64_STANDARD.encode(self.publisher_key.as_bytes()),
         )?;
         state.serialize_field("payload", &BASE64_STANDARD.encode(&self.payload))?;
-        state.serialize_field("signature", &BASE64_STANDARD.encode(self.signature.to_bytes()))?;
+        state.serialize_field(
+            "signature",
+            &BASE64_STANDARD.encode(self.signature.to_bytes()),
+        )?;
         state.serialize_field("signed_at", &self.signed_at)?;
         state.end()
     }
@@ -128,15 +133,14 @@ impl<'de> Deserialize<'de> for SignedRecord {
                     match field {
                         Field::PublisherKey => {
                             let value: String = map.next_value()?;
-                            publisher_key = Some(decode_verifying_key(&value).map_err(de::Error::custom)?);
+                            publisher_key =
+                                Some(decode_verifying_key(&value).map_err(de::Error::custom)?);
                         }
                         Field::Payload => {
                             let value: String = map.next_value()?;
-                            payload = Some(
-                                BASE64_STANDARD
-                                    .decode(value)
-                                    .map_err(|err| de::Error::custom(format!("invalid payload base64: {err}")))?,
-                            );
+                            payload = Some(BASE64_STANDARD.decode(value).map_err(|err| {
+                                de::Error::custom(format!("invalid payload base64: {err}"))
+                            })?);
                         }
                         Field::Signature => {
                             let value: String = map.next_value()?;
@@ -216,7 +220,8 @@ mod tests {
         assert!(signed.verify());
 
         let encoded = serde_json::to_string(&signed).expect("serialize signed record");
-        let decoded: SignedRecord = serde_json::from_str(&encoded).expect("deserialize signed record");
+        let decoded: SignedRecord =
+            serde_json::from_str(&encoded).expect("deserialize signed record");
         assert!(decoded.verify());
         assert_eq!(decoded.publisher_b64(), signed.publisher_b64());
     }

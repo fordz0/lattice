@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 
 use lattice_daemon::block_fetch::{self, BlockFetchRequest, BlockFetchResponse};
-use lattice_daemon::cache::{SessionBlockCache, CachePolicy};
+use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
 use lattice_daemon::mime;
 use lattice_daemon::rpc::{GetSiteResponse, SiteFile};
 use lattice_daemon::site_helpers::{
@@ -18,11 +18,11 @@ use lattice_daemon::site_helpers::{
 };
 use lattice_daemon::store::LocalRecordStore;
 
+use crate::{LatticeBehaviour, MAX_GET_SITE_TOTAL_BYTES};
 use lattice_daemon::moderation_helpers::{
     action_name, block_ingest_rule, hide_block_rule, hide_record_rule, quarantine_record,
     site_manifest_publisher_b64,
 };
-use crate::{LatticeBehaviour, MAX_GET_SITE_TOTAL_BYTES};
 
 pub struct GetSiteTask {
     pub respond_to: oneshot::Sender<Result<GetSiteResponse, String>>,
@@ -178,7 +178,8 @@ pub fn start_block_lookup(
         return;
     };
 
-    let query_id = lattice_daemon::dht::get_providers(&mut swarm.behaviour_mut().kademlia, site_key.clone());
+    let query_id =
+        lattice_daemon::dht::get_providers(&mut swarm.behaviour_mut().kademlia, site_key.clone());
     pending_provider_queries.insert(
         query_id,
         PendingProviderQuery {
@@ -314,16 +315,19 @@ pub fn handle_block_fetch_event(
             } => {
                 let response = match site_name_from_site_key(&request.site_key) {
                     Some(site_name) => {
-                        let publisher_hidden = cached_manifest_json(&mut swarm.behaviour_mut().kademlia, site_name)
-                            .and_then(|manifest_json| site_manifest_publisher_b64(&manifest_json))
-                            .and_then(|publisher_b64| {
-                                hide_record_rule(
-                                    moderation_engine,
-                                    &request.site_key,
-                                    Some(&publisher_b64),
-                                )
-                            })
-                            .is_some();
+                        let publisher_hidden =
+                            cached_manifest_json(&mut swarm.behaviour_mut().kademlia, site_name)
+                                .and_then(|manifest_json| {
+                                    site_manifest_publisher_b64(&manifest_json)
+                                })
+                                .and_then(|publisher_b64| {
+                                    hide_record_rule(
+                                        moderation_engine,
+                                        &request.site_key,
+                                        Some(&publisher_b64),
+                                    )
+                                })
+                                .is_some();
                         if publisher_hidden
                             || hide_block_rule(moderation_engine, site_name, &request.block_hash)
                                 .is_some()
@@ -395,7 +399,10 @@ pub fn handle_block_fetch_event(
                         }
                     }
                 };
-                let _ = swarm.behaviour_mut().block_fetch.send_response(channel, response);
+                let _ = swarm
+                    .behaviour_mut()
+                    .block_fetch
+                    .send_response(channel, response);
             }
             request_response::Message::Response {
                 request_id,
@@ -632,7 +639,11 @@ pub fn handle_site_task_block_bytes(
     );
 }
 
-pub fn append_block_to_site_task(task: &mut GetSiteTask, block_hash: &str, raw_bytes: Vec<u8>) -> Result<(), String> {
+pub fn append_block_to_site_task(
+    task: &mut GetSiteTask,
+    block_hash: &str,
+    raw_bytes: Vec<u8>,
+) -> Result<(), String> {
     let actual_hash = hex::encode(Sha256::digest(&raw_bytes));
     if actual_hash != block_hash {
         return Err(format!(
@@ -684,7 +695,9 @@ pub fn next_task_block_hash(task: &mut GetSiteTask) -> std::result::Result<Optio
     start_next_file_download(task)
 }
 
-pub fn start_next_file_download(task: &mut GetSiteTask) -> std::result::Result<Option<String>, String> {
+pub fn start_next_file_download(
+    task: &mut GetSiteTask,
+) -> std::result::Result<Option<String>, String> {
     let manifest = task
         .manifest
         .as_ref()
@@ -700,7 +713,10 @@ pub fn start_next_file_download(task: &mut GetSiteTask) -> std::result::Result<O
 
     let block_hashes = file_block_hashes(&file);
     if block_hashes.is_empty() {
-        return Err(format!("invalid site manifest: {} has no chunks", file.path));
+        return Err(format!(
+            "invalid site manifest: {} has no chunks",
+            file.path
+        ));
     }
     let first_hash = block_hashes[0].clone();
     task.active_file = Some(ActiveFileDownload {

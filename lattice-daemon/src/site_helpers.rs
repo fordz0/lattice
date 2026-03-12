@@ -109,8 +109,8 @@ pub fn pin_cached_site_blocks(
 ) -> Result<usize> {
     let mut pinned_count =
         local_record_store.set_site_cache_policy(site_name, CachePolicy::Pinned)?;
-    let manifest: lattice_site::manifest::SiteManifest =
-        serde_json::from_str(manifest_json).context("failed to decode site manifest for pinning")?;
+    let manifest: lattice_site::manifest::SiteManifest = serde_json::from_str(manifest_json)
+        .context("failed to decode site manifest for pinning")?;
     let mut seen = HashSet::new();
     for file in manifest.files {
         for hash in file_block_hashes(&file) {
@@ -144,12 +144,8 @@ pub fn maybe_put_record(
 ) -> Result<Option<kad::QueryId>> {
     let publisher_b64 = record_publisher_b64(&key, &value);
     let site_name = key.strip_prefix("site:");
-    if let Some(rule) = republish_rule(
-        moderation_engine,
-        &key,
-        publisher_b64.as_deref(),
-        site_name,
-    ) {
+    if let Some(rule) = republish_rule(moderation_engine, &key, publisher_b64.as_deref(), site_name)
+    {
         warn!(
             rule_id = %rule.id,
             rule_kind = ?rule.kind,

@@ -419,13 +419,18 @@ async fn run() -> Result<()> {
             validate_app_registry_record(&record)
                 .map_err(|err| anyhow!("invalid app registry record: {err}"))?;
             let signing_key = load_site_signing_key()?;
-            let payload = canonical_json_bytes(&record).context("failed to encode app registry record")?;
+            let payload =
+                canonical_json_bytes(&record).context("failed to encode app registry record")?;
             let signed = SignedRecord::sign(&signing_key, payload);
-            let value = serde_json::to_string(&signed).context("failed to encode signed app record")?;
+            let value =
+                serde_json::to_string(&signed).context("failed to encode signed app record")?;
             let key = format!("{APP_REGISTRY_PREFIX}{app_id}");
             let client = RpcClient::new(cli.rpc_port);
             let result = client.put_record(&key, &value).await?;
-            let status = result.get("status").and_then(Value::as_str).unwrap_or("err");
+            let status = result
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("err");
             if status != "ok" {
                 let error = result
                     .get("error")
@@ -615,8 +620,8 @@ fn load_identity_public_key_hex() -> Result<String> {
 
 fn load_site_signing_key() -> Result<SigningKey> {
     let key_path = lattice_data_dir()?.join("site_signing.key");
-    let bytes = fs::read(&key_path)
-        .with_context(|| format!("failed to read {}", key_path.display()))?;
+    let bytes =
+        fs::read(&key_path).with_context(|| format!("failed to read {}", key_path.display()))?;
     let key_bytes: [u8; 32] = bytes
         .try_into()
         .map_err(|_| anyhow!("invalid site signing key length in {}", key_path.display()))?;
@@ -730,7 +735,8 @@ async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
     let value = value
         .as_str()
         .ok_or_else(|| anyhow!("app registry record was not a string"))?;
-    let signed: SignedRecord = serde_json::from_str(value).context("failed to decode signed app registry record")?;
+    let signed: SignedRecord =
+        serde_json::from_str(value).context("failed to decode signed app registry record")?;
     if !signed.verify() {
         bail!("invalid signed app registry record");
     }
@@ -741,7 +747,8 @@ async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
     let record: AppRegistryRecord = signed
         .payload_json()
         .context("failed to decode app registry payload")?;
-    validate_app_registry_record(&record).map_err(|err| anyhow!("invalid app registry record: {err}"))?;
+    validate_app_registry_record(&record)
+        .map_err(|err| anyhow!("invalid app registry record: {err}"))?;
     if record.app_id != app_id {
         bail!("registry app id mismatch");
     }
@@ -752,8 +759,7 @@ async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
     };
 
     println!("installing {app_id} v{}...", record.version);
-    fs::create_dir_all(lattice_apps_dir()?)
-        .context("failed to create app install directory")?;
+    fs::create_dir_all(lattice_apps_dir()?).context("failed to create app install directory")?;
 
     let temp_path = std::env::temp_dir().join(format!(
         "lattice-install-{app_id}-{}",
@@ -881,7 +887,9 @@ fn list_installed_apps() -> Result<()> {
     }
 
     let mut found = false;
-    for entry in fs::read_dir(&apps_dir).with_context(|| format!("failed to read {}", apps_dir.display()))? {
+    for entry in
+        fs::read_dir(&apps_dir).with_context(|| format!("failed to read {}", apps_dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
@@ -916,10 +924,22 @@ fn list_installed_apps() -> Result<()> {
 
 fn platform_asset(record: &AppRegistryRecord) -> Option<(&str, &str)> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => pair(record.linux_x86_64_url.as_deref(), record.linux_x86_64_sha256.as_deref()),
-        ("linux", "aarch64") => pair(record.linux_aarch64_url.as_deref(), record.linux_aarch64_sha256.as_deref()),
-        ("macos", "aarch64") => pair(record.macos_aarch64_url.as_deref(), record.macos_aarch64_sha256.as_deref()),
-        ("macos", "x86_64") => pair(record.macos_x86_64_url.as_deref(), record.macos_x86_64_sha256.as_deref()),
+        ("linux", "x86_64") => pair(
+            record.linux_x86_64_url.as_deref(),
+            record.linux_x86_64_sha256.as_deref(),
+        ),
+        ("linux", "aarch64") => pair(
+            record.linux_aarch64_url.as_deref(),
+            record.linux_aarch64_sha256.as_deref(),
+        ),
+        ("macos", "aarch64") => pair(
+            record.macos_aarch64_url.as_deref(),
+            record.macos_aarch64_sha256.as_deref(),
+        ),
+        ("macos", "x86_64") => pair(
+            record.macos_x86_64_url.as_deref(),
+            record.macos_x86_64_sha256.as_deref(),
+        ),
         _ => None,
     }
 }
@@ -945,7 +965,9 @@ fn download_with_progress(url: &str, output: &Path) -> Result<()> {
     let mut next_report = 1_048_576_u64;
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = response.read(&mut buffer).context("failed to read download response")?;
+        let read = response
+            .read(&mut buffer)
+            .context("failed to read download response")?;
         if read == 0 {
             break;
         }
@@ -961,11 +983,14 @@ fn download_with_progress(url: &str, output: &Path) -> Result<()> {
 }
 
 fn verify_sha256_file(path: &Path, expected_hex: &str) -> Result<()> {
-    let mut file = fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = file.read(&mut buffer).with_context(|| format!("failed to read {}", path.display()))?;
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read {}", path.display()))?;
         if read == 0 {
             break;
         }

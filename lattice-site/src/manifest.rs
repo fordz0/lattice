@@ -128,8 +128,7 @@ pub fn validate_proxy_path_prefix(prefix: &str) -> std::result::Result<(), Strin
         .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '-')
     {
         return Err(
-            "app proxy path prefix may only contain ASCII letters, digits, '/' and '-'"
-                .to_string(),
+            "app proxy path prefix may only contain ASCII letters, digits, '/' and '-'".to_string(),
         );
     }
     Ok(())

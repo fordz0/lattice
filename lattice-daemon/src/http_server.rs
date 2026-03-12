@@ -360,9 +360,7 @@ async fn proxy_local_app_request(
         return Err(plain(StatusCode::BAD_GATEWAY, "app proxy port mismatch"));
     }
     if !pid_is_alive(registration.pid) {
-        let _ = state
-            .app_registry
-            .unregister(site_name, registration.pid);
+        let _ = state.app_registry.unregister(site_name, registration.pid);
         return Err(plain(
             StatusCode::SERVICE_UNAVAILABLE,
             "local app is not running",
@@ -373,11 +371,17 @@ async fn proxy_local_app_request(
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or(uri.path());
-    let upstream_url = format!("http://127.0.0.1:{}{}", registration.proxy_port, path_and_query);
+    let upstream_url = format!(
+        "http://127.0.0.1:{}{}",
+        registration.proxy_port, path_and_query
+    );
     let mut upstream = state
         .proxy_client
         .request(method, &upstream_url)
-        .header(header::HOST, format!("127.0.0.1:{}", registration.proxy_port))
+        .header(
+            header::HOST,
+            format!("127.0.0.1:{}", registration.proxy_port),
+        )
         .header("X-Lattice-Site", site_name);
 
     for (name, value) in headers {
@@ -1031,13 +1035,19 @@ mod tests {
 
     #[test]
     fn proxy_prefix_matches_trailing_slash_children() {
-        assert!(path_matches_proxy_prefix("/api/v1/posts", &["/api".to_string()]));
+        assert!(path_matches_proxy_prefix(
+            "/api/v1/posts",
+            &["/api".to_string()]
+        ));
         assert!(path_matches_proxy_prefix("/api/", &["/api".to_string()]));
     }
 
     #[test]
     fn proxy_prefix_rejects_non_matching_prefixes() {
-        assert!(!path_matches_proxy_prefix("/apix/test", &["/api".to_string()]));
+        assert!(!path_matches_proxy_prefix(
+            "/apix/test",
+            &["/api".to_string()]
+        ));
         assert!(!path_matches_proxy_prefix("/other", &["/api".to_string()]));
     }
 }

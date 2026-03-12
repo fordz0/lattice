@@ -67,7 +67,10 @@ pub fn validate_trust_record(record: &FrayTrustRecord) -> Result<(), String> {
     Ok(())
 }
 
-pub fn sign_trust_record(record: &FrayTrustRecord, signing_key: &SigningKey) -> Result<SignedTrustRecord> {
+pub fn sign_trust_record(
+    record: &FrayTrustRecord,
+    signing_key: &SigningKey,
+) -> Result<SignedTrustRecord> {
     validate_trust_record(record).map_err(anyhow::Error::msg)?;
     let payload = canonical_json_bytes(record)?;
     let signature = signing_key.sign(&payload);
@@ -80,8 +83,8 @@ pub fn sign_trust_record(record: &FrayTrustRecord, signing_key: &SigningKey) -> 
 pub fn verify_signed_trust_record(record: &SignedTrustRecord) -> Result<()> {
     validate_trust_record(&record.record).map_err(anyhow::Error::msg)?;
     let payload = canonical_json_bytes(&record.record)?;
-    let verifying_key = decode_public_key_b64(&record.record.owner_key_b64)
-        .map_err(anyhow::Error::msg)?;
+    let verifying_key =
+        decode_public_key_b64(&record.record.owner_key_b64).map_err(anyhow::Error::msg)?;
     let signature_bytes = BASE64_STANDARD
         .decode(&record.signature_b64)
         .map_err(|err| anyhow::anyhow!("invalid trust record signature base64: {err}"))?;
@@ -115,7 +118,11 @@ mod tests {
     use super::*;
 
     fn sample_key(seed: u8) -> String {
-        BASE64_STANDARD.encode(SigningKey::from_bytes(&[seed; 32]).verifying_key().as_bytes())
+        BASE64_STANDARD.encode(
+            SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
     }
 
     #[test]

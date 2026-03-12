@@ -15,6 +15,8 @@ mod tests {
 
     #[test]
     fn rejects_other_keys() {
-        assert!(!is_registry_operator("Mz2BnWy56BEU4WJuTdwR709RtHvMav2eU9MNEmQmk00="));
+        assert!(!is_registry_operator(
+            "Mz2BnWy56BEU4WJuTdwR709RtHvMav2eU9MNEmQmk00="
+        ));
     }
 }

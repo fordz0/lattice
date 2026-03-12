@@ -17,7 +17,12 @@ pub struct FrayHandleRecord {
 
 pub fn validate_handle_record(record: &FrayHandleRecord) -> Result<(), String> {
     validate_handle(&record.handle)?;
-    validate_optional_len(&record.display_name, 1, MAX_DISPLAY_NAME_LEN, "display_name")?;
+    validate_optional_len(
+        &record.display_name,
+        1,
+        MAX_DISPLAY_NAME_LEN,
+        "display_name",
+    )?;
     validate_optional_len(&record.bio, 1, MAX_BIO_LEN, "bio")?;
     let now = now_secs();
     if record.claimed_at > now.saturating_add(MAX_FUTURE_SKEW_SECS) {
@@ -56,7 +61,9 @@ fn validate_optional_len(
     };
     let trimmed = value.trim();
     if trimmed.len() < min || trimmed.len() > max {
-        return Err(format!("{field} must be between {min} and {max} characters"));
+        return Err(format!(
+            "{field} must be between {min} and {max} characters"
+        ));
     }
     Ok(())
 }

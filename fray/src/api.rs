@@ -126,10 +126,7 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/frays/{fray}/trust/standings",
             post(set_trust_standing),
         )
-        .route(
-            "/api/v1/frays/{fray}/trust/moderators",
-            post(add_moderator),
-        )
+        .route("/api/v1/frays/{fray}/trust/moderators", post(add_moderator))
         .route(
             "/api/v1/frays/{fray}/trust/moderators/{key_b64}",
             delete(remove_moderator),
@@ -267,7 +264,10 @@ async fn claim_handle(
     match state.store.get_local_handle() {
         Ok(Some(existing_handle)) if existing_handle != handle => {
             match network::fetch_handle_record(state.lattice_rpc_port, &existing_handle).await {
-                Ok(Some(existing)) if existing.record.claimed_at != 0 && existing.signed.publisher_b64() == local_key_b64 => {
+                Ok(Some(existing))
+                    if existing.record.claimed_at != 0
+                        && existing.signed.publisher_b64() == local_key_b64 =>
+                {
                     let tombstone = FrayHandleRecord {
                         handle: existing_handle.clone(),
                         display_name: None,
@@ -280,7 +280,9 @@ async fn claim_handle(
                         &tombstone,
                         state.signing_key.as_ref(),
                         state.lattice_rpc_port,
-                    ).await {
+                    )
+                    .await
+                    {
                         return bad_gateway(err.to_string());
                     }
                 }
@@ -293,7 +295,10 @@ async fn claim_handle(
     }
 
     match network::fetch_handle_record(state.lattice_rpc_port, &handle).await {
-        Ok(Some(existing)) if existing.record.claimed_at != 0 && existing.signed.publisher_b64() != local_key_b64 => {
+        Ok(Some(existing))
+            if existing.record.claimed_at != 0
+                && existing.signed.publisher_b64() != local_key_b64 =>
+        {
             return (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "handle already claimed by another key" })),
@@ -311,8 +316,16 @@ async fn claim_handle(
     };
     let record = FrayHandleRecord {
         handle: handle.clone(),
-        display_name: request.display_name.as_ref().map(|value| value.trim().to_string()).filter(|value| !value.is_empty()),
-        bio: request.bio.as_ref().map(|value| value.trim().to_string()).filter(|value| !value.is_empty()),
+        display_name: request
+            .display_name
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        bio: request
+            .bio
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         claimed_at: unix_ts(),
         previous_handle,
     };
@@ -327,7 +340,10 @@ async fn claim_handle(
     )
     .await
     {
-        return if err.to_string().contains("app record owned by a different key") {
+        return if err
+            .to_string()
+            .contains("app record owned by a different key")
+        {
             (
                 StatusCode::FORBIDDEN,
                 Json(json!({ "error": "handle already claimed by another key" })),
@@ -506,19 +522,20 @@ async fn claim_fray(
 ) -> Response {
     match network::check_frayloom_stake(state.lattice_rpc_port).await {
         Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "you must have fray.loom pinned and trusted to claim a fray" })),
-            )
-                .into_response()
-        }
+        Ok(false) => return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "you must have fray.loom pinned and trusted to claim a fray" })),
+        )
+            .into_response(),
         Err(err) => return bad_gateway(err.to_string()),
     }
 
     if let Ok(Some(existing)) = state.store.get_fray_ownership(&fray) {
         if existing != request.owner_key_b64 {
-            return (StatusCode::CONFLICT, Json(json!({ "error": "fray is already claimed" })))
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "fray is already claimed" })),
+            )
                 .into_response();
         }
     }
@@ -532,7 +549,10 @@ async fn claim_fray(
             .into_response();
     }
 
-    if let Err(err) = state.store.store_fray_ownership(&fray, &request.owner_key_b64) {
+    if let Err(err) = state
+        .store
+        .store_fray_ownership(&fray, &request.owner_key_b64)
+    {
         return bad_request(err.to_string());
     }
 
@@ -654,7 +674,10 @@ async fn remove_moderator(
     if let Err(err) = verify_body_signature(&headers, &body, &owner_only) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
-    record.record.moderator_keys.retain(|value| value != &key_b64);
+    record
+        .record
+        .moderator_keys
+        .retain(|value| value != &key_b64);
     record.record.generated_at = unix_ts();
     record.record.version = record.record.version.saturating_add(1);
     persist_trust_record(&state, &fray, &record).await
@@ -837,7 +860,10 @@ async fn sync_directory(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn upsert_directory_entry(State(state): State<AppState>, Json(request): Json<DirectoryEntryRequest>) -> Response {
+async fn upsert_directory_entry(
+    State(state): State<AppState>,
+    Json(request): Json<DirectoryEntryRequest>,
+) -> Response {
     let mut signed = match state.store.load_directory() {
         Ok(Some(directory)) => directory,
         Ok(None) => {
@@ -885,10 +911,12 @@ async fn upsert_directory_entry(State(state): State<AppState>, Json(request): Js
     )
     .await
     {
-        Ok(()) => match crate::directory::sign_directory(&signed.directory, state.signing_key.as_ref()) {
-            Ok(signed) => signed,
-            Err(err) => return bad_request(err.to_string()),
-        },
+        Ok(()) => {
+            match crate::directory::sign_directory(&signed.directory, state.signing_key.as_ref()) {
+                Ok(signed) => signed,
+                Err(err) => return bad_request(err.to_string()),
+            }
+        }
         Err(err) => return bad_gateway(err.to_string()),
     };
     if let Err(err) = state.store.store_directory(&signed) {
@@ -943,7 +971,10 @@ async fn ban_directory_entry(
     .await
     {
         Ok(()) => {
-            let signed = match crate::directory::sign_directory(&signed.directory, state.signing_key.as_ref()) {
+            let signed = match crate::directory::sign_directory(
+                &signed.directory,
+                state.signing_key.as_ref(),
+            ) {
                 Ok(signed) => signed,
                 Err(err) => return bad_request(err.to_string()),
             };
@@ -972,13 +1003,20 @@ async fn add_blocklist_hash(
         Ok(request) => request,
         Err(err) => return bad_request(format!("invalid json: {err}")),
     };
-    match state.blocklist.append_to_file(&state.blocklist_path, &request.hash_hex) {
+    match state
+        .blocklist
+        .append_to_file(&state.blocklist_path, &request.hash_hex)
+    {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
         Err(err) => bad_request(err.to_string()),
     }
 }
 
-async fn persist_trust_record(state: &AppState, fray: &str, record: &SignedTrustRecord) -> Response {
+async fn persist_trust_record(
+    state: &AppState,
+    fray: &str,
+    record: &SignedTrustRecord,
+) -> Response {
     if let Err(err) = state.store.store_trust_record(fray, record) {
         return bad_request(err.to_string());
     }
@@ -1030,7 +1068,11 @@ fn moderator_authorized_keys(record: &FrayTrustRecord) -> Vec<String> {
     out
 }
 
-fn verify_body_signature(headers: &HeaderMap, body: &[u8], allowed_keys: &[String]) -> Result<String, String> {
+fn verify_body_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    allowed_keys: &[String],
+) -> Result<String, String> {
     let Some(signature_value) = headers.get("X-Fray-Signature") else {
         return Err("missing X-Fray-Signature header".to_string());
     };
@@ -1084,7 +1126,10 @@ fn parse_directory_status(value: &str, reason: Option<String>) -> Result<FraySta
 }
 
 fn upsert_key_record(entries: &mut Vec<KeyRecord>, record: KeyRecord) {
-    if let Some(existing) = entries.iter_mut().find(|entry| entry.key_b64 == record.key_b64) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|entry| entry.key_b64 == record.key_b64)
+    {
         *existing = record;
     } else {
         entries.push(record);
@@ -1092,7 +1137,10 @@ fn upsert_key_record(entries: &mut Vec<KeyRecord>, record: KeyRecord) {
     entries.sort_by(|a, b| a.key_b64.cmp(&b.key_b64));
 }
 
-fn upsert_directory_entry_record(entries: &mut Vec<FrayDirectoryEntry>, record: FrayDirectoryEntry) {
+fn upsert_directory_entry_record(
+    entries: &mut Vec<FrayDirectoryEntry>,
+    record: FrayDirectoryEntry,
+) {
     if let Some(existing) = entries
         .iter_mut()
         .find(|entry| entry.fray_name == record.fray_name)

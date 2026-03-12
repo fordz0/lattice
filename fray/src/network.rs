@@ -1,8 +1,8 @@
-use crate::handle::{validate_handle_record, FrayHandleRecord};
 use crate::blocklist::ContentBlocklist;
 use crate::directory::{
     sign_directory, validate_directory, verify_signed_directory, FrayDirectory, SignedFrayDirectory,
 };
+use crate::handle::{validate_handle_record, FrayHandleRecord};
 use crate::model::{Comment, Post};
 use crate::store::FrayStore;
 use crate::trust::{
@@ -77,8 +77,8 @@ pub async fn publish_feed(
     let canonical_payload =
         canonical_json_bytes(&record).context("failed to canonicalize fray feed record")?;
     let signed_record = SignedRecord::sign(signing_key, canonical_payload);
-    let payload =
-        serde_json::to_string(&signed_record).context("failed to encode signed fray feed record")?;
+    let payload = serde_json::to_string(&signed_record)
+        .context("failed to encode signed fray feed record")?;
     if payload.len() > MAX_FEED_BYTES {
         bail!("fray feed exceeds maximum payload size");
     }
@@ -197,7 +197,12 @@ pub async fn fetch_handle_record(
     lattice_rpc_port: u16,
     handle: &str,
 ) -> Result<Option<SignedFrayHandleRecord>> {
-    let Some(raw) = get_record(lattice_rpc_port, &format!("{HANDLE_RECORD_KEY_PREFIX}{handle}")).await? else {
+    let Some(raw) = get_record(
+        lattice_rpc_port,
+        &format!("{HANDLE_RECORD_KEY_PREFIX}{handle}"),
+    )
+    .await?
+    else {
         return Ok(None);
     };
     let signed: SignedRecord =

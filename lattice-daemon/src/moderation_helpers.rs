@@ -117,7 +117,10 @@ pub fn hide_block_rule<'a>(
 ) -> Option<&'a ModerationRule> {
     match_rule(
         engine,
-        &[(RuleKind::ContentHash, hash), (RuleKind::SiteName, site_name)],
+        &[
+            (RuleKind::ContentHash, hash),
+            (RuleKind::SiteName, site_name),
+        ],
         &[RuleAction::Hide],
     )
 }
@@ -129,13 +132,17 @@ pub fn block_ingest_rule<'a>(
 ) -> Option<&'a ModerationRule> {
     match_rule(
         engine,
-        &[(RuleKind::ContentHash, hash), (RuleKind::SiteName, site_name)],
+        &[
+            (RuleKind::ContentHash, hash),
+            (RuleKind::SiteName, site_name),
+        ],
         &[RuleAction::RejectIngest, RuleAction::Quarantine],
     )
 }
 
 pub fn site_manifest_publisher_b64(manifest_json: &str) -> Option<String> {
-    let manifest: lattice_site::manifest::SiteManifest = serde_json::from_str(manifest_json).ok()?;
+    let manifest: lattice_site::manifest::SiteManifest =
+        serde_json::from_str(manifest_json).ok()?;
     publisher_hex_to_b64(&manifest.publisher_key)
 }
 

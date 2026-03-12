@@ -64,7 +64,10 @@ pub fn validate_directory(dir: &FrayDirectory) -> Result<(), String> {
     Ok(())
 }
 
-pub fn sign_directory(directory: &FrayDirectory, signing_key: &SigningKey) -> Result<SignedFrayDirectory> {
+pub fn sign_directory(
+    directory: &FrayDirectory,
+    signing_key: &SigningKey,
+) -> Result<SignedFrayDirectory> {
     validate_directory(directory).map_err(anyhow::Error::msg)?;
     let payload = canonical_json_bytes(directory)?;
     let signature = signing_key.sign(&payload);
@@ -77,8 +80,8 @@ pub fn sign_directory(directory: &FrayDirectory, signing_key: &SigningKey) -> Re
 pub fn verify_signed_directory(directory: &SignedFrayDirectory) -> Result<()> {
     validate_directory(&directory.directory).map_err(anyhow::Error::msg)?;
     let payload = canonical_json_bytes(&directory.directory)?;
-    let verifying_key = decode_public_key_b64(&directory.directory.operator_key_b64)
-        .map_err(anyhow::Error::msg)?;
+    let verifying_key =
+        decode_public_key_b64(&directory.directory.operator_key_b64).map_err(anyhow::Error::msg)?;
     let signature_bytes = BASE64_STANDARD
         .decode(&directory.signature_b64)
         .map_err(|err| anyhow::anyhow!("invalid directory signature base64: {err}"))?;
@@ -96,7 +99,11 @@ mod tests {
     use crate::trust::unix_ts;
 
     fn sample_key(seed: u8) -> String {
-        BASE64_STANDARD.encode(SigningKey::from_bytes(&[seed; 32]).verifying_key().as_bytes())
+        BASE64_STANDARD.encode(
+            SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
     }
 
     #[test]

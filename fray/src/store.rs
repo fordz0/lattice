@@ -1,9 +1,9 @@
+use crate::directory::SignedFrayDirectory;
 use crate::handle::validate_handle;
 use crate::model::{
     Comment, CommentSummary, CreateCommentRequest, CreatePostRequest, Post, PostSummary,
 };
 use crate::routes::{FrayName, FrayRouteError, Username};
-use crate::directory::SignedFrayDirectory;
 use crate::trust::{KeyRecord, KeyStanding, SignedTrustRecord};
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
@@ -279,14 +279,20 @@ impl FrayStore {
         self.db
             .insert(key.as_bytes(), value)
             .context("failed to store trust record")?;
-        self.db.flush().context("failed to flush trust record write")?;
+        self.db
+            .flush()
+            .context("failed to flush trust record write")?;
         Ok(())
     }
 
     pub fn load_trust_record(&self, fray: &str) -> Result<Option<SignedTrustRecord>> {
         let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
         let key = trust_record_key(fray_name.as_str());
-        let Some(value) = self.db.get(key.as_bytes()).context("failed to read trust record")? else {
+        let Some(value) = self
+            .db
+            .get(key.as_bytes())
+            .context("failed to read trust record")?
+        else {
             return Ok(None);
         };
         let record: SignedTrustRecord =
@@ -301,14 +307,20 @@ impl FrayStore {
         self.db
             .insert(key.as_bytes(), value)
             .context("failed to store key record")?;
-        self.db.flush().context("failed to flush key record write")?;
+        self.db
+            .flush()
+            .context("failed to flush key record write")?;
         Ok(())
     }
 
     pub fn get_key_standing(&self, fray: &str, key_b64: &str) -> Result<Option<KeyStanding>> {
         let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
         let key = trust_key(fray_name.as_str(), key_b64);
-        let Some(value) = self.db.get(key.as_bytes()).context("failed to read key standing")? else {
+        let Some(value) = self
+            .db
+            .get(key.as_bytes())
+            .context("failed to read key standing")?
+        else {
             return Ok(None);
         };
         let record: KeyRecord =
@@ -365,7 +377,11 @@ impl FrayStore {
     pub fn get_fray_ownership(&self, fray: &str) -> Result<Option<String>> {
         let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
         let key = ownership_key(fray_name.as_str());
-        let Some(value) = self.db.get(key.as_bytes()).context("failed to read fray ownership")? else {
+        let Some(value) = self
+            .db
+            .get(key.as_bytes())
+            .context("failed to read fray ownership")?
+        else {
             return Ok(None);
         };
         let owner = std::str::from_utf8(&value)

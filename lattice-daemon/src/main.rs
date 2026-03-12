@@ -2,8 +2,8 @@ mod event_loop;
 mod fetch;
 
 use anyhow::Result;
-use lattice_daemon::app_registry::AppRegistry;
 use lattice_core::moderation::ModerationEngine;
+use lattice_daemon::app_registry::AppRegistry;
 use lattice_daemon::block_fetch;
 use lattice_daemon::cache::SessionBlockCache;
 use lattice_daemon::config::load_or_create_config;
@@ -41,9 +41,9 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::event_loop::{
-    handle_rpc_command, handle_swarm_event, PendingClaimPut, PendingManifestQuery, PendingNameProbe,
-    PendingPublishClaimPut, PendingPublishOwnershipCheck, PendingPublishVersionCheck, PendingPut,
-    PendingTextQuery,
+    handle_rpc_command, handle_swarm_event, PendingClaimPut, PendingManifestQuery,
+    PendingNameProbe, PendingPublishClaimPut, PendingPublishOwnershipCheck,
+    PendingPublishVersionCheck, PendingPut, PendingTextQuery,
 };
 use crate::fetch::{GetSiteQuery, GetSiteTask, PendingBlockRequest, PendingProviderQuery};
 use lattice_daemon::publish::{PublishQuery, PublishTask};
@@ -102,8 +102,11 @@ async fn main() -> Result<()> {
     let app_registry = AppRegistry::new();
     let local_records_path = config.data_dir.join(LOCAL_RECORDS_DB_DIR);
     let local_record_store = LocalRecordStore::open(&local_records_path, block_cache_key)?;
-    let mut moderation_engine =
-        ModerationEngine::load(local_record_store.load_moderation_rules().unwrap_or_default());
+    let mut moderation_engine = ModerationEngine::load(
+        local_record_store
+            .load_moderation_rules()
+            .unwrap_or_default(),
+    );
     let mut session_block_cache = SessionBlockCache::new(config.session_cache_max_bytes);
 
     let gc_stats =
@@ -367,8 +370,7 @@ async fn main() -> Result<()> {
     let mut get_site_tasks: HashMap<u64, GetSiteTask> = HashMap::new();
     let mut get_site_queries: HashMap<kad::QueryId, GetSiteQuery> = HashMap::new();
     let mut next_get_site_task_id: u64 = 1;
-    let mut pending_provider_queries: HashMap<kad::QueryId, PendingProviderQuery> =
-        HashMap::new();
+    let mut pending_provider_queries: HashMap<kad::QueryId, PendingProviderQuery> = HashMap::new();
     let mut pending_block_requests: HashMap<block_fetch::OutboundRequestId, PendingBlockRequest> =
         HashMap::new();
 
