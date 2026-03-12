@@ -1,4 +1,4 @@
-pkgbase = lattice-git
+pkgbase = lattice-net-git
 	pkgdesc = Peer-to-peer web protocol CLI and daemon
 	pkgver = 0.1.0.r0.g0000000
 	pkgrel = 1
@@ -10,10 +10,10 @@ pkgbase = lattice-git
 	depends = glibc
 	depends = gcc-libs
 	depends = systemd
-	provides = lattice
-	conflicts = lattice
-	conflicts = lattice-bin
+	provides = lattice-net
+	conflicts = lattice-net
+	conflicts = lattice-net-bin
 	source = git+https://github.com/fordz0/lattice.git
 	sha256sums = SKIP
 
-pkgname = lattice-git
+pkgname = lattice-net-git
