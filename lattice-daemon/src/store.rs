@@ -54,6 +54,8 @@ pub struct LocalRecordStore {
     mod_quarantine: sled::Tree,
     trusted_publishers: sled::Tree,
     known_publishers: sled::Tree,
+    owned_app_records: sled::Tree,
+    claim_rate_limits: sled::Tree,
     block_cipher: Aes256Gcm,
 }
 
@@ -96,6 +98,12 @@ impl LocalRecordStore {
         let known_publishers = db
             .open_tree("known_publishers")
             .context("failed to open known_publishers tree")?;
+        let owned_app_records = db
+            .open_tree("owned_app_records")
+            .context("failed to open owned_app_records tree")?;
+        let claim_rate_limits = db
+            .open_tree("claim_rate_limits")
+            .context("failed to open claim_rate_limits tree")?;
         Ok(Self {
             db,
             records,
@@ -106,6 +114,8 @@ impl LocalRecordStore {
             mod_quarantine,
             trusted_publishers,
             known_publishers,
+            owned_app_records,
+            claim_rate_limits,
             block_cipher: Aes256Gcm::new_from_slice(&block_cache_key)
                 .context("failed to initialize block cache cipher")?,
         })
@@ -538,6 +548,73 @@ impl LocalRecordStore {
                 serde_json::from_slice(&value).context("failed to decode known publisher")
             })
             .transpose()
+    }
+
+    pub fn get_app_record_owner(&self, record_key: &str) -> Result<Option<String>> {
+        self.owned_app_records
+            .get(record_key.as_bytes())
+            .context("failed to read owned app record")?
+            .map(|value| {
+                std::str::from_utf8(&value)
+                    .context("invalid owned app record encoding")
+                    .map(|value| value.to_string())
+            })
+            .transpose()
+    }
+
+    pub fn set_app_record_owner(&self, record_key: &str, owner_key_b64: &str) -> Result<()> {
+        if self
+            .owned_app_records
+            .contains_key(record_key.as_bytes())
+            .context("failed to check existing owned app record")?
+        {
+            return Ok(());
+        }
+        self.owned_app_records
+            .insert(record_key.as_bytes(), owner_key_b64.as_bytes())
+            .context("failed to persist owned app record")?;
+        self.db
+            .flush()
+            .context("failed to flush owned app record write")?;
+        Ok(())
+    }
+
+    pub fn get_last_claim_ts(&self, key_b64: &str) -> Result<Option<u64>> {
+        self.claim_rate_limits
+            .get(key_b64.as_bytes())
+            .context("failed to read claim rate limit")?
+            .map(|value| {
+                let bytes: [u8; 8] = value
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid claim rate limit encoding"))?;
+                Ok(u64::from_be_bytes(bytes))
+            })
+            .transpose()
+    }
+
+    pub fn set_last_claim_ts(&self, key_b64: &str, ts: u64) -> Result<()> {
+        self.claim_rate_limits
+            .insert(key_b64.as_bytes(), ts.to_be_bytes().to_vec())
+            .context("failed to persist claim rate limit")?;
+        self.db.flush().context("failed to flush claim rate limit write")?;
+        Ok(())
+    }
+
+    pub fn check_and_update_claim_rate_limit(&self, key_b64: &str, now: u64) -> Result<(), String> {
+        if let Some(last_claim_ts) = self
+            .get_last_claim_ts(key_b64)
+            .map_err(|err| err.to_string())?
+        {
+            if now.saturating_sub(last_claim_ts) < 86_400 {
+                return Err(
+                    "claim rate limit: one new claim per key per 24 hours".to_string(),
+                );
+            }
+        }
+        self.set_last_claim_ts(key_b64, now)
+            .map_err(|err| err.to_string())?;
+        Ok(())
     }
 
     pub fn gc_ephemeral_blocks(&self, max_age_secs: u64) -> Result<BlockCacheGcStats> {

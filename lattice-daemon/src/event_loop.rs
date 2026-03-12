@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
+use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
 use lattice_core::moderation::{ModerationEngine, ModerationRule, RuleAction};
 use libp2p::{autonat, identify, kad, mdns, relay, Swarm};
 use std::collections::{HashMap, HashSet};
@@ -12,6 +13,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
+use lattice_daemon::app_ownership::enforce_app_record_ownership;
 use lattice_daemon::dht;
 use lattice_daemon::moderation_helpers::{
     action_name, hide_record_rule, ingest_rule, parse_rule_action,
@@ -28,7 +30,7 @@ use lattice_daemon::rpc::{
 };
 use lattice_daemon::site_helpers::{
     addr_is_loopback_or_private, build_relay_reservation_addr, cached_manifest_json, maybe_put_record,
-    normalize_get_record_value, parse_verified_name_record,
+    normalize_get_record_value, parse_verified_name_record, publisher_hex_to_b64,
     pin_cached_site_blocks, remember_local_record, site_manifest_trust_state, site_name_from_site_key,
     start_providing_site, validate_name,
 };
@@ -151,6 +153,7 @@ fn current_dht_site_version(
     }
 }
 
+
 #[allow(clippy::too_many_arguments)]
 fn handle_claim_name_lookup_result(
     claim: PendingClaimGet,
@@ -202,6 +205,14 @@ fn handle_claim_name_lookup_result(
 
     let key = format!("name:{name}");
     let payload_bytes = payload.into_bytes();
+    let Some(pubkey_b64) = publisher_hex_to_b64(&pubkey_hex) else {
+        let _ = respond_to.send(Err("invalid claim key".to_string()));
+        return;
+    };
+    if let Err(err) = local_record_store.check_and_update_claim_rate_limit(&pubkey_b64, unix_ts()) {
+        let _ = respond_to.send(Err(err));
+        return;
+    }
     remember_local_record(
         local_record_store,
         local_records,
@@ -438,6 +449,7 @@ pub fn handle_rpc_command(
     pending_provider_queries: &mut HashMap<kad::QueryId, PendingProviderQuery>,
     pending_block_requests: &mut HashMap<lattice_daemon::block_fetch::OutboundRequestId, PendingBlockRequest>,
     owned_names: &Arc<Mutex<HashSet<String>>>,
+    app_registry: &AppRegistry,
 ) {
     match cmd {
         RpcCommand::NodeInfo { respond_to } => {
@@ -477,6 +489,12 @@ pub fn handle_rpc_command(
                     );
                 }
                 let _ = respond_to.send(Ok(()));
+                return;
+            }
+            if let Err(err) =
+                enforce_app_record_ownership(local_record_store, &key, &value_bytes, unix_ts())
+            {
+                let _ = respond_to.send(Err(err));
                 return;
             }
             remember_local_record(
@@ -630,9 +648,11 @@ pub fn handle_rpc_command(
                     first_seen_at: None,
                     previous_key: None,
                 });
+                let pinned = local_record_store.is_site_pinned(&name).unwrap_or(false);
                 let _ = respond_to.send(Some(GetSiteManifestResponse {
                     manifest_json: value,
                     trust,
+                    pinned,
                 }));
                 return;
             }
@@ -864,6 +884,33 @@ pub fn handle_rpc_command(
             }
             let known = local_record_store.get_known_publisher(&name).unwrap_or(None);
             let _ = respond_to.send(known);
+        }
+        RpcCommand::AppRegister {
+            site_name,
+            proxy_port,
+            proxy_paths,
+            pid,
+            respond_to,
+        } => {
+            let result = app_registry.register(LocalAppRegistration {
+                site_name,
+                proxy_port,
+                proxy_paths,
+                registered_at: unix_ts(),
+                pid,
+            });
+            let _ = respond_to.send(result);
+        }
+        RpcCommand::AppUnregister {
+            site_name,
+            pid,
+            respond_to,
+        } => {
+            let result = app_registry.unregister(&site_name, pid);
+            let _ = respond_to.send(result);
+        }
+        RpcCommand::AppList { respond_to } => {
+            let _ = respond_to.send(app_registry.list());
         }
         RpcCommand::ModAddRule { kind, value, action, note, respond_to } => {
             let result = (|| -> Result<String, String> {
@@ -1468,7 +1515,10 @@ pub fn handle_swarm_event(
                                     first_seen_at: None,
                                     previous_key: None,
                                 });
-                                Some(GetSiteManifestResponse { manifest_json, trust })
+                                let pinned = local_record_store
+                                    .is_site_pinned(&site_name)
+                                    .unwrap_or(false);
+                                Some(GetSiteManifestResponse { manifest_json, trust, pinned })
                             });
                             let _ = pending.respond_to.send(response);
                         }
@@ -1598,6 +1648,16 @@ pub fn handle_swarm_event(
                                 };
                                 let key = format!("name:{}", pending.name);
                                 let payload_bytes = payload.into_bytes();
+                                let Some(pubkey_b64) = publisher_hex_to_b64(local_pubkey_hex) else {
+                                    let _ = pending.respond_to.send(Err("invalid claim key".to_string()));
+                                    return;
+                                };
+                                if let Err(err) = local_record_store
+                                    .check_and_update_claim_rate_limit(&pubkey_b64, unix_ts())
+                                {
+                                    let _ = pending.respond_to.send(Err(err));
+                                    return;
+                                }
                                 remember_local_record(
                                     local_record_store,
                                     local_records,

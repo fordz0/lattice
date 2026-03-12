@@ -2,6 +2,7 @@ mod event_loop;
 mod fetch;
 
 use anyhow::Result;
+use lattice_daemon::app_registry::AppRegistry;
 use lattice_core::moderation::ModerationEngine;
 use lattice_daemon::block_fetch;
 use lattice_daemon::cache::SessionBlockCache;
@@ -98,6 +99,7 @@ async fn main() -> Result<()> {
     info!("your publisher key is: {}", local_pubkey_hex);
 
     let owned_names: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let app_registry = AppRegistry::new();
     let local_records_path = config.data_dir.join(LOCAL_RECORDS_DB_DIR);
     let local_record_store = LocalRecordStore::open(&local_records_path, block_cache_key)?;
     let mut moderation_engine =
@@ -220,12 +222,14 @@ async fn main() -> Result<()> {
 
     let http_rpc_tx = rpc_tx.clone();
     let http_ca_cert = Some(tls_material.ca_cert_pem.clone());
+    let http_app_registry = app_registry.clone();
     let _http_server = tokio::spawn(async move {
         if let Err(err) = http_server::start_http_server(
             http_port,
             http_rpc_tx,
             http_ca_cert,
             mime_policy_strict,
+            http_app_registry,
         )
         .await
         {
@@ -238,6 +242,7 @@ async fn main() -> Result<()> {
     let https_ca_cert = tls_material.ca_cert_pem.clone();
     let https_cert_path = tls_material.server_cert_path.clone();
     let https_key_path = tls_material.server_key_path.clone();
+    let https_app_registry = app_registry.clone();
     let _https_server = tokio::spawn(async move {
         if let Err(err) = http_server::start_https_server(
             https_port,
@@ -246,6 +251,7 @@ async fn main() -> Result<()> {
             https_cert_path,
             https_key_path,
             mime_policy_strict,
+            https_app_registry,
         )
         .await
         {
@@ -393,6 +399,7 @@ async fn main() -> Result<()> {
                         &mut pending_provider_queries,
                         &mut pending_block_requests,
                         &owned_names,
+                        &app_registry,
                     );
                 }
             }

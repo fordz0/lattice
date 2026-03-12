@@ -86,21 +86,27 @@ pub fn prepare_publish(
     dht_baseline_version: u64,
     mime_policy_strict: bool,
 ) -> Result<PreparedPublish> {
-    let (local_existing_version, rating) = match site_publisher::load_manifest(site_dir) {
+    let (local_existing_version, rating, app) = match site_publisher::load_manifest(site_dir) {
         Ok(existing) => {
             let rating = if existing.rating.is_empty() {
                 "general".to_string()
             } else {
                 existing.rating
             };
-            (existing.version, rating)
+            (existing.version, rating, existing.app)
         }
-        Err(_) => (0, "general".to_string()),
+        Err(_) => (0, "general".to_string(), None),
     };
 
     let existing_version = local_existing_version.max(dht_baseline_version);
-    let manifest =
-        site_publisher::build_manifest(name, site_dir, signing_key, &rating, existing_version)?;
+    let manifest = site_publisher::build_manifest(
+        name,
+        site_dir,
+        signing_key,
+        &rating,
+        app,
+        existing_version,
+    )?;
     verify_manifest(&manifest)?;
     site_publisher::save_manifest(&manifest, site_dir)?;
 

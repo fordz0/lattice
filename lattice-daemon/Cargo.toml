@@ -16,10 +16,12 @@ infer = "0.19"
 jsonrpsee = { version = "0.24", features = ["server", "http-client"] }
 lattice-core = { path = "../lattice-core" }
 lattice-site = { path = "../lattice-site" }
+libc = "0.2"
 libp2p = { version = "0.56", features = ["tokio", "tcp", "quic", "noise", "yamux", "kad", "mdns", "gossipsub", "macros", "identify", "autonat", "relay", "dcutr", "request-response", "cbor"] }
 lru = "0.16"
 rand = "0.8"
 rcgen = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

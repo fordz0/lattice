@@ -1,5 +1,5 @@
 use crate::manifest::{
-    hash_bytes, sign_manifest, FileEntry, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES,
+    hash_bytes, sign_manifest, AppManifest, FileEntry, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use ed25519_dalek::SigningKey;
@@ -14,6 +14,7 @@ pub fn build_manifest(
     site_dir: &Path,
     keypair: &SigningKey,
     rating: &str,
+    app: Option<AppManifest>,
     existing_version: u64,
 ) -> Result<SiteManifest> {
     let mut files = Vec::new();
@@ -69,6 +70,7 @@ pub fn build_manifest(
         version,
         publisher_key: hex::encode(keypair.verifying_key().to_bytes()),
         rating: rating.to_string(),
+        app,
         files,
         signature: String::new(),
     };

@@ -2,6 +2,7 @@ use anyhow::Result;
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
+use crate::app_registry::LocalAppRegistration;
 use lattice_core::moderation::ModerationRule;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -43,6 +44,7 @@ pub struct GetSiteResponse {
 pub struct GetSiteManifestResponse {
     pub manifest_json: String,
     pub trust: TrustState,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -211,6 +213,21 @@ pub enum RpcCommand {
         name: String,
         respond_to: oneshot::Sender<Option<KnownPublisher>>,
     },
+    AppRegister {
+        site_name: String,
+        proxy_port: u16,
+        proxy_paths: Vec<String>,
+        pid: u32,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    AppUnregister {
+        site_name: String,
+        pid: u32,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    AppList {
+        respond_to: oneshot::Sender<Vec<LocalAppRegistration>>,
+    },
     RetryNameProbe {
         name: String,
         pubkey_hex: String,
@@ -316,6 +333,20 @@ struct TrustPublisherParams {
 struct TrustSiteParams {
     name: String,
     pin: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppRegisterParams {
+    site_name: String,
+    proxy_port: u16,
+    proxy_paths: Vec<String>,
+    pid: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppUnregisterParams {
+    site_name: String,
+    pid: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -926,6 +957,79 @@ pub async fn start_rpc_server(
             .await
             .map_err(|e| internal_error(format!("known_publisher_status response dropped: {e}")))?;
         Ok::<_, ErrorObjectOwned>(known)
+    })?;
+
+    module.register_async_method("app_register", |params, ctx, _| async move {
+        let AppRegisterParams {
+            site_name,
+            proxy_port,
+            proxy_paths,
+            pid,
+        } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::AppRegister {
+            site_name,
+            proxy_port,
+            proxy_paths,
+            pid,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch app_register: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("app_register response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("app_unregister", |params, ctx, _| async move {
+        let AppUnregisterParams { site_name, pid } = params.parse()?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::AppUnregister {
+            site_name,
+            pid,
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch app_unregister: {e}")))?;
+
+        match resp_rx
+            .await
+            .map_err(|e| internal_error(format!("app_unregister response dropped: {e}")))?
+        {
+            Ok(()) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "ok".to_string(),
+                error: None,
+            }),
+            Err(err) => Ok::<_, ErrorObjectOwned>(PutRecordResponse {
+                status: "err".to_string(),
+                error: Some(err),
+            }),
+        }
+    })?;
+
+    module.register_async_method("app_list", |_, ctx, _| async move {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        ctx.send(RpcCommand::AppList {
+            respond_to: resp_tx,
+        })
+        .await
+        .map_err(|e| internal_error(format!("failed to dispatch app_list: {e}")))?;
+
+        let apps: Vec<LocalAppRegistration> = resp_rx
+            .await
+            .map_err(|e| internal_error(format!("app_list response dropped: {e}")))?;
+        Ok::<_, ErrorObjectOwned>(apps)
     })?;
 
     let handle = server.start(module);

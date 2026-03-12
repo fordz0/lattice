@@ -1,3 +1,5 @@
+pub mod app_registry;
+pub mod app_ownership;
 pub mod block_fetch;
 pub mod cache;
 pub mod config;

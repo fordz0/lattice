@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
-use axum::body::{Body, Bytes};
-use axum::extract::{Host, OriginalUri, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::body::{to_bytes, Body, Bytes};
+use axum::extract::{Host, Request, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
+use reqwest::redirect::Policy;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +17,7 @@ use tracing::warn;
 
 use lattice_site::manifest::{verify_manifest, FileEntry, SiteManifest};
 
+use crate::app_registry::{pid_is_alive, AppRegistry, LocalAppRegistration};
 use crate::mime;
 use crate::rpc::{GetSiteManifestResponse, RpcCommand};
 
@@ -25,6 +27,9 @@ const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_FILES: usize = 1000;
 const MAX_MANIFEST_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_HTTP_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_PROXY_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const PROXY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const LOOM_SUFFIX: &str = ".loom";
 const LOCAL_HTTPS_SUFFIX: &str = ".loom.lattice.localhost";
 
@@ -41,16 +46,27 @@ struct AppState {
     rpc_tx: mpsc::Sender<RpcCommand>,
     ca_cert_pem: Option<String>,
     mime_policy_strict: bool,
+    app_registry: AppRegistry,
+    proxy_client: reqwest::Client,
 }
 
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/__lattice_metrics", get(metrics_endpoint))
         .route("/__lattice_ca.pem", get(ca_cert_endpoint))
-        .route("/", get(serve_site))
-        .route("/*path", get(serve_site))
+        .route("/", any(serve_site))
+        .route("/*path", any(serve_site))
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any))
+}
+
+fn build_proxy_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(Policy::none())
+        .connect_timeout(PROXY_CONNECT_TIMEOUT)
+        .timeout(PROXY_RESPONSE_TIMEOUT)
+        .build()
+        .context("failed to build local app proxy client")
 }
 
 pub async fn start_http_server(
@@ -58,11 +74,14 @@ pub async fn start_http_server(
     rpc_tx: mpsc::Sender<RpcCommand>,
     ca_cert_pem: Option<String>,
     mime_policy_strict: bool,
+    app_registry: AppRegistry,
 ) -> Result<()> {
     let app = build_app(AppState {
         rpc_tx,
         ca_cert_pem,
         mime_policy_strict,
+        app_registry,
+        proxy_client: build_proxy_client()?,
     });
 
     let listen_addr = format!("127.0.0.1:{port}");
@@ -84,11 +103,14 @@ pub async fn start_https_server(
     cert_path: PathBuf,
     key_path: PathBuf,
     mime_policy_strict: bool,
+    app_registry: AppRegistry,
 ) -> Result<()> {
     let app = build_app(AppState {
         rpc_tx,
         ca_cert_pem: Some(ca_cert_pem),
         mime_policy_strict,
+        app_registry,
+        proxy_client: build_proxy_client()?,
     });
     let listen_addr = format!("127.0.0.1:{port}");
     let addr: std::net::SocketAddr = listen_addr
@@ -107,10 +129,14 @@ pub async fn start_https_server(
 
 async fn serve_site(
     Host(host): Host,
-    OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
     State(state): State<AppState>,
+    request: Request,
 ) -> impl IntoResponse {
+    let (parts, body) = request.into_parts();
+    let method = parts.method.clone();
+    let uri = parts.uri.clone();
+    let headers = parts.headers.clone();
+
     HTTP_REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
     if headers.contains_key(header::RANGE) {
         HTTP_RANGE_REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -140,6 +166,35 @@ async fn serve_site(
         Ok(manifest) => manifest,
         Err(response) => return fail(response),
     };
+
+    if let Some(registration) = state.app_registry.get(&site_name) {
+        if path_matches_proxy_prefix(uri.path(), &registration.proxy_paths) {
+            let request_body = match to_bytes(body, MAX_PROXY_REQUEST_BODY_BYTES).await {
+                Ok(bytes) => bytes,
+                Err(_) => return fail(plain(StatusCode::PAYLOAD_TOO_LARGE, "payload too large")),
+            };
+            let response = match proxy_local_app_request(
+                &state,
+                &manifest,
+                &site_name,
+                &registration,
+                method,
+                &uri,
+                &headers,
+                request_body,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(response) => response,
+            };
+            return fail(response);
+        }
+    }
+
+    if method != Method::GET && method != Method::HEAD {
+        return fail(plain(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"));
+    }
 
     let file = match find_manifest_file(&manifest.files, &request_path) {
         Some(file) => file,
@@ -283,6 +338,104 @@ async fn fetch_manifest(
     }
 
     Ok(manifest)
+}
+
+async fn proxy_local_app_request(
+    state: &AppState,
+    manifest: &SiteManifest,
+    site_name: &str,
+    registration: &LocalAppRegistration,
+    method: Method,
+    uri: &axum::http::Uri,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> std::result::Result<Response, Response> {
+    let Some(app) = manifest.app.as_ref() else {
+        return Err(plain(StatusCode::BAD_GATEWAY, "app proxy port mismatch"));
+    };
+    if registration.proxy_port != app.proxy_port {
+        return Err(plain(StatusCode::BAD_GATEWAY, "app proxy port mismatch"));
+    }
+    if registration.proxy_port < 1024 {
+        return Err(plain(StatusCode::BAD_GATEWAY, "app proxy port mismatch"));
+    }
+    if !pid_is_alive(registration.pid) {
+        let _ = state
+            .app_registry
+            .unregister(site_name, registration.pid);
+        return Err(plain(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "local app is not running",
+        ));
+    }
+
+    let path_and_query = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or(uri.path());
+    let upstream_url = format!("http://127.0.0.1:{}{}", registration.proxy_port, path_and_query);
+    let mut upstream = state
+        .proxy_client
+        .request(method, &upstream_url)
+        .header(header::HOST, format!("127.0.0.1:{}", registration.proxy_port))
+        .header("X-Lattice-Site", site_name);
+
+    for (name, value) in headers {
+        if should_strip_proxy_header(name) || name == header::HOST {
+            continue;
+        }
+        upstream = upstream.header(name, value);
+    }
+
+    let upstream_response = match upstream.body(body).send().await {
+        Ok(response) => response,
+        Err(err) if err.is_connect() || err.is_timeout() => {
+            return Err(plain(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "local app is not running",
+            ));
+        }
+        Err(_) => return Err(plain(StatusCode::BAD_GATEWAY, "local app proxy failed")),
+    };
+
+    let status = upstream_response.status();
+    let response_headers = upstream_response.headers().clone();
+    let response_body = match upstream_response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(plain(StatusCode::BAD_GATEWAY, "local app proxy failed")),
+    };
+
+    let mut final_response = Response::new(Body::from(response_body));
+    *final_response.status_mut() = status;
+    let final_headers = final_response.headers_mut();
+    for (name, value) in response_headers.iter() {
+        final_headers.append(name, value.clone());
+    }
+    final_headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    Ok(final_response)
+}
+
+fn should_strip_proxy_header(name: &HeaderName) -> bool {
+    name.as_str().eq_ignore_ascii_case("x-forwarded-for")
+        || name.as_str().eq_ignore_ascii_case("x-real-ip")
+        || name.as_str().eq_ignore_ascii_case("x-forwarded-host")
+        || name.as_str().eq_ignore_ascii_case("x-forwarded-proto")
+        || name.as_str().eq_ignore_ascii_case("connection")
+        || name.as_str().eq_ignore_ascii_case("content-length")
+        || name.as_str().eq_ignore_ascii_case("transfer-encoding")
+}
+
+fn path_matches_proxy_prefix(path: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|prefix| {
+        path == prefix
+            || path
+                .strip_prefix(prefix.as_str())
+                .map(|rest| rest.is_empty() || rest.starts_with('/'))
+                .unwrap_or(false)
+    })
 }
 
 async fn fetch_name_owner(
@@ -854,5 +1007,22 @@ mod tests {
         assert_eq!(parse_site_name_from_host("-bad.loom"), None);
         assert_eq!(parse_site_name_from_host("bad-.loom"), None);
         assert_eq!(parse_site_name_from_host(".loom"), None);
+    }
+
+    #[test]
+    fn proxy_prefix_matches_exact_path() {
+        assert!(path_matches_proxy_prefix("/api", &["/api".to_string()]));
+    }
+
+    #[test]
+    fn proxy_prefix_matches_trailing_slash_children() {
+        assert!(path_matches_proxy_prefix("/api/v1/posts", &["/api".to_string()]));
+        assert!(path_matches_proxy_prefix("/api/", &["/api".to_string()]));
+    }
+
+    #[test]
+    fn proxy_prefix_rejects_non_matching_prefixes() {
+        assert!(!path_matches_proxy_prefix("/apix/test", &["/api".to_string()]));
+        assert!(!path_matches_proxy_prefix("/other", &["/api".to_string()]));
     }
 }

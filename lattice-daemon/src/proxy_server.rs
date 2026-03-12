@@ -129,11 +129,6 @@ async fn forward_http_request<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    if !matches!(method, "GET" | "HEAD" | "OPTIONS") {
-        write_response(client, 405, "Method Not Allowed", b"method not allowed").await?;
-        return Ok(());
-    }
-
     let mut host_header: Option<String> = None;
     let mut passthrough_headers = Vec::new();
     for raw in header_lines {

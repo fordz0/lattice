@@ -19,12 +19,20 @@ pub struct FileEntry {
     pub chunk_size: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AppManifest {
+    pub proxy_port: u16,
+    pub proxy_paths: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteManifest {
     pub name: String,
     pub version: u64,
     pub publisher_key: String,
     pub rating: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppManifest>,
     pub files: Vec<FileEntry>,
     pub signature: String,
 }
@@ -50,6 +58,8 @@ pub fn sign_manifest(manifest: &mut SiteManifest, keypair: &SigningKey) -> Resul
 }
 
 pub fn verify_manifest(manifest: &SiteManifest) -> Result<()> {
+    validate_manifest(manifest).context("manifest validation failed")?;
+
     let pubkey_bytes =
         hex::decode(&manifest.publisher_key).context("publisher_key is not valid hex")?;
     if pubkey_bytes.len() != 32 {
@@ -77,6 +87,54 @@ pub fn verify_manifest(manifest: &SiteManifest) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_manifest(manifest: &SiteManifest) -> Result<()> {
+    if let Some(app) = manifest.app.as_ref() {
+        validate_app_manifest(app).map_err(|err| anyhow::anyhow!(err))?;
+    }
+    Ok(())
+}
+
+pub fn validate_app_manifest(app: &AppManifest) -> std::result::Result<(), String> {
+    if app.proxy_port < 1024 {
+        return Err("app proxy_port must be between 1024 and 65535".to_string());
+    }
+    if app.proxy_paths.is_empty() {
+        return Err("app proxy_paths must not be empty".to_string());
+    }
+    if app.proxy_paths.len() > 8 {
+        return Err("app proxy_paths must contain at most 8 prefixes".to_string());
+    }
+    for prefix in &app.proxy_paths {
+        validate_proxy_path_prefix(prefix)?;
+    }
+    Ok(())
+}
+
+pub fn validate_proxy_path_prefix(prefix: &str) -> std::result::Result<(), String> {
+    if prefix.is_empty() || prefix.len() > 64 {
+        return Err("app proxy path prefix must be between 1 and 64 characters".to_string());
+    }
+    if !prefix.starts_with('/') {
+        return Err("app proxy path prefix must start with '/'".to_string());
+    }
+    if prefix.contains("..") {
+        return Err("app proxy path prefix must not contain '..'".to_string());
+    }
+    if prefix.as_bytes().contains(&0) {
+        return Err("app proxy path prefix must not contain null bytes".to_string());
+    }
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '-')
+    {
+        return Err(
+            "app proxy path prefix may only contain ASCII letters, digits, '/' and '-'"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn canonical_manifest_bytes(manifest: &SiteManifest) -> Result<Vec<u8>> {
     let value = serde_json::to_value(manifest).context("failed to convert manifest to JSON")?;
     let canonical = sort_json(value);
@@ -99,5 +157,29 @@ fn sort_json(value: Value) -> Value {
         }
         Value::Array(values) => Value::Array(values.into_iter().map(sort_json).collect()),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_app_manifest, validate_proxy_path_prefix, AppManifest};
+
+    #[test]
+    fn rejects_low_app_proxy_port() {
+        let err = validate_app_manifest(&AppManifest {
+            proxy_port: 1023,
+            proxy_paths: vec!["/api".to_string()],
+        })
+        .expect_err("low port should fail");
+        assert!(err.contains("proxy_port"));
+    }
+
+    #[test]
+    fn rejects_bad_proxy_paths() {
+        let err = validate_proxy_path_prefix("/api/../bad").expect_err("bad path should fail");
+        assert!(err.contains(".."));
+
+        let err = validate_proxy_path_prefix("api").expect_err("missing slash should fail");
+        assert!(err.contains("start"));
     }
 }

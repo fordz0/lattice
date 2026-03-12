@@ -459,6 +459,7 @@ fn init_site(name: Option<String>, rating: &str) -> Result<()> {
         version: 0,
         publisher_key,
         rating: rating.to_string(),
+        app: None,
         files: vec![FileEntry {
             path: "index.html".to_string(),
             hash: file_hash.clone(),

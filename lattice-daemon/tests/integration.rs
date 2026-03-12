@@ -2,6 +2,8 @@ use base64::Engine as _;
 use ed25519_dalek::SigningKey;
 use lattice_core::identity::{canonical_json_bytes, SignedRecord};
 use lattice_core::moderation::{ModerationEngine, ModerationRule, RuleAction, RuleKind};
+use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
+use lattice_daemon::app_ownership::enforce_app_record_ownership;
 use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
 use lattice_daemon::mime::{self, ALLOWED_MIME_TYPES, MAX_FILE_BYTES};
 use lattice_daemon::moderation_helpers::{
@@ -12,9 +14,11 @@ use lattice_daemon::publish::validate_site_file_mime_policy;
 use lattice_daemon::rpc::{self, RpcCommand};
 use lattice_daemon::site_helpers::pin_cached_site_blocks;
 use lattice_daemon::store::LocalRecordStore;
+use lattice_site::manifest::{validate_app_manifest, AppManifest};
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::rpc_params;
+use std::process::Command;
 use tempfile::tempdir;
 
 fn rule(id: &str, kind: RuleKind, value: &str, action: RuleAction) -> ModerationRule {
@@ -37,6 +41,20 @@ fn signed_record(seed: u8, payload: serde_json::Value) -> SignedRecord {
     SignedRecord::sign(&signing_key(seed), payload)
 }
 
+fn app_registration(site_name: &str, pid: u32) -> LocalAppRegistration {
+    LocalAppRegistration {
+        site_name: site_name.to_string(),
+        proxy_port: 8890,
+        proxy_paths: vec!["/api".to_string()],
+        registered_at: 1,
+        pid,
+    }
+}
+
+fn signed_record_bytes(seed: u8, payload: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&signed_record(seed, payload)).expect("encode signed record")
+}
+
 #[test]
 fn moderation_record_ingest_reject_rule_is_caught_by_validation_and_engine() {
     let key = "app:test-app:post:blocked";
@@ -52,6 +70,116 @@ fn moderation_record_ingest_reject_rule_is_caught_by_validation_and_engine() {
     validate_put_record_request(key, &value)
         .expect("generic app key should pass validation");
     assert_eq!(engine.check_key(key), Some(&RuleAction::RejectIngest));
+}
+
+#[test]
+fn first_app_put_stores_owner_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [1; 32]).expect("open store");
+    let key = "app:my-app:post:lattice";
+    let signed = signed_record(20, serde_json::json!({"fray": "lattice"}));
+    let value = serde_json::to_vec(&signed).expect("encode record");
+
+    enforce_app_record_ownership(&store, key, &value, 1_000).expect("first app claim");
+
+    assert_eq!(
+        store.get_app_record_owner(key).expect("load owner"),
+        Some(signed.publisher_b64())
+    );
+}
+
+#[test]
+fn second_app_put_from_same_key_succeeds() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [2; 32]).expect("open store");
+    let key = "app:my-app:post:lattice";
+    let value = signed_record_bytes(21, serde_json::json!({"fray": "lattice"}));
+
+    enforce_app_record_ownership(&store, key, &value, 1_000).expect("first app claim");
+    enforce_app_record_ownership(&store, key, &value, 1_001).expect("same owner update");
+}
+
+#[test]
+fn second_app_put_from_different_key_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [3; 32]).expect("open store");
+    let key = "app:my-app:post:lattice";
+
+    enforce_app_record_ownership(
+        &store,
+        key,
+        &signed_record_bytes(22, serde_json::json!({"fray": "lattice"})),
+        1_000,
+    )
+    .expect("first app claim");
+    let err = enforce_app_record_ownership(
+        &store,
+        key,
+        &signed_record_bytes(23, serde_json::json!({"fray": "lattice"})),
+        1_001,
+    )
+    .expect_err("different owner should fail");
+    assert_eq!(err, "app record owned by a different key");
+}
+
+#[test]
+fn non_app_keys_are_unaffected_by_ownership_enforcement() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [4; 32]).expect("open store");
+    let site_value = br#"{"not":"signed"}"#.to_vec();
+    let name_value = br#"{"not":"signed"}"#.to_vec();
+    assert!(enforce_app_record_ownership(&store, "site:lattice", &site_value, 1_000).is_ok());
+    assert!(enforce_app_record_ownership(&store, "name:lattice", &name_value, 1_000).is_ok());
+}
+
+#[test]
+fn rate_limit_allows_first_claim() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [7; 32]).expect("open store");
+    assert!(store
+        .check_and_update_claim_rate_limit("key-a", 10_000)
+        .is_ok());
+}
+
+#[test]
+fn rate_limit_rejects_second_claim_within_24_hours() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [8; 32]).expect("open store");
+    store
+        .check_and_update_claim_rate_limit("key-a", 10_000)
+        .expect("first claim");
+    let err = store
+        .check_and_update_claim_rate_limit("key-a", 10_100)
+        .expect_err("second claim should fail");
+    assert_eq!(err, "claim rate limit: one new claim per key per 24 hours");
+}
+
+#[test]
+fn rate_limit_allows_claim_after_24_hours() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [9; 32]).expect("open store");
+    store
+        .check_and_update_claim_rate_limit("key-a", 10_000)
+        .expect("first claim");
+    store
+        .check_and_update_claim_rate_limit("key-a", 10_000 + 86_400)
+        .expect("claim after 24h");
+}
+
+#[test]
+fn rate_limit_applies_across_name_and_fray_feed_claims() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [10; 32]).expect("open store");
+    let signed = signed_record(28, serde_json::json!({"fray": "lattice"}));
+    let publisher_b64 = signed.publisher_b64();
+
+    store
+        .check_and_update_claim_rate_limit(&publisher_b64, 20_000)
+        .expect("name claim");
+    let value = serde_json::to_vec(&signed).expect("encode record");
+    let err = enforce_app_record_ownership(&store, "app:fray:feed:lattice", &value, 20_100)
+        .expect_err("feed claim should share same rate limit");
+    assert_eq!(err, "claim rate limit: one new claim per key per 24 hours");
 }
 
 #[test]
@@ -576,4 +704,124 @@ fn mime_policy_detects_magic_bytes_fallbacks_and_violations() {
         .contains("rejected: movie.mp4"));
     validate_site_file_mime_policy("movie.mp4", b"not really video", false)
         .expect("warn mode should allow MIME violation");
+}
+
+#[test]
+fn app_register_succeeds_with_valid_parameters() {
+    let registry = AppRegistry::new();
+    registry
+        .register(app_registration("fray", std::process::id()))
+        .expect("register app");
+
+    let registered = registry.get("fray").expect("registered app");
+    assert_eq!(registered.proxy_port, 8890);
+    assert_eq!(registered.proxy_paths, vec!["/api".to_string()]);
+}
+
+#[test]
+fn app_register_rejects_proxy_port_below_1024() {
+    let registry = AppRegistry::new();
+    let err = registry
+        .register(LocalAppRegistration {
+            proxy_port: 80,
+            ..app_registration("fray", std::process::id())
+        })
+        .expect_err("low port should fail");
+    assert!(err.contains("proxy_port"));
+}
+
+#[test]
+fn app_register_rejects_proxy_paths_containing_dot_dot() {
+    let registry = AppRegistry::new();
+    let err = registry
+        .register(LocalAppRegistration {
+            proxy_paths: vec!["/api/../bad".to_string()],
+            ..app_registration("fray", std::process::id())
+        })
+        .expect_err("dot dot path should fail");
+    assert!(err.contains(".."));
+}
+
+#[test]
+fn app_register_rejects_proxy_paths_not_starting_with_slash() {
+    let registry = AppRegistry::new();
+    let err = registry
+        .register(LocalAppRegistration {
+            proxy_paths: vec!["api".to_string()],
+            ..app_registration("fray", std::process::id())
+        })
+        .expect_err("missing slash should fail");
+    assert!(err.contains("start"));
+}
+
+#[test]
+fn app_unregister_with_wrong_pid_fails() {
+    let registry = AppRegistry::new();
+    registry
+        .register(app_registration("fray", std::process::id()))
+        .expect("register app");
+
+    let err = registry
+        .unregister("fray", std::process::id().saturating_add(1))
+        .expect_err("wrong pid should fail");
+    assert!(err.contains("pid"));
+}
+
+#[test]
+fn app_unregister_with_correct_pid_succeeds() {
+    let registry = AppRegistry::new();
+    let pid = std::process::id();
+    registry
+        .register(app_registration("fray", pid))
+        .expect("register app");
+    registry
+        .unregister("fray", pid)
+        .expect("unregister app");
+    assert!(registry.get("fray").is_none());
+}
+
+#[test]
+fn registering_same_site_from_different_live_pid_fails() {
+    let registry = AppRegistry::new();
+    registry
+        .register(app_registration("fray", std::process::id()))
+        .expect("register app");
+
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+    let err = registry
+        .register(app_registration("fray", child.id()))
+        .expect_err("different live pid should fail");
+    assert!(err.contains("another live process"));
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn manifest_validate_app_manifest_rejects_ports_below_1024() {
+    let err = validate_app_manifest(&AppManifest {
+        proxy_port: 80,
+        proxy_paths: vec!["/api".to_string()],
+    })
+    .expect_err("low port should fail");
+    assert!(err.contains("proxy_port"));
+}
+
+#[test]
+fn manifest_validate_app_manifest_rejects_bad_path_prefixes() {
+    let err = validate_app_manifest(&AppManifest {
+        proxy_port: 8890,
+        proxy_paths: vec!["api".to_string()],
+    })
+    .expect_err("missing leading slash should fail");
+    assert!(err.contains("start"));
+
+    let err = validate_app_manifest(&AppManifest {
+        proxy_port: 8890,
+        proxy_paths: vec!["/api/../bad".to_string()],
+    })
+    .expect_err("dot dot path should fail");
+    assert!(err.contains(".."));
 }
