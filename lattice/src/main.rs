@@ -645,8 +645,76 @@ fn installed_app_meta_path(app_id: &str) -> Result<PathBuf> {
     Ok(lattice_apps_dir()?.join(format!("{app_id}.json")))
 }
 
-fn service_file_path(app_id: &str) -> PathBuf {
+#[derive(Debug, Clone)]
+enum ServiceMode {
+    System { service_path: PathBuf },
+    User { service_path: PathBuf },
+}
+
+impl ServiceMode {
+    fn service_path(&self) -> &Path {
+        match self {
+            ServiceMode::System { service_path } | ServiceMode::User { service_path } => {
+                service_path.as_path()
+            }
+        }
+    }
+
+    fn systemctl_args<'a>(&self, args: &[&'a str]) -> Vec<&'a str> {
+        match self {
+            ServiceMode::System { .. } => args.to_vec(),
+            ServiceMode::User { .. } => {
+                let mut out = Vec::with_capacity(args.len() + 1);
+                out.push("--user");
+                out.extend_from_slice(args);
+                out
+            }
+        }
+    }
+}
+
+fn system_service_file_path(app_id: &str) -> PathBuf {
     PathBuf::from(format!("/etc/systemd/system/lattice-{app_id}.service"))
+}
+
+fn user_service_file_path(app_id: &str) -> Result<PathBuf> {
+    let base_dirs =
+        BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
+    Ok(base_dirs
+        .config_dir()
+        .join("systemd")
+        .join("user")
+        .join(format!("lattice-{app_id}.service")))
+}
+
+fn detect_service_mode(app_id: &str) -> Result<Option<ServiceMode>> {
+    let system_path = system_service_file_path(app_id);
+    let daemon_system_service = Path::new("/etc/systemd/system/lattice-daemon.service");
+    if daemon_system_service.exists() {
+        return Ok(Some(ServiceMode::System {
+            service_path: system_path,
+        }));
+    }
+
+    let user_path = user_service_file_path(app_id)?;
+    if let Some(parent) = user_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        return Ok(Some(ServiceMode::User {
+            service_path: user_path,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn installed_manual_instructions(install_path: &Path) {
+    println!("binary installed at {}", install_path.display());
+    println!("to start manually: {}", install_path.display());
+    println!(
+        "to start on login: add {} to your shell profile",
+        install_path.display()
+    );
 }
 
 async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
@@ -727,31 +795,42 @@ async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
     .context("failed to write app metadata")?;
 
     if std::env::consts::OS == "linux" {
-        let service_path = service_file_path(app_id);
-        let service_contents = render_systemd_service(app_id, &install_path);
-        match fs::write(&service_path, service_contents) {
-            Ok(()) => {
-                let mut warned = false;
-                for args in [
-                    ["daemon-reload"].as_slice(),
-                    ["enable", &format!("lattice-{app_id}.service")].as_slice(),
-                    ["start", &format!("lattice-{app_id}.service")].as_slice(),
-                ] {
-                    if let Err(err) = run_systemctl(args) {
-                        warned = true;
-                        eprintln!("warning: {err}");
-                        eprintln!("service file written to {}", service_path.display());
-                        break;
+        match detect_service_mode(app_id)? {
+            Some(mode) => {
+                let service_path = mode.service_path().to_path_buf();
+                let service_contents = render_systemd_service(&mode, app_id, &install_path);
+                match fs::write(&service_path, service_contents) {
+                    Ok(()) => {
+                        let mut setup_ok = true;
+                        for args in [
+                            ["daemon-reload"].as_slice(),
+                            ["enable", &format!("lattice-{app_id}.service")].as_slice(),
+                            ["start", &format!("lattice-{app_id}.service")].as_slice(),
+                        ] {
+                            let systemctl_args = mode.systemctl_args(args);
+                            if let Err(err) = run_systemctl(&systemctl_args) {
+                                setup_ok = false;
+                                eprintln!("warning: {err}");
+                                eprintln!("service file written to {}", service_path.display());
+                                break;
+                            }
+                        }
+                        if setup_ok {
+                            println!("{app_id} installed and started");
+                        } else {
+                            installed_manual_instructions(&install_path);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "warning: failed to write service file {}: {err}",
+                            service_path.display()
+                        );
+                        installed_manual_instructions(&install_path);
                     }
                 }
-                if !warned {
-                    println!("{app_id} installed and started");
-                }
             }
-            Err(err) => {
-                eprintln!("warning: failed to write service file {}: {err}", service_path.display());
-                eprintln!("binary installed at {}", install_path.display());
-            }
+            None => installed_manual_instructions(&install_path),
         }
     } else if std::env::consts::OS == "macos" {
         println!("installed at {}", install_path.display());
@@ -766,8 +845,17 @@ async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
 fn uninstall_app(app_id: &str) -> Result<()> {
     if std::env::consts::OS == "linux" {
         let unit = format!("lattice-{app_id}.service");
-        let _ = run_systemctl(["stop", &unit].as_slice());
-        let _ = run_systemctl(["disable", &unit].as_slice());
+        if let Some(mode) = detect_existing_service_mode(app_id)? {
+            let stop_args = mode.systemctl_args(["stop", &unit].as_slice());
+            let disable_args = mode.systemctl_args(["disable", &unit].as_slice());
+            let reload_args = mode.systemctl_args(["daemon-reload"].as_slice());
+            let _ = run_systemctl(&stop_args);
+            let _ = run_systemctl(&disable_args);
+            if mode.service_path().exists() {
+                let _ = fs::remove_file(mode.service_path());
+            }
+            let _ = run_systemctl(&reload_args);
+        }
     }
 
     let install_path = installed_app_path(app_id)?;
@@ -779,14 +867,6 @@ fn uninstall_app(app_id: &str) -> Result<()> {
     let meta_path = installed_app_meta_path(app_id)?;
     if meta_path.exists() {
         let _ = fs::remove_file(&meta_path);
-    }
-
-    if std::env::consts::OS == "linux" {
-        let service_path = service_file_path(app_id);
-        if service_path.exists() {
-            let _ = fs::remove_file(&service_path);
-        }
-        let _ = run_systemctl(["daemon-reload"].as_slice());
     }
 
     println!("{app_id} uninstalled");
@@ -899,12 +979,38 @@ fn verify_sha256_file(path: &Path, expected_hex: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_systemd_service(app_id: &str, install_path: &Path) -> String {
-    let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-    format!(
-        "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target lattice-daemon.service\nRequires=lattice-daemon.service\n\n[Service]\nType=simple\nUser={user}\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT=7779\n\n[Install]\nWantedBy=multi-user.target\n",
-        install_path.display()
-    )
+fn detect_existing_service_mode(app_id: &str) -> Result<Option<ServiceMode>> {
+    let system_path = system_service_file_path(app_id);
+    if system_path.exists() {
+        return Ok(Some(ServiceMode::System {
+            service_path: system_path,
+        }));
+    }
+
+    let user_path = user_service_file_path(app_id)?;
+    if user_path.exists() {
+        return Ok(Some(ServiceMode::User {
+            service_path: user_path,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn render_systemd_service(mode: &ServiceMode, app_id: &str, install_path: &Path) -> String {
+    match mode {
+        ServiceMode::System { .. } => {
+            let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+            format!(
+                "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target lattice-daemon.service\nRequires=lattice-daemon.service\n\n[Service]\nType=simple\nUser={user}\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT=7780\n\n[Install]\nWantedBy=multi-user.target\n",
+                install_path.display()
+            )
+        }
+        ServiceMode::User { .. } => format!(
+            "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT=7780\n\n[Install]\nWantedBy=default.target\n",
+            install_path.display()
+        ),
+    }
 }
 
 fn run_systemctl(args: &[&str]) -> Result<()> {
@@ -923,14 +1029,23 @@ fn service_status(app_id: &str) -> String {
         return "manual".to_string();
     }
     let unit = format!("lattice-{app_id}.service");
-    match ProcessCommand::new("systemctl")
-        .args(["is-active", &unit])
-        .output()
-    {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    let mode = match detect_existing_service_mode(app_id) {
+        Ok(Some(mode)) => mode,
+        Ok(None) => return "manual".to_string(),
+        Err(_) => return "unknown".to_string(),
+    };
+    let args = mode.systemctl_args(["is-active", &unit].as_slice());
+    match ProcessCommand::new("systemctl").args(&args).output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
         Ok(output) => {
             let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if status.is_empty() { "inactive".to_string() } else { status }
+            if status.is_empty() {
+                "inactive".to_string()
+            } else {
+                status
+            }
         }
         Err(_) => "unknown".to_string(),
     }
