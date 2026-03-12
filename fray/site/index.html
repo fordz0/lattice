@@ -528,6 +528,24 @@
       gap: 10px;
     }
 
+    .input-locked {
+      background: var(--surface-alt);
+      color: var(--muted);
+      border-color: var(--line);
+    }
+
+    .input-locked:focus {
+      outline: none;
+      border-color: var(--line);
+      box-shadow: none;
+    }
+
+    .field-note {
+      margin-top: -6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
     .author-mark {
       display: inline-flex;
       align-items: center;
@@ -589,7 +607,6 @@
             <div class="muted">Key <code id="identity-key"></code></div>
             <div class="inline-actions">
               <button id="identity-edit" class="btn-primary" type="button">Edit Profile</button>
-              <button id="identity-transfer" class="btn-ghost" type="button">Transfer Handle</button>
             </div>
           </div>
         </div>
@@ -642,7 +659,6 @@
 
             <div id="new-thread-panel" class="card composer hidden">
               <h3 class="title">Create Thread</h3>
-              <input id="author" placeholder="author (e.g. fordz0)" value="fordz0">
               <input id="title" placeholder="thread title">
               <textarea id="body" placeholder="write your thread..."></textarea>
               <div class="row">
@@ -664,7 +680,6 @@
               <h4>Comments</h4>
               <div id="comments" class="comments"></div>
               <div class="stack" style="margin-top:14px;">
-                <input id="comment-author" placeholder="comment author" value="fordz0">
                 <textarea id="comment-body" placeholder="add a comment..."></textarea>
                 <div class="row">
                   <button id="comment-create" class="btn-primary" type="button">Add Comment</button>
@@ -735,10 +750,11 @@
   <div id="onboarding-modal" class="modal-backdrop hidden">
     <div class="modal-card">
       <div>
-        <h2 class="title">Claim your handle</h2>
-        <div class="muted">Your handle is tied to your node key and claimed on the Lattice network. Once claimed, only you can use it.</div>
+        <h2 id="identity-modal-title" class="title">Claim your handle</h2>
+        <div id="identity-modal-copy" class="muted">Your handle is tied to your node key and claimed on the Lattice network. Once claimed, only you can use it.</div>
       </div>
       <input id="onboarding-handle" placeholder="handle">
+      <div id="onboarding-handle-note" class="field-note hidden">handle cannot be changed</div>
       <input id="onboarding-display-name" placeholder="display name (optional)">
       <textarea id="onboarding-bio" placeholder="bio (optional)"></textarea>
       <div id="onboarding-error" class="status err"></div>
@@ -756,6 +772,7 @@
       postId: null,
       posts: [],
       identity: null,
+      identityModalMode: "onboarding",
       onboardingSkipped: localStorage.getItem("fray-handle-skipped") === "1"
     };
 
@@ -763,6 +780,10 @@
       const node = el("status");
       node.textContent = message || "";
       node.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function localAuthor() {
+      return state.identity && state.identity.handle ? state.identity.handle : "anonymous";
     }
 
     function esc(text) {
@@ -1029,7 +1050,7 @@
 
     async function createPost() {
       const payload = {
-        author: el("author").value.trim(),
+        author: localAuthor(),
         title: el("title").value.trim(),
         body: el("body").value.trim()
       };
@@ -1053,7 +1074,7 @@
     async function createComment() {
       if (!state.postId) return;
       const payload = {
-        author: el("comment-author").value.trim(),
+        author: localAuthor(),
         body: el("comment-body").value.trim()
       };
       try {
@@ -1102,6 +1123,20 @@
       el("identity-banner").classList.toggle("hidden", !!hasHandle || !state.onboardingSkipped);
     }
 
+    function setIdentityModalMode(mode) {
+      const editing = mode === "edit";
+      state.identityModalMode = mode;
+      el("identity-modal-title").textContent = editing ? "Edit profile" : "Claim your handle";
+      el("identity-modal-copy").textContent = editing
+        ? "Your handle is tied to your node key and cannot be changed. You can still update your display name and bio."
+        : "Your handle is tied to your node key and claimed on the Lattice network. Once claimed, only you can use it.";
+      el("onboarding-handle").readOnly = editing;
+      el("onboarding-handle").classList.toggle("input-locked", editing);
+      el("onboarding-handle-note").classList.toggle("hidden", !editing);
+      el("onboarding-claim").textContent = editing ? "Save Profile" : "Claim Handle";
+      el("onboarding-skip").classList.toggle("hidden", editing);
+    }
+
     async function loadIdentity() {
       try {
         state.identity = await api("/api/v1/identity");
@@ -1110,6 +1145,7 @@
       }
       renderIdentity();
       const shouldPrompt = !state.identity || !state.identity.handle;
+      setIdentityModalMode("onboarding");
       el("onboarding-modal").classList.toggle("hidden", !shouldPrompt || state.onboardingSkipped);
     }
 
@@ -1218,15 +1254,11 @@
       el("identity-dropdown").classList.toggle("hidden");
     });
     el("identity-edit").addEventListener("click", () => {
+      setIdentityModalMode("edit");
       el("onboarding-handle").value = state.identity && state.identity.handle ? state.identity.handle : "";
       el("onboarding-display-name").value = state.identity && state.identity.display_name ? state.identity.display_name : "";
       el("onboarding-bio").value = state.identity && state.identity.bio ? state.identity.bio : "";
       el("onboarding-error").textContent = "";
-      el("onboarding-modal").classList.remove("hidden");
-    });
-    el("identity-transfer").addEventListener("click", () => {
-      el("onboarding-handle").value = "";
-      el("onboarding-error").textContent = "claiming a new handle will release your old one";
       el("onboarding-modal").classList.remove("hidden");
     });
     el("nav-home").addEventListener("click", () => { state.view = "feed"; loadPosts(); });
