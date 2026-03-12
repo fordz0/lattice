@@ -20,3 +20,6 @@ tools/topology-viewer/topology.json
 .vscode/
 *.swp
 *.swo
+
+# Local docs clone
+/lattice-site-docs/
