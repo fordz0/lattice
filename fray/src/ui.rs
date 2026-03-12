@@ -805,10 +805,6 @@ pub fn page_html() -> &'static str {
       node.className = "status" + (kind ? " " + kind : "");
     }
 
-    function localAuthor() {
-      return state.identity && state.identity.handle ? state.identity.handle : "anonymous";
-    }
-
     function canModerateFray() {
       return !!(state.frayClaim && state.frayClaim.local);
     }
@@ -864,17 +860,23 @@ pub fn page_html() -> &'static str {
     }
 
     async function signedApi(path, body, method) {
+      const requestMethod = method || "POST";
       const raw = JSON.stringify(body);
+      const signingRaw = JSON.stringify({
+        method: requestMethod,
+        path,
+        body
+      });
       const signed = await api("/api/v1/sign", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: raw
+        body: signingRaw
       });
       const headers = {
         "content-type": "application/json",
         "X-Fray-Signature": signed.signature_b64
       };
-      return api(path, { method: method || "POST", headers, body: raw });
+      return api(path, { method: requestMethod, headers, body: raw });
     }
 
     function standingMarkup(item) {
@@ -1140,7 +1142,6 @@ pub fn page_html() -> &'static str {
 
     async function createPost() {
       const payload = {
-        author: localAuthor(),
         title: el("title").value.trim(),
         body: el("body").value.trim()
       };
@@ -1164,7 +1165,6 @@ pub fn page_html() -> &'static str {
     async function createComment() {
       if (!state.postId) return;
       const payload = {
-        author: localAuthor(),
         body: el("comment-body").value.trim()
       };
       try {
@@ -1183,7 +1183,7 @@ pub fn page_html() -> &'static str {
 
     async function syncPull() {
       try {
-        const result = await api(`/api/v1/frays/${state.fray}/sync/pull`, { method: "POST" });
+        const result = await signedApi(`/api/v1/frays/${state.fray}/sync/pull`, {});
         setStatus(`Pulled ${result.imported_posts} objects from network`, "ok");
         if (state.view === "feed") await loadPosts();
         if (state.view === "mod") await loadModPanel();
@@ -1194,7 +1194,7 @@ pub fn page_html() -> &'static str {
 
     async function syncPublish() {
       try {
-        const result = await api(`/api/v1/frays/${state.fray}/sync/publish`, { method: "POST" });
+        const result = await signedApi(`/api/v1/frays/${state.fray}/sync/publish`, {});
         setStatus(`Published ${result.published_posts} posts and ${result.published_comments} comments`, "ok");
       } catch (err) {
         setStatus(err.message, "err");
@@ -1203,7 +1203,7 @@ pub fn page_html() -> &'static str {
 
     async function claimFray() {
       try {
-        await api(`/api/v1/frays/${state.fray}/claim`, { method: "POST" });
+        await signedApi(`/api/v1/frays/${state.fray}/claim`, {});
         await loadFrayClaimStatus();
         if (state.postId) await loadThread(state.postId);
         setStatus(`claimed /f/${state.fray}`, "ok");

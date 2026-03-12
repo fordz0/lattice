@@ -19,6 +19,15 @@
       "matches": ["http://*.loom/*", "https://*.loom/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://lattice.benjf.dev/*",
+        "http://127.0.0.1:8000/*",
+        "http://localhost:8000/*"
+      ],
+      "js": ["site-detect.js"],
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": ["setup.html", "setup.js"],

@@ -299,9 +299,7 @@ pub async fn moderation_check_many(
 pub fn import_trust_record(store: &FrayStore, signed: &SignedTrustRecord) -> Result<()> {
     verify_signed_trust_record(signed)?;
     store.store_trust_record(&signed.record.fray, signed)?;
-    for entry in &signed.record.entries {
-        store.store_key_record(&signed.record.fray, entry.clone())?;
-    }
+    store.replace_key_records(&signed.record.fray, &signed.record.entries)?;
     Ok(())
 }
 

@@ -11,8 +11,10 @@ use crate::trust::{
 use crate::ui;
 use axum::body::to_bytes;
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request as AxumRequest, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, OriginalUri, Path, Query, Request as AxumRequest, State,
+};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -20,7 +22,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use lattice_core::identity::canonical_json_bytes;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -85,6 +87,13 @@ struct IdentityResponse {
     display_name: Option<String>,
     bio: Option<String>,
     key_b64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SignedRequestPayload<'a> {
+    method: &'a str,
+    path: &'a str,
+    body: Value,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -359,11 +368,18 @@ async fn transfer_handle(
 
 async fn release_handle(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let local_key = signing_key_b64(state.signing_key.as_ref());
-    if let Err(err) = verify_body_signature(&headers, &body, std::slice::from_ref(&local_key)) {
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        std::slice::from_ref(&local_key),
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
     let Some(handle) = (match state.store.get_local_handle() {
@@ -448,6 +464,7 @@ async fn get_post(
 
 async fn delete_post(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     Path((fray, post_id)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
@@ -457,7 +474,13 @@ async fn delete_post(
         Err(response) => return response,
     };
     let authorized_keys = moderator_authorized_keys(&record.record);
-    if let Err(err) = verify_body_signature(&headers, &body, &authorized_keys) {
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::DELETE.as_str(),
+        uri.path(),
+        &body,
+        &authorized_keys,
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
 
@@ -499,6 +522,7 @@ async fn create_comment(
 
 async fn delete_comment(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     Path((fray, post_id, comment_id)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Bytes,
@@ -508,7 +532,13 @@ async fn delete_comment(
         Err(response) => return response,
     };
     let authorized_keys = moderator_authorized_keys(&record.record);
-    if let Err(err) = verify_body_signature(&headers, &body, &authorized_keys) {
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::DELETE.as_str(),
+        uri.path(),
+        &body,
+        &authorized_keys,
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
 
@@ -537,18 +567,24 @@ async fn list_comments(
     }
 }
 
-async fn claim_fray(State(state): State<AppState>, Path(fray): Path<String>) -> Response {
-    match network::check_frayloom_stake(state.lattice_rpc_port).await {
-        Ok(true) => {}
-        Ok(false) => return (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "you must have fray.loom pinned and trusted to claim a fray" })),
-        )
-            .into_response(),
-        Err(err) => return bad_gateway(err.to_string()),
+async fn claim_fray(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    Path(fray): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let local_key = signing_key_b64(state.signing_key.as_ref());
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        std::slice::from_ref(&local_key),
+    ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
 
-    let local_key = signing_key_b64(state.signing_key.as_ref());
     if let Ok(Some(existing)) = state.store.get_fray_ownership(&fray) {
         if existing != local_key {
             return (
@@ -557,6 +593,26 @@ async fn claim_fray(State(state): State<AppState>, Path(fray): Path<String>) -> 
             )
                 .into_response();
         }
+        if let Ok(Some(record)) = state.store.load_trust_record(&fray) {
+            return Json(json!({
+                "status": "ok",
+                "fray": fray,
+                "owner_key_b64": existing,
+                "already_claimed": true,
+                "version": record.record.version,
+            }))
+            .into_response();
+        }
+    }
+
+    match network::check_frayloom_stake(state.lattice_rpc_port).await {
+        Ok(true) => {}
+        Ok(false) => return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "you must have fray.loom pinned and trusted to claim a fray" })),
+        )
+            .into_response(),
+        Err(err) => return bad_gateway(err.to_string()),
     }
 
     let trust_record = FrayTrustRecord {
@@ -629,6 +685,7 @@ async fn get_trust_record(State(state): State<AppState>, Path(fray): Path<String
 
 async fn set_trust_standing(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     Path(fray): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -642,7 +699,13 @@ async fn set_trust_standing(
         Err(response) => return response,
     };
     let authorized_keys = moderator_authorized_keys(&record.record);
-    if let Err(err) = verify_body_signature(&headers, &body, &authorized_keys) {
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        &authorized_keys,
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
 
@@ -667,6 +730,7 @@ async fn set_trust_standing(
 
 async fn add_moderator(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     Path(fray): Path<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -680,7 +744,13 @@ async fn add_moderator(
         Err(response) => return response,
     };
     let owner_only = vec![record.record.owner_key_b64.clone()];
-    if let Err(err) = verify_body_signature(&headers, &body, &owner_only) {
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        &owner_only,
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
     if !record.record.moderator_keys.contains(&request.key_b64) {
@@ -696,6 +766,7 @@ async fn add_moderator(
 
 async fn remove_moderator(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     Path((fray, key_b64)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
@@ -705,7 +776,13 @@ async fn remove_moderator(
         Err(response) => return response,
     };
     let owner_only = vec![record.record.owner_key_b64.clone()];
-    if let Err(err) = verify_body_signature(&headers, &body, &owner_only) {
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::DELETE.as_str(),
+        uri.path(),
+        &body,
+        &owner_only,
+    ) {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
     record
@@ -717,7 +794,24 @@ async fn remove_moderator(
     persist_trust_record(&state, &fray, &record).await
 }
 
-async fn publish_fray(State(state): State<AppState>, Path(fray): Path<String>) -> Response {
+async fn publish_fray(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    Path(fray): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let local_key = signing_key_b64(state.signing_key.as_ref());
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        std::slice::from_ref(&local_key),
+    ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
+    }
+
     let posts = match state.store.list_posts_full(&fray, FEED_POST_LIMIT) {
         Ok(posts) => posts,
         Err(err) => return bad_request(err.to_string()),
@@ -758,7 +852,24 @@ async fn publish_fray(State(state): State<AppState>, Path(fray): Path<String>) -
     }
 }
 
-async fn pull_fray(State(state): State<AppState>, Path(fray): Path<String>) -> Response {
+async fn pull_fray(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    Path(fray): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let local_key = signing_key_b64(state.signing_key.as_ref());
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        std::slice::from_ref(&local_key),
+    ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
+    }
+
     let signed_feed = match network::fetch_feed(state.lattice_rpc_port, &fray).await {
         Ok(Some(feed)) => feed,
         Ok(None) => return not_found("no network feed found for fray"),
@@ -881,7 +992,22 @@ async fn get_directory(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn sync_directory(State(state): State<AppState>) -> Response {
+async fn sync_directory(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let local_key = signing_key_b64(state.signing_key.as_ref());
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        std::slice::from_ref(&local_key),
+    ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
+    }
     match network::fetch_directory(state.lattice_rpc_port).await {
         Ok(Some(directory)) => {
             if let Err(err) = state.store.store_directory(&directory) {
@@ -896,8 +1022,14 @@ async fn sync_directory(State(state): State<AppState>) -> Response {
 
 async fn upsert_directory_entry(
     State(state): State<AppState>,
-    Json(request): Json<DirectoryEntryRequest>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
+    let request: DirectoryEntryRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(err) => return bad_request(format!("invalid json: {err}")),
+    };
     let mut signed = match state.store.load_directory() {
         Ok(Some(directory)) => directory,
         Ok(None) => {
@@ -921,6 +1053,15 @@ async fn upsert_directory_entry(
             Json(json!({ "error": "local signing key is not the directory operator" })),
         )
             .into_response();
+    }
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::POST.as_str(),
+        uri.path(),
+        &body,
+        std::slice::from_ref(&local_key),
+    ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
     let status = match parse_directory_status(&request.status, None) {
         Ok(status) => status,
@@ -961,7 +1102,10 @@ async fn upsert_directory_entry(
 
 async fn ban_directory_entry(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     Path(fray_name): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     let mut signed = match state.store.load_directory() {
         Ok(Some(directory)) => directory,
@@ -975,6 +1119,15 @@ async fn ban_directory_entry(
             Json(json!({ "error": "local signing key is not the directory operator" })),
         )
             .into_response();
+    }
+    if let Err(err) = verify_signed_request(
+        &headers,
+        Method::DELETE.as_str(),
+        uri.path(),
+        &body,
+        std::slice::from_ref(&local_key),
+    ) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
     }
     let now = unix_ts();
     if let Some(entry) = signed
@@ -1023,11 +1176,14 @@ async fn ban_directory_entry(
 
 async fn add_blocklist_hash(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(err) = verify_body_signature(
+    if let Err(err) = verify_signed_request(
         &headers,
+        Method::POST.as_str(),
+        uri.path(),
         &body,
         &[signing_key_b64(state.signing_key.as_ref())],
     ) {
@@ -1065,10 +1221,11 @@ async fn persist_trust_record(
     if let Err(err) = state.store.store_trust_record(fray, record) {
         return bad_request(err.to_string());
     }
-    for entry in &record.record.entries {
-        if let Err(err) = state.store.store_key_record(fray, entry.clone()) {
-            return bad_request(err.to_string());
-        }
+    if let Err(err) = state
+        .store
+        .replace_key_records(fray, &record.record.entries)
+    {
+        return bad_request(err.to_string());
     }
     Json(json!({ "status": "ok" })).into_response()
 }
@@ -1103,8 +1260,10 @@ fn moderator_authorized_keys(record: &FrayTrustRecord) -> Vec<String> {
     out
 }
 
-fn verify_body_signature(
+fn verify_signed_request(
     headers: &HeaderMap,
+    method: &str,
+    path: &str,
     body: &[u8],
     allowed_keys: &[String],
 ) -> Result<String, String> {
@@ -1119,23 +1278,21 @@ fn verify_body_signature(
         .map_err(|_| "invalid signature base64".to_string())?;
     let signature = Signature::from_slice(&signature_bytes)
         .map_err(|_| "invalid signature bytes".to_string())?;
-
-    let canonical_payload = serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|value| canonical_json_bytes(&value).ok());
+    let payload = signed_request_payload(method, path, body)?;
 
     for key_b64 in allowed_keys {
         let verifying_key = crate::trust::decode_public_key_b64(key_b64)?;
-        if verifying_key.verify(body, &signature).is_ok() {
+        if verifying_key.verify(&payload, &signature).is_ok() {
             return Ok(key_b64.clone());
-        }
-        if let Some(payload) = canonical_payload.as_ref() {
-            if verifying_key.verify(payload, &signature).is_ok() {
-                return Ok(key_b64.clone());
-            }
         }
     }
     Err("signature did not verify against an authorized key".to_string())
+}
+
+fn signed_request_payload(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    let body: Value = serde_json::from_slice(body).map_err(|err| format!("invalid json: {err}"))?;
+    canonical_json_bytes(&SignedRequestPayload { method, path, body })
+        .map_err(|err| format!("failed to canonicalize signed request payload: {err}"))
 }
 
 fn signing_key_b64(signing_key: &SigningKey) -> String {
@@ -1568,6 +1725,13 @@ mod tests {
         Signature::from_slice(&bytes).expect("parse signature")
     }
 
+    fn signed_header_value(state: &AppState, method: &str, path: &str, body: &Value) -> String {
+        let raw = serde_json::to_vec(body).expect("encode body");
+        let payload = signed_request_payload(method, path, &raw).expect("encode signed payload");
+        let signature = state.signing_key.sign(&payload);
+        BASE64_STANDARD.encode(signature.to_bytes())
+    }
+
     async fn spawn_claim_rpc_server() -> (u16, oneshot::Sender<()>) {
         let records = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let app = AxumRouter::new()
@@ -1648,13 +1812,20 @@ mod tests {
 
     #[tokio::test]
     async fn claim_returns_403_when_stake_check_fails() {
-        let app = app(app_state());
+        let state = app_state();
+        let app = app(state.clone());
+        let body = json!({});
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/frays/lattice/claim")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .header(
+                        "X-Fray-Signature",
+                        signed_header_value(&state, "POST", "/api/v1/frays/lattice/claim", &body),
+                    )
+                    .body(Body::from(body.to_string()))
                     .expect("request"),
             )
             .await
@@ -1731,17 +1902,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_succeeds_without_request_body() {
+    async fn claim_succeeds_with_signed_empty_body() {
         let (rpc_port, shutdown_tx) = spawn_claim_rpc_server().await;
         let state = app_state_with_rpc_port(rpc_port);
         let expected_owner = signing_key_b64(state.signing_key.as_ref());
         let app = app(state.clone());
+        let body = json!({});
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/frays/lattice/claim")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .header(
+                        "X-Fray-Signature",
+                        signed_header_value(&state, "POST", "/api/v1/frays/lattice/claim", &body),
+                    )
+                    .body(Body::from(body.to_string()))
                     .expect("request"),
             )
             .await
@@ -1760,6 +1937,82 @@ mod tests {
             .expect("load trust record")
             .expect("stored trust record");
         assert_eq!(trust.record.owner_key_b64, expected_owner);
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn claim_is_idempotent_for_existing_local_owner() {
+        let (rpc_port, shutdown_tx) = spawn_claim_rpc_server().await;
+        let state = app_state_with_rpc_port(rpc_port);
+        let owner_key_b64 = signing_key_b64(state.signing_key.as_ref());
+        let fray = "lattice";
+        let signed = sign_trust_record(
+            &FrayTrustRecord {
+                version: 7,
+                fray: fray.to_string(),
+                owner_key_b64: owner_key_b64.clone(),
+                moderator_keys: vec![BASE64_STANDARD
+                    .encode(SigningKey::from_bytes(&[8; 32]).verifying_key().as_bytes())],
+                entries: vec![KeyRecord {
+                    key_b64: BASE64_STANDARD
+                        .encode(SigningKey::from_bytes(&[9; 32]).verifying_key().as_bytes()),
+                    standing: KeyStanding::Trusted,
+                    label: Some("peer".to_string()),
+                    updated_at: unix_ts(),
+                }],
+                generated_at: unix_ts(),
+            },
+            state.signing_key.as_ref(),
+        )
+        .expect("sign trust record");
+        state
+            .store
+            .store_trust_record(fray, &signed)
+            .expect("store trust record");
+        state
+            .store
+            .replace_key_records(fray, &signed.record.entries)
+            .expect("replace key records");
+        state
+            .store
+            .store_fray_ownership(fray, &owner_key_b64)
+            .expect("store ownership");
+
+        let app = app(state.clone());
+        let body = json!({});
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/frays/lattice/claim")
+                    .header("content-type", "application/json")
+                    .header(
+                        "X-Fray-Signature",
+                        signed_header_value(&state, "POST", "/api/v1/frays/lattice/claim", &body),
+                    )
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let value: Value = serde_json::from_slice(&response_body).expect("decode response");
+        assert_eq!(
+            value.get("already_claimed").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let stored = state
+            .store
+            .load_trust_record(fray)
+            .expect("load trust record")
+            .expect("stored trust record");
+        assert_eq!(stored.record.version, 7);
+        assert_eq!(stored.record.moderator_keys.len(), 1);
+        assert_eq!(stored.record.entries.len(), 1);
         let _ = shutdown_tx.send(());
     }
 
@@ -1853,6 +2106,29 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn signed_requests_do_not_replay_across_paths() {
+        let state = app_state();
+        let body = json!({});
+        let signature =
+            signed_header_value(&state, "DELETE", "/api/v1/frays/a/posts/post-1", &body);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Fray-Signature",
+            HeaderValue::from_str(&signature).expect("header value"),
+        );
+        let allowed = vec![signing_key_b64(state.signing_key.as_ref())];
+        let raw = serde_json::to_vec(&body).expect("encode body");
+        assert!(verify_signed_request(
+            &headers,
+            "DELETE",
+            "/api/v1/frays/a/posts/post-2",
+            &raw,
+            &allowed,
+        )
+        .is_err());
     }
 
     #[test]

@@ -382,6 +382,29 @@ impl FrayStore {
         Ok(())
     }
 
+    pub fn replace_key_records(&self, fray: &str, records: &[KeyRecord]) -> Result<()> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        let prefix = trust_prefix(fray_name.as_str());
+        let mut batch = sled::Batch::default();
+        for item in self.db.scan_prefix(prefix.as_bytes()) {
+            let (key, _value) = item.context("failed to iterate trust standings")?;
+            batch.remove(key);
+        }
+        for record in records {
+            let key = trust_key(fray_name.as_str(), &record.key_b64);
+            let value =
+                serde_json::to_vec(record).context("failed to serialize replacement key record")?;
+            batch.insert(key.as_bytes(), value);
+        }
+        self.db
+            .apply_batch(batch)
+            .context("failed to replace key records")?;
+        self.db
+            .flush()
+            .context("failed to flush replaced key records")?;
+        Ok(())
+    }
+
     pub fn get_key_standing(&self, fray: &str, key_b64: &str) -> Result<Option<KeyStanding>> {
         let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
         let key = trust_key(fray_name.as_str(), key_b64);
@@ -865,6 +888,48 @@ mod tests {
         let standings = store.list_key_standings("lattice").expect("list standings");
         assert_eq!(standings.len(), 1);
         assert_eq!(standings[0].key_b64, "key-abc");
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn replace_key_records_removes_stale_entries() {
+        let path = temp_db_path();
+        let store = FrayStore::open(&path).expect("open db");
+        store
+            .replace_key_records(
+                "lattice",
+                &[KeyRecord {
+                    key_b64: "key-old".to_string(),
+                    standing: KeyStanding::Restricted { reason: None },
+                    label: None,
+                    updated_at: now_secs().expect("now secs"),
+                }],
+            )
+            .expect("seed key records");
+        store
+            .replace_key_records(
+                "lattice",
+                &[KeyRecord {
+                    key_b64: "key-new".to_string(),
+                    standing: KeyStanding::Trusted,
+                    label: Some("new".to_string()),
+                    updated_at: now_secs().expect("now secs"),
+                }],
+            )
+            .expect("replace key records");
+
+        assert_eq!(
+            store
+                .get_key_standing("lattice", "key-old")
+                .expect("get old standing"),
+            None
+        );
+        assert_eq!(
+            store
+                .get_key_standing("lattice", "key-new")
+                .expect("get new standing"),
+            Some(KeyStanding::Trusted)
+        );
         let _ = std::fs::remove_dir_all(path);
     }
 
