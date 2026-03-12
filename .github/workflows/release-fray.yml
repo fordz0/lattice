@@ -1,0 +1,102 @@
+name: Release Fray
+
+on:
+  push:
+    tags:
+      - "fray-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: fray-linux-x86_64
+            build_cmd: cargo build --release -p fray --target x86_64-unknown-linux-gnu
+            artifact_path: target/x86_64-unknown-linux-gnu/release/fray
+            install_cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary_name: fray-linux-aarch64
+            build_cmd: cross build --release -p fray --target aarch64-unknown-linux-gnu
+            artifact_path: target/aarch64-unknown-linux-gnu/release/fray
+            install_cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: fray-macos-x86_64
+            build_cmd: cargo build --release -p fray --target x86_64-apple-darwin
+            artifact_path: target/x86_64-apple-darwin/release/fray
+            install_cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: fray-macos-aarch64
+            build_cmd: cargo build --release -p fray --target aarch64-apple-darwin
+            artifact_path: target/aarch64-apple-darwin/release/fray
+            install_cross: false
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.install_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build Fray
+        run: ${{ matrix.build_cmd }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          cp "${{ matrix.artifact_path }}" "${{ matrix.binary_name }}"
+          chmod +x "${{ matrix.binary_name }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.binary_name }}" | awk '{print $1}' > "${{ matrix.binary_name }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.binary_name }}" | awk '{print $1}' > "${{ matrix.binary_name }}.sha256"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: |
+            ${{ matrix.binary_name }}
+            ${{ matrix.binary_name }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/**/fray-linux-x86_64
+            release-assets/**/fray-linux-x86_64.sha256
+            release-assets/**/fray-linux-aarch64
+            release-assets/**/fray-linux-aarch64.sha256
+            release-assets/**/fray-macos-x86_64
+            release-assets/**/fray-macos-x86_64.sha256
+            release-assets/**/fray-macos-aarch64
+            release-assets/**/fray-macos-aarch64.sha256
