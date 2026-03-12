@@ -279,3 +279,45 @@ pub fn start_publish_task(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_publish;
+    use ed25519_dalek::SigningKey;
+    use lattice_site::manifest::{AppManifest, SiteManifest};
+    use lattice_site::publisher as site_publisher;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn prepare_publish_preserves_existing_app_block() {
+        let site_dir = tempdir().expect("tempdir");
+        let index_path = site_dir.path().join("index.html");
+        fs::write(&index_path, "<!doctype html><title>fray</title>").expect("write index");
+
+        let app = AppManifest {
+            proxy_port: 8890,
+            proxy_paths: vec!["/api".to_string()],
+        };
+        let manifest = SiteManifest {
+            name: "fray".to_string(),
+            version: 3,
+            publisher_key: String::new(),
+            rating: "general".to_string(),
+            app: Some(app.clone()),
+            files: Vec::new(),
+            signature: String::new(),
+        };
+        site_publisher::save_manifest(&manifest, site_dir.path()).expect("save manifest");
+
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let prepared = prepare_publish("fray", site_dir.path(), &signing_key, 0, false)
+            .expect("prepare publish");
+        let manifest_json =
+            String::from_utf8(prepared.manifest_record.1).expect("manifest record utf8");
+        let published: SiteManifest =
+            serde_json::from_str(&manifest_json).expect("parse published manifest");
+
+        assert_eq!(published.app, Some(app));
+    }
+}
