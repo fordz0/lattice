@@ -1,11 +1,9 @@
+use crate::cache::{BlockCacheMeta, CachePolicy};
+use crate::rpc::{KnownPublisher, KnownPublisherStatus, QuarantineEntryResponse, TrustedPublisher};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{bail, Context, Result};
 use lattice_core::moderation::ModerationRule;
-use crate::cache::{BlockCacheMeta, CachePolicy};
-use crate::rpc::{
-    KnownPublisher, KnownPublisherStatus, QuarantineEntryResponse, TrustedPublisher,
-};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -158,8 +156,18 @@ impl LocalRecordStore {
         self.meta
             .insert(key.as_bytes(), meta_bytes)
             .context("failed to persist local record metadata")?;
-        self.db.flush().context("failed to flush local records db")?;
+        self.db
+            .flush()
+            .context("failed to flush local records db")?;
         Ok(())
+    }
+
+    pub fn get_record(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.records
+            .get(key.as_bytes())
+            .context("failed to read local record value")?
+            .map(|value| Ok(value.to_vec()))
+            .transpose()
     }
 
     pub fn put_block(
@@ -193,7 +201,9 @@ impl LocalRecordStore {
         self.block_meta
             .insert(hash.as_bytes(), meta_bytes)
             .context("failed to persist block metadata")?;
-        self.db.flush().context("failed to flush block cache write")?;
+        self.db
+            .flush()
+            .context("failed to flush block cache write")?;
         Ok(())
     }
 
@@ -287,7 +297,9 @@ impl LocalRecordStore {
             updated = updated.saturating_add(1);
         }
         if updated > 0 {
-            self.db.flush().context("failed to flush block cache policy update")?;
+            self.db
+                .flush()
+                .context("failed to flush block cache policy update")?;
         }
         Ok(updated)
     }
@@ -361,7 +373,9 @@ impl LocalRecordStore {
         self.mod_rules
             .insert(rule.id.as_bytes(), encoded)
             .context("failed to persist moderation rule")?;
-        self.db.flush().context("failed to flush moderation rule write")?;
+        self.db
+            .flush()
+            .context("failed to flush moderation rule write")?;
         Ok(())
     }
 
@@ -372,7 +386,9 @@ impl LocalRecordStore {
             .context("failed to remove moderation rule")?
             .is_some();
         if removed {
-            self.db.flush().context("failed to flush moderation rule removal")?;
+            self.db
+                .flush()
+                .context("failed to flush moderation rule removal")?;
         }
         Ok(removed)
     }
@@ -382,7 +398,9 @@ impl LocalRecordStore {
         self.mod_quarantine
             .insert(entry.id.as_bytes(), encoded)
             .context("failed to persist quarantine entry")?;
-        self.db.flush().context("failed to flush quarantine write")?;
+        self.db
+            .flush()
+            .context("failed to flush quarantine write")?;
         Ok(())
     }
 
@@ -544,9 +562,7 @@ impl LocalRecordStore {
         self.known_publishers
             .get(site_name.as_bytes())
             .context("failed to read known publisher")?
-            .map(|value| {
-                serde_json::from_slice(&value).context("failed to decode known publisher")
-            })
+            .map(|value| serde_json::from_slice(&value).context("failed to decode known publisher"))
             .transpose()
     }
 
@@ -597,7 +613,9 @@ impl LocalRecordStore {
         self.claim_rate_limits
             .insert(key_b64.as_bytes(), ts.to_be_bytes().to_vec())
             .context("failed to persist claim rate limit")?;
-        self.db.flush().context("failed to flush claim rate limit write")?;
+        self.db
+            .flush()
+            .context("failed to flush claim rate limit write")?;
         Ok(())
     }
 
@@ -607,9 +625,7 @@ impl LocalRecordStore {
             .map_err(|err| err.to_string())?
         {
             if now.saturating_sub(last_claim_ts) < 86_400 {
-                return Err(
-                    "claim rate limit: one new claim per key per 24 hours".to_string(),
-                );
+                return Err("claim rate limit: one new claim per key per 24 hours".to_string());
             }
         }
         self.set_last_claim_ts(key_b64, now)
@@ -624,7 +640,11 @@ impl LocalRecordStore {
         Ok(BlockCacheGcStats::default())
     }
 
-    pub fn gc_unpinned(&self, max_age_secs: u64, max_total_bytes: usize) -> Result<LocalRecordGcStats> {
+    pub fn gc_unpinned(
+        &self,
+        max_age_secs: u64,
+        max_total_bytes: usize,
+    ) -> Result<LocalRecordGcStats> {
         let now = unix_ts();
         let mut stats = LocalRecordGcStats::default();
 

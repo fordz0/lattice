@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
-use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
 use lattice_core::moderation::{ModerationEngine, ModerationRule, RuleAction};
+use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
 use libp2p::{autonat, identify, kad, mdns, relay, Swarm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -12,14 +12,13 @@ use tokio::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
 use lattice_daemon::app_ownership::enforce_app_record_ownership;
+use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
 use lattice_daemon::dht;
 use lattice_daemon::moderation_helpers::{
-    action_name, hide_record_rule, ingest_rule, parse_rule_action,
-    parse_rule_kind, purge_local_matches, quarantine_record, record_publisher_b64,
-    site_manifest_publisher_b64, site_manifest_suppression_rule,
-    validate_put_record_request,
+    action_name, hide_record_rule, ingest_rule, parse_rule_action, parse_rule_kind,
+    purge_local_matches, quarantine_record, record_publisher_b64, site_manifest_publisher_b64,
+    site_manifest_suppression_rule, validate_put_record_request,
 };
 use lattice_daemon::names::NameRecord;
 use lattice_daemon::publish::{
@@ -29,10 +28,10 @@ use lattice_daemon::rpc::{
     GetSiteManifestResponse, NodeInfoResponse, PublishSiteOk, RpcCommand, TrustState,
 };
 use lattice_daemon::site_helpers::{
-    addr_is_loopback_or_private, build_relay_reservation_addr, cached_manifest_json, maybe_put_record,
-    normalize_get_record_value, parse_verified_name_record, publisher_hex_to_b64,
-    pin_cached_site_blocks, remember_local_record, site_manifest_trust_state, site_name_from_site_key,
-    start_providing_site, validate_name,
+    addr_is_loopback_or_private, build_relay_reservation_addr, cached_manifest_json,
+    maybe_put_record, normalize_get_record_value, parse_verified_name_record,
+    pin_cached_site_blocks, publisher_hex_to_b64, remember_local_record, site_manifest_trust_state,
+    site_name_from_site_key, start_providing_site, validate_name,
 };
 use lattice_daemon::store::{unix_ts, LocalRecordStore};
 
@@ -42,7 +41,7 @@ use crate::fetch::{
 };
 use crate::{
     LatticeBehaviour, GET_RECORD_MAX_ATTEMPTS, MAX_CONCURRENT_GET_SITE, MAX_CONCURRENT_PUBLISH,
-    PUBLISH_OWNERSHIP_PROBE_DELAY_SECS, PUBLISH_OWNERSHIP_PROBES, RELAY_RESERVATION_RETRY_SECS,
+    PUBLISH_OWNERSHIP_PROBES, PUBLISH_OWNERSHIP_PROBE_DELAY_SECS, RELAY_RESERVATION_RETRY_SECS,
 };
 
 pub struct PendingTextQuery {
@@ -153,17 +152,25 @@ fn current_dht_site_version(
     }
 }
 
-fn should_rate_limit_existing_name_claim(existing_owner_pubkey_hex: Option<&str>, claimant_pubkey_hex: &str) -> bool {
+fn should_rate_limit_existing_name_claim(
+    existing_owner_pubkey_hex: Option<&str>,
+    claimant_pubkey_hex: &str,
+) -> bool {
     !matches!(existing_owner_pubkey_hex, Some(owner) if owner == claimant_pubkey_hex)
 }
 
-fn should_rate_limit_publish_claim(owned_names: &Arc<Mutex<HashSet<String>>>, name: &str) -> bool {
-    !owned_names
-        .lock()
-        .map(|owned| owned.contains(name))
-        .unwrap_or(false)
+fn local_name_record_owned_by_key(
+    local_records: &HashMap<String, Vec<u8>>,
+    name: &str,
+    claimant_pubkey_hex: &str,
+) -> bool {
+    let key = format!("name:{name}");
+    local_records
+        .get(&key)
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|value| parse_verified_name_record(name, value))
+        .is_some_and(|record| !record.is_expired() && record.key == claimant_pubkey_hex)
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn handle_claim_name_lookup_result(
@@ -223,7 +230,9 @@ fn handle_claim_name_lookup_result(
         return;
     };
     if should_rate_limit_existing_name_claim(existing_owner_pubkey_hex.as_deref(), &pubkey_hex) {
-        if let Err(err) = local_record_store.check_and_update_claim_rate_limit(&pubkey_b64, unix_ts()) {
+        if let Err(err) =
+            local_record_store.check_and_update_claim_rate_limit(&pubkey_b64, unix_ts())
+        {
             let _ = respond_to.send(Err(err));
             return;
         }
@@ -261,7 +270,10 @@ fn handle_get_site_query_result(
     get_site_tasks: &mut HashMap<u64, GetSiteTask>,
     get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
     pending_provider_queries: &mut HashMap<kad::QueryId, PendingProviderQuery>,
-    pending_block_requests: &mut HashMap<lattice_daemon::block_fetch::OutboundRequestId, PendingBlockRequest>,
+    pending_block_requests: &mut HashMap<
+        lattice_daemon::block_fetch::OutboundRequestId,
+        PendingBlockRequest,
+    >,
     moderation_engine: &ModerationEngine,
     local_record_store: &LocalRecordStore,
     session_block_cache: &mut SessionBlockCache,
@@ -292,14 +304,20 @@ fn handle_get_site_query_result(
                     let value = match String::from_utf8(record.record.value) {
                         Ok(value) => value,
                         Err(_) => {
-                            let _ = task.respond_to.send(Err("invalid site manifest".to_string()));
+                            let _ = task
+                                .respond_to
+                                .send(Err("invalid site manifest".to_string()));
                             return;
                         }
                     };
-                    let manifest = match serde_json::from_str::<lattice_site::manifest::SiteManifest>(&value) {
+                    let manifest = match serde_json::from_str::<lattice_site::manifest::SiteManifest>(
+                        &value,
+                    ) {
                         Ok(manifest) => manifest,
                         Err(_) => {
-                            let _ = task.respond_to.send(Err("invalid site manifest".to_string()));
+                            let _ = task
+                                .respond_to
+                                .send(Err("invalid site manifest".to_string()));
                             return;
                         }
                     };
@@ -318,11 +336,15 @@ fn handle_get_site_query_result(
             };
 
             if manifest.name != task.requested_name {
-                let _ = task.respond_to.send(Err("manifest name mismatch".to_string()));
+                let _ = task
+                    .respond_to
+                    .send(Err("manifest name mismatch".to_string()));
                 return;
             }
             if manifest.files.len() > crate::MAX_GET_SITE_FILES {
-                let _ = task.respond_to.send(Err("site exceeds maximum file count".to_string()));
+                let _ = task
+                    .respond_to
+                    .send(Err("site exceeds maximum file count".to_string()));
                 return;
             }
             let declared_bytes = manifest
@@ -330,7 +352,9 @@ fn handle_get_site_query_result(
                 .iter()
                 .fold(0_u64, |acc, file| acc.saturating_add(file.size));
             if declared_bytes > crate::MAX_GET_SITE_TOTAL_BYTES {
-                let _ = task.respond_to.send(Err("site exceeds maximum total size".to_string()));
+                let _ = task
+                    .respond_to
+                    .send(Err("site exceeds maximum total size".to_string()));
                 return;
             }
 
@@ -358,7 +382,9 @@ fn handle_get_site_query_result(
             let manifest_publisher_key = match task.manifest.as_ref() {
                 Some(manifest) => manifest.publisher_key.clone(),
                 None => {
-                    let _ = task.respond_to.send(Err("site task missing manifest".to_string()));
+                    let _ = task
+                        .respond_to
+                        .send(Err("site task missing manifest".to_string()));
                     return;
                 }
             };
@@ -392,7 +418,9 @@ fn handle_get_site_query_result(
                     }
                 }
                 Ok(_) | Err(kad::GetRecordError::NotFound { .. }) => {
-                    let _ = task.respond_to.send(Err("name owner record missing".to_string()));
+                    let _ = task
+                        .respond_to
+                        .send(Err("name owner record missing".to_string()));
                     return;
                 }
                 Err(err) => {
@@ -410,7 +438,9 @@ fn handle_get_site_query_result(
                     !manifest.files.is_empty(),
                 ),
                 None => {
-                    let _ = task.respond_to.send(Err("site task missing manifest".to_string()));
+                    let _ = task
+                        .respond_to
+                        .send(Err("site task missing manifest".to_string()));
                     return;
                 }
             };
@@ -462,7 +492,10 @@ pub fn handle_rpc_command(
     next_get_site_task_id: &mut u64,
     get_site_queries: &mut HashMap<kad::QueryId, GetSiteQuery>,
     pending_provider_queries: &mut HashMap<kad::QueryId, PendingProviderQuery>,
-    pending_block_requests: &mut HashMap<lattice_daemon::block_fetch::OutboundRequestId, PendingBlockRequest>,
+    pending_block_requests: &mut HashMap<
+        lattice_daemon::block_fetch::OutboundRequestId,
+        PendingBlockRequest,
+    >,
     owned_names: &Arc<Mutex<HashSet<String>>>,
     app_registry: &AppRegistry,
 ) {
@@ -477,7 +510,11 @@ pub fn handle_rpc_command(
             };
             let _ = respond_to.send(info);
         }
-        RpcCommand::PutRecord { key, value, respond_to } => {
+        RpcCommand::PutRecord {
+            key,
+            value,
+            respond_to,
+        } => {
             let value_bytes = value.into_bytes();
             if let Err(err) = validate_put_record_request(&key, &value_bytes) {
                 let _ = respond_to.send(Err(err));
@@ -548,7 +585,9 @@ pub fn handle_rpc_command(
                 &key,
             ) {
                 let publisher_b64 = record_publisher_b64(&key, &bytes);
-                if let Some(rule) = hide_record_rule(moderation_engine, &key, publisher_b64.as_deref()) {
+                if let Some(rule) =
+                    hide_record_rule(moderation_engine, &key, publisher_b64.as_deref())
+                {
                     warn!(
                         rule_id = %rule.id,
                         rule_kind = ?rule.kind,
@@ -590,7 +629,11 @@ pub fn handle_rpc_command(
                 },
             );
         }
-        RpcCommand::PublishSite { name, site_dir, respond_to } => {
+        RpcCommand::PublishSite {
+            name,
+            site_dir,
+            respond_to,
+        } => {
             if pending_publish_checks.len()
                 + pending_publish_claim_put.len()
                 + pending_publish_version_checks.len()
@@ -644,9 +687,11 @@ pub fn handle_rpc_command(
             .and_then(|bytes| String::from_utf8(bytes).ok())
             {
                 let publisher_b64 = site_manifest_publisher_b64(&value);
-                if let Some(rule) =
-                    site_manifest_suppression_rule(moderation_engine, &key, publisher_b64.as_deref())
-                {
+                if let Some(rule) = site_manifest_suppression_rule(
+                    moderation_engine,
+                    &key,
+                    publisher_b64.as_deref(),
+                ) {
                     warn!(
                         rule_id = %rule.id,
                         matched_publisher = ?publisher_b64,
@@ -657,12 +702,14 @@ pub fn handle_rpc_command(
                     let _ = respond_to.send(None);
                     return;
                 }
-                let trust = site_manifest_trust_state(local_record_store, &name, &value).unwrap_or(TrustState {
-                    status: "first_seen".to_string(),
-                    explicitly_trusted: false,
-                    first_seen_at: None,
-                    previous_key: None,
-                });
+                let trust = site_manifest_trust_state(local_record_store, &name, &value).unwrap_or(
+                    TrustState {
+                        status: "first_seen".to_string(),
+                        explicitly_trusted: false,
+                        first_seen_at: None,
+                        previous_key: None,
+                    },
+                );
                 let pinned = local_record_store.is_site_pinned(&name).unwrap_or(false);
                 let _ = respond_to.send(Some(GetSiteManifestResponse {
                     manifest_json: value,
@@ -681,7 +728,11 @@ pub fn handle_rpc_command(
                 },
             );
         }
-        RpcCommand::GetBlock { hash, site_key, respond_to } => {
+        RpcCommand::GetBlock {
+            hash,
+            site_key,
+            respond_to,
+        } => {
             let consumer = BlockConsumer::Rpc { respond_to };
             if let Some(site_key) = site_key {
                 if let Some(site_name) = site_name_from_site_key(&site_key) {
@@ -722,7 +773,9 @@ pub fn handle_rpc_command(
                 .cloned()
                 .or_else(|| local_record_store.get_block(&hash).ok().flatten())
             {
-                if let Some(rule) = moderation_engine.match_rule(lattice_core::moderation::RuleKind::ContentHash, &hash) {
+                if let Some(rule) = moderation_engine
+                    .match_rule(lattice_core::moderation::RuleKind::ContentHash, &hash)
+                {
                     if rule.action == RuleAction::Hide {
                         if let BlockConsumer::Rpc { respond_to } = consumer {
                             let _ = respond_to.send(None);
@@ -756,11 +809,16 @@ pub fn handle_rpc_command(
                 total_bytes: 0,
                 files: Vec::new(),
             };
-            let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, format!("site:{name}"));
+            let query_id =
+                dht::get_record(&mut swarm.behaviour_mut().kademlia, format!("site:{name}"));
             get_site_queries.insert(query_id, GetSiteQuery::Manifest { task_id });
             get_site_tasks.insert(task_id, task);
         }
-        RpcCommand::ClaimName { name, pubkey_hex, respond_to } => {
+        RpcCommand::ClaimName {
+            name,
+            pubkey_hex,
+            respond_to,
+        } => {
             if let Err(err) = validate_name(&name) {
                 let _ = respond_to.send(Err(err));
                 return;
@@ -815,7 +873,11 @@ pub fn handle_rpc_command(
                     if count == 0 {
                         anyhow::bail!("no cached blocks found for site");
                     }
-                    start_providing_site(&mut swarm.behaviour_mut().kademlia, moderation_engine, &name)?;
+                    start_providing_site(
+                        &mut swarm.behaviour_mut().kademlia,
+                        moderation_engine,
+                        &name,
+                    )?;
                     Ok(())
                 })
                 .map_err(|err| err.to_string());
@@ -842,15 +904,20 @@ pub fn handle_rpc_command(
             let sites = local_record_store.list_pinned_sites().unwrap_or_default();
             let _ = respond_to.send(sites);
         }
-        RpcCommand::TrustSite { name, pin, respond_to } => {
+        RpcCommand::TrustSite {
+            name,
+            pin,
+            respond_to,
+        } => {
             if let Err(err) = validate_name(&name) {
                 let _ = respond_to.send(Err(err));
                 return;
             }
             let result = (|| -> Result<(), String> {
                 if pin {
-                    let manifest_json = cached_manifest_json(&mut swarm.behaviour_mut().kademlia, &name)
-                        .ok_or_else(|| "no cached site manifest found for site".to_string())?;
+                    let manifest_json =
+                        cached_manifest_json(&mut swarm.behaviour_mut().kademlia, &name)
+                            .ok_or_else(|| "no cached site manifest found for site".to_string())?;
                     let count = pin_cached_site_blocks(
                         local_record_store,
                         session_block_cache,
@@ -861,8 +928,12 @@ pub fn handle_rpc_command(
                     if count == 0 {
                         return Err("no cached blocks found for site".to_string());
                     }
-                    start_providing_site(&mut swarm.behaviour_mut().kademlia, moderation_engine, &name)
-                        .map_err(|err| err.to_string())?;
+                    start_providing_site(
+                        &mut swarm.behaviour_mut().kademlia,
+                        moderation_engine,
+                        &name,
+                    )
+                    .map_err(|err| err.to_string())?;
                 }
                 local_record_store
                     .set_explicitly_trusted(&name, true)
@@ -871,7 +942,11 @@ pub fn handle_rpc_command(
             })();
             let _ = respond_to.send(result);
         }
-        RpcCommand::UntrustSite { name, unpin, respond_to } => {
+        RpcCommand::UntrustSite {
+            name,
+            unpin,
+            respond_to,
+        } => {
             if let Err(err) = validate_name(&name) {
                 let _ = respond_to.send(Err(err));
                 return;
@@ -897,7 +972,9 @@ pub fn handle_rpc_command(
                 let _ = respond_to.send(None);
                 return;
             }
-            let known = local_record_store.get_known_publisher(&name).unwrap_or(None);
+            let known = local_record_store
+                .get_known_publisher(&name)
+                .unwrap_or(None);
             let _ = respond_to.send(known);
         }
         RpcCommand::AppRegister {
@@ -927,7 +1004,13 @@ pub fn handle_rpc_command(
         RpcCommand::AppList { respond_to } => {
             let _ = respond_to.send(app_registry.list());
         }
-        RpcCommand::ModAddRule { kind, value, action, note, respond_to } => {
+        RpcCommand::ModAddRule {
+            kind,
+            value,
+            action,
+            note,
+            respond_to,
+        } => {
             let result = (|| -> Result<String, String> {
                 let kind = parse_rule_kind(&kind)?;
                 let action = parse_rule_action(&action)?;
@@ -970,10 +1053,16 @@ pub fn handle_rpc_command(
             let _ = respond_to.send(result);
         }
         RpcCommand::ModListRules { respond_to } => {
-            let rules = local_record_store.load_moderation_rules().unwrap_or_default();
+            let rules = local_record_store
+                .load_moderation_rules()
+                .unwrap_or_default();
             let _ = respond_to.send(rules);
         }
-        RpcCommand::ModPurgeLocal { kind, value, respond_to } => {
+        RpcCommand::ModPurgeLocal {
+            kind,
+            value,
+            respond_to,
+        } => {
             let result = parse_rule_kind(&kind).and_then(|kind| {
                 purge_local_matches(
                     local_record_store,
@@ -986,10 +1075,16 @@ pub fn handle_rpc_command(
             let _ = respond_to.send(result);
         }
         RpcCommand::ModQuarantineList { respond_to } => {
-            let entries = local_record_store.list_quarantine_entries().unwrap_or_default();
+            let entries = local_record_store
+                .list_quarantine_entries()
+                .unwrap_or_default();
             let _ = respond_to.send(entries);
         }
-        RpcCommand::ModCheck { kind, value, respond_to } => {
+        RpcCommand::ModCheck {
+            kind,
+            value,
+            respond_to,
+        } => {
             let action = parse_rule_kind(&kind)
                 .ok()
                 .and_then(|kind| moderation_engine.match_rule(kind, &value))
@@ -1005,13 +1100,21 @@ pub fn handle_rpc_command(
             });
             let _ = respond_to.send(action);
         }
-        RpcCommand::TrustAdd { publisher_b64, label, note, respond_to } => {
+        RpcCommand::TrustAdd {
+            publisher_b64,
+            label,
+            note,
+            respond_to,
+        } => {
             let result = local_record_store
                 .add_trusted_publisher(publisher_b64, label, note)
                 .map_err(|err| err.to_string());
             let _ = respond_to.send(result);
         }
-        RpcCommand::TrustRemove { publisher_b64, respond_to } => {
+        RpcCommand::TrustRemove {
+            publisher_b64,
+            respond_to,
+        } => {
             let result = local_record_store
                 .remove_trusted_publisher(&publisher_b64)
                 .map_err(|err| err.to_string())
@@ -1025,14 +1128,26 @@ pub fn handle_rpc_command(
             let _ = respond_to.send(result);
         }
         RpcCommand::TrustList { respond_to } => {
-            let trusted = local_record_store.list_trusted_publishers().unwrap_or_default();
+            let trusted = local_record_store
+                .list_trusted_publishers()
+                .unwrap_or_default();
             let _ = respond_to.send(trusted);
         }
-        RpcCommand::TrustCheck { publisher_b64, respond_to } => {
-            let trusted = local_record_store.get_trusted_publisher(&publisher_b64).unwrap_or(None);
+        RpcCommand::TrustCheck {
+            publisher_b64,
+            respond_to,
+        } => {
+            let trusted = local_record_store
+                .get_trusted_publisher(&publisher_b64)
+                .unwrap_or(None);
             let _ = respond_to.send(trusted);
         }
-        RpcCommand::RetryNameProbe { name, pubkey_hex, probe_count, respond_to } => {
+        RpcCommand::RetryNameProbe {
+            name,
+            pubkey_hex,
+            probe_count,
+            respond_to,
+        } => {
             if let Err(err) = validate_name(&name) {
                 let _ = respond_to.send(Err(err));
                 return;
@@ -1058,7 +1173,12 @@ pub fn handle_rpc_command(
                 },
             );
         }
-        RpcCommand::RetryPublishOwnershipCheck { name, site_dir, probe_count, respond_to } => {
+        RpcCommand::RetryPublishOwnershipCheck {
+            name,
+            site_dir,
+            probe_count,
+            respond_to,
+        } => {
             if let Err(err) = validate_name(&name) {
                 let _ = respond_to.send(Err(err));
                 return;
@@ -1084,7 +1204,10 @@ pub fn handle_rpc_command(
         }
         RpcCommand::RepublishLocalRecords => {
             if !local_records.is_empty() {
-                info!(count = local_records.len(), "republishing local DHT records");
+                info!(
+                    count = local_records.len(),
+                    "republishing local DHT records"
+                );
                 for (key, value) in local_records.iter() {
                     if let Err(err) = maybe_put_record(
                         &mut swarm.behaviour_mut().kademlia,
@@ -1110,7 +1233,10 @@ pub fn handle_swarm_event(
     pending_get_text: &mut HashMap<kad::QueryId, PendingTextQuery>,
     pending_get_manifest: &mut HashMap<kad::QueryId, PendingManifestQuery>,
     pending_provider_queries: &mut HashMap<kad::QueryId, PendingProviderQuery>,
-    pending_block_requests: &mut HashMap<lattice_daemon::block_fetch::OutboundRequestId, PendingBlockRequest>,
+    pending_block_requests: &mut HashMap<
+        lattice_daemon::block_fetch::OutboundRequestId,
+        PendingBlockRequest,
+    >,
     session_block_cache: &mut SessionBlockCache,
     pending_claim_put: &mut HashMap<kad::QueryId, PendingClaimPut>,
     pending_name_probes: &mut HashMap<kad::QueryId, PendingNameProbe>,
@@ -1488,7 +1614,9 @@ pub fn handle_swarm_event(
                 } else if let Some(mut pending) = pending_get_manifest.remove(&id) {
                     match result {
                         Ok(kad::GetRecordOk::FoundRecord(record)) => {
-                            if let Some(rule) = hide_record_rule(moderation_engine, &pending.key, None) {
+                            if let Some(rule) =
+                                hide_record_rule(moderation_engine, &pending.key, None)
+                            {
                                 warn!(
                                     rule_id = %rule.id,
                                     rule_kind = ?rule.kind,
@@ -1663,11 +1791,18 @@ pub fn handle_swarm_event(
                                 };
                                 let key = format!("name:{}", pending.name);
                                 let payload_bytes = payload.into_bytes();
-                                let Some(pubkey_b64) = publisher_hex_to_b64(local_pubkey_hex) else {
-                                    let _ = pending.respond_to.send(Err("invalid claim key".to_string()));
+                                let Some(pubkey_b64) = publisher_hex_to_b64(local_pubkey_hex)
+                                else {
+                                    let _ = pending
+                                        .respond_to
+                                        .send(Err("invalid claim key".to_string()));
                                     return;
                                 };
-                                if should_rate_limit_publish_claim(owned_names, &pending.name) {
+                                if !local_name_record_owned_by_key(
+                                    local_records,
+                                    &pending.name,
+                                    local_pubkey_hex,
+                                ) {
                                     if let Err(err) = local_record_store
                                         .check_and_update_claim_rate_limit(&pubkey_b64, unix_ts())
                                     {
@@ -1698,9 +1833,11 @@ pub fn handle_swarm_event(
                                         );
                                     }
                                     Ok(None) => {
-                                        let _ = pending.respond_to.send(Err(
-                                            "publish blocked by moderation rule".to_string(),
-                                        ));
+                                        let _ =
+                                            pending
+                                                .respond_to
+                                                .send(Err("publish blocked by moderation rule"
+                                                    .to_string()));
                                     }
                                     Err(err) => {
                                         let _ = pending.respond_to.send(Err(err.to_string()));
@@ -2000,16 +2137,37 @@ pub fn handle_swarm_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{should_rate_limit_existing_name_claim, should_rate_limit_publish_claim};
+    use super::{local_name_record_owned_by_key, should_rate_limit_existing_name_claim};
+    use ed25519_dalek::SigningKey;
+    use lattice_daemon::names::NameRecord;
     use lattice_daemon::store::LocalRecordStore;
-    use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
+    use std::collections::HashMap;
     use tempfile::tempdir;
+
+    fn signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn signed_name_record_json(seed: u8, name: &str) -> (String, Vec<u8>) {
+        let key = signing_key(seed);
+        let pubkey_hex = hex::encode(key.verifying_key().to_bytes());
+        let record = NameRecord::new_signed(pubkey_hex.clone(), name, &key);
+        (
+            pubkey_hex,
+            serde_json::to_vec(&record).expect("serialize name record"),
+        )
+    }
 
     #[test]
     fn skips_rate_limit_for_existing_owned_name_claim() {
-        assert!(!should_rate_limit_existing_name_claim(Some("owner"), "owner"));
-        assert!(should_rate_limit_existing_name_claim(Some("other"), "owner"));
+        assert!(!should_rate_limit_existing_name_claim(
+            Some("owner"),
+            "owner"
+        ));
+        assert!(should_rate_limit_existing_name_claim(
+            Some("other"),
+            "owner"
+        ));
         assert!(should_rate_limit_existing_name_claim(None, "owner"));
     }
 
@@ -2022,8 +2180,14 @@ mod tests {
             .check_and_update_claim_rate_limit(key_b64, 10_000)
             .expect("first claim");
 
-        let owned_names = Arc::new(Mutex::new(HashSet::from([String::from("lattice")])));
-        assert!(!should_rate_limit_publish_claim(&owned_names, "lattice"));
+        let mut local_records = HashMap::new();
+        let (pubkey_hex, value) = signed_name_record_json(9, "lattice");
+        local_records.insert("name:lattice".to_string(), value);
+        assert!(local_name_record_owned_by_key(
+            &local_records,
+            "lattice",
+            &pubkey_hex,
+        ));
 
         let last_claim = store
             .get_last_claim_ts(key_b64)
