@@ -2,6 +2,7 @@ use base64::Engine as _;
 use ed25519_dalek::SigningKey;
 use lattice_core::identity::{canonical_json_bytes, SignedRecord};
 use lattice_core::moderation::{ModerationEngine, ModerationRule, RuleAction, RuleKind};
+use lattice_core::registry::{is_registry_operator, REGISTRY_OPERATOR_KEY_B64};
 use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
 use lattice_daemon::app_ownership::enforce_app_record_ownership;
 use lattice_daemon::cache::{CachePolicy, SessionBlockCache};
@@ -19,6 +20,7 @@ use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::rpc_params;
 use std::process::Command;
+use std::{fs, path::PathBuf};
 use tempfile::tempdir;
 
 fn rule(id: &str, kind: RuleKind, value: &str, action: RuleAction) -> ModerationRule {
@@ -39,6 +41,19 @@ fn signing_key(seed: u8) -> SigningKey {
 fn signed_record(seed: u8, payload: serde_json::Value) -> SignedRecord {
     let payload = canonical_json_bytes(&payload).expect("encode canonical payload");
     SignedRecord::sign(&signing_key(seed), payload)
+}
+
+fn operator_signing_key() -> Option<SigningKey> {
+    let home = std::env::var_os("HOME")?;
+    let key_path: PathBuf = PathBuf::from(home).join(".lattice").join("site_signing.key");
+    let bytes = fs::read(key_path).ok()?;
+    let key_bytes: [u8; 32] = bytes.try_into().ok()?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    if is_registry_operator(&base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())) {
+        Some(signing_key)
+    } else {
+        None
+    }
 }
 
 fn app_registration(site_name: &str, pid: u32) -> LocalAppRegistration {
@@ -120,6 +135,39 @@ fn second_app_put_from_different_key_is_rejected() {
     )
     .expect_err("different owner should fail");
     assert_eq!(err, "app record owned by a different key");
+}
+
+#[test]
+fn registry_record_put_rejects_non_operator_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [12; 32]).expect("open store");
+    let key = "app:lattice:registry:fray";
+    let value = signed_record_bytes(24, serde_json::json!({"app_id": "fray"}));
+
+    let err = enforce_app_record_ownership(&store, key, &value, 1_000)
+        .expect_err("non-operator registry publish should fail");
+    assert_eq!(
+        err,
+        "app registry records may only be published by the Lattice operator"
+    );
+}
+
+#[test]
+fn registry_record_put_accepts_operator_key() {
+    let Some(signing_key) = operator_signing_key() else {
+        return;
+    };
+    let dir = tempdir().expect("tempdir");
+    let store = LocalRecordStore::open(dir.path(), [13; 32]).expect("open store");
+    let key = "app:lattice:registry:fray";
+    let payload = canonical_json_bytes(&serde_json::json!({"app_id": "fray"}))
+        .expect("encode payload");
+    let signed = SignedRecord::sign(&signing_key, payload);
+    assert_eq!(signed.publisher_b64(), REGISTRY_OPERATOR_KEY_B64);
+    let value = serde_json::to_vec(&signed).expect("encode record");
+
+    enforce_app_record_ownership(&store, key, &value, 1_000)
+        .expect("operator registry publish should succeed");
 }
 
 #[test]

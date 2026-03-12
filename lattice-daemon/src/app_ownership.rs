@@ -1,5 +1,7 @@
 use crate::store::LocalRecordStore;
+use lattice_core::app_namespace::APP_REGISTRY_PREFIX;
 use lattice_core::identity::SignedRecord;
+use lattice_core::registry::is_registry_operator;
 
 pub fn enforce_app_record_ownership(
     local_record_store: &LocalRecordStore,
@@ -15,6 +17,15 @@ pub fn enforce_app_record_ownership(
     let signed =
         serde_json::from_str::<SignedRecord>(value_str).map_err(|_| "invalid signed record".to_string())?;
     let publisher_b64 = signed.publisher_b64();
+
+    if key.starts_with(APP_REGISTRY_PREFIX) {
+        if !is_registry_operator(&publisher_b64) {
+            return Err(
+                "app registry records may only be published by the Lattice operator".to_string(),
+            );
+        }
+        return Ok(());
+    }
 
     let existing_owner = local_record_store
         .get_app_record_owner(key)

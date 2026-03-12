@@ -1,4 +1,5 @@
 pub const APP_PREFIX: &str = "app:";
+pub const APP_REGISTRY_PREFIX: &str = "app:lattice:registry:";
 pub const FRAY_FEED_PREFIX: &str = "app:fray:feed:";
 pub const FRAY_TRUST_PREFIX: &str = "app:fray:trust:";
 pub const FRAY_DIRECTORY_KEY: &str = "app:fray:directory";
