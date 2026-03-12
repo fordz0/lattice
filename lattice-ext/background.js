@@ -382,7 +382,7 @@ if (typeof browser.webRequest !== 'undefined') {
       return {};
     },
     {
-      urls: ['http://*.loom/*', 'http://*.loom', 'https://*.loom/*', 'https://*.loom'],
+      urls: ['http://*.loom/*', 'https://*.loom/*'],
       types: ['main_frame', 'sub_frame']
     },
     ['blocking']

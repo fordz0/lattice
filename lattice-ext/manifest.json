@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Lattice",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Access .loom sites over local HTTPS on the Lattice network",
   "permissions": [
     "proxy",
@@ -23,8 +23,8 @@
     {
       "matches": [
         "https://lattice.benjf.dev/*",
-        "http://127.0.0.1:8000/*",
-        "http://localhost:8000/*"
+        "http://127.0.0.1/*",
+        "http://localhost/*"
       ],
       "js": ["site-detect.js"],
       "run_at": "document_start"

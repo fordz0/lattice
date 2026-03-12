@@ -13,6 +13,7 @@ function loadBackgroundWithFetch(fetchImpl) {
     installed: null,
     message: null,
     redirect: null,
+    redirectFilter: null,
     proxy: null,
     browserActionClicked: null,
     tabActivated: null,
@@ -59,8 +60,9 @@ function loadBackgroundWithFetch(fetchImpl) {
     },
     webRequest: {
       onBeforeRequest: {
-        addListener(fn) {
+        addListener(fn, filter) {
           listeners.redirect = fn;
+          listeners.redirectFilter = filter;
         },
       },
     },
@@ -125,6 +127,10 @@ test('background registers loom request listeners', () => {
   assert.equal(typeof listeners.installed, 'function');
   assert.equal(typeof listeners.message, 'function');
   assert.equal(typeof listeners.redirect, 'function');
+  assert.deepEqual(plain(listeners.redirectFilter), {
+    urls: ['http://*.loom/*', 'https://*.loom/*'],
+    types: ['main_frame', 'sub_frame'],
+  });
   assert.equal(typeof listeners.proxy, 'function');
   assert.equal(typeof listeners.browserActionClicked, 'function');
 });
