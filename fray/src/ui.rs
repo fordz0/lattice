@@ -695,6 +695,9 @@ pub fn page_html() -> &'static str {
             <article id="thread" style="display:none;">
               <h3 id="thread-title"></h3>
               <div id="thread-meta" class="muted"></div>
+              <div id="thread-actions" class="inline-actions hidden" style="margin-top:10px;">
+                <button id="thread-delete" class="btn-ghost" type="button">Remove Thread</button>
+              </div>
               <p id="thread-body"></p>
               <h4>Comments</h4>
               <div id="comments" class="comments"></div>
@@ -806,6 +809,10 @@ pub fn page_html() -> &'static str {
       return state.identity && state.identity.handle ? state.identity.handle : "anonymous";
     }
 
+    function canModerateFray() {
+      return !!(state.frayClaim && state.frayClaim.local);
+    }
+
     function esc(text) {
       return String(text || "")
         .replaceAll("&", "&amp;")
@@ -856,7 +863,7 @@ pub fn page_html() -> &'static str {
       return body;
     }
 
-    async function signedApi(path, body) {
+    async function signedApi(path, body, method) {
       const raw = JSON.stringify(body);
       const signed = await api("/api/v1/sign", {
         method: "POST",
@@ -867,7 +874,7 @@ pub fn page_html() -> &'static str {
         "content-type": "application/json",
         "X-Fray-Signature": signed.signature_b64
       };
-      return api(path, { method: "POST", headers, body: raw });
+      return api(path, { method: method || "POST", headers, body: raw });
     }
 
     function standingMarkup(item) {
@@ -915,6 +922,7 @@ pub fn page_html() -> &'static str {
         state.posts = data.posts || [];
         renderPosts();
         await loadFrayClaimStatus();
+        renderPosts();
         setStatus(`Loaded ${state.posts.length} threads`, "ok");
         routeTo();
         if (state.postId) await loadThread(state.postId);
@@ -933,13 +941,22 @@ pub fn page_html() -> &'static str {
         <article class="post ${p.standing === "Restricted" ? "restricted" : ""}">
           <div style="display:flex;justify-content:space-between;gap:10px;align-items:start;">
             <h3 class="post-title" data-id="${esc(p.id)}">${esc(p.title)}</h3>
-            ${standingMarkup(p)}
+            <div class="inline-actions">
+              ${standingMarkup(p)}
+              ${canModerateFray() ? `<button class="btn-ghost post-delete" type="button" data-id="${esc(p.id)}">Remove</button>` : ""}
+            </div>
           </div>
           <div class="muted">by ${authorMarkup(p)} · id ${esc(p.id.slice(0, 12))}</div>
         </article>
       `).join("");
       posts.querySelectorAll(".post-title").forEach((node) => {
         node.addEventListener("click", () => loadThread(node.dataset.id));
+      });
+      posts.querySelectorAll(".post-delete").forEach((node) => {
+        node.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deletePost(node.dataset.id);
+        });
       });
     }
 
@@ -984,6 +1001,7 @@ pub fn page_html() -> &'static str {
         state.frayClaim = null;
       }
       renderFrayClaimStatus();
+      renderPosts();
     }
 
     async function loadThread(postId) {
@@ -997,6 +1015,8 @@ pub fn page_html() -> &'static str {
         el("thread").style.display = "block";
         el("thread-title").textContent = post.title;
         el("thread-meta").innerHTML = `by ${authorMarkup(post)} · ${new Date(post.created_at * 1000).toLocaleString()} ${standingMarkup(post)}`;
+        el("thread-actions").classList.toggle("hidden", !canModerateFray());
+        el("thread-delete").dataset.id = post.id;
         el("thread-body").textContent = "";
         el("thread-body").innerHTML = post.standing === "Restricted"
           ? maybeRestrictedBody(post, post.body, `thread-${post.id}`)
@@ -1019,11 +1039,17 @@ pub fn page_html() -> &'static str {
         <div class="comment ${c.standing === "Restricted" ? "restricted" : ""}">
           <div style="display:flex;justify-content:space-between;gap:10px;align-items:start;">
             <div><strong>${authorMarkup(c)}</strong> <span class="muted">${new Date(c.created_at * 1000).toLocaleString()}</span></div>
-            ${standingMarkup(c)}
+            <div class="inline-actions">
+              ${standingMarkup(c)}
+              ${canModerateFray() ? `<button class="btn-ghost comment-delete" type="button" data-id="${esc(c.id)}">Remove</button>` : ""}
+            </div>
           </div>
           ${maybeRestrictedBody(c, c.body, `comment-${c.id}`)}
         </div>
       `).join("");
+      box.querySelectorAll(".comment-delete").forEach((button) => {
+        button.addEventListener("click", () => deleteComment(button.dataset.id));
+      });
       bindShowAnyway(box);
     }
 
@@ -1179,7 +1205,39 @@ pub fn page_html() -> &'static str {
       try {
         await api(`/api/v1/frays/${state.fray}/claim`, { method: "POST" });
         await loadFrayClaimStatus();
+        if (state.postId) await loadThread(state.postId);
         setStatus(`claimed /f/${state.fray}`, "ok");
+      } catch (err) {
+        setStatus(err.message, "err");
+      }
+    }
+
+    async function deletePost(postId) {
+      if (!postId || !canModerateFray()) return;
+      if (!confirm("Remove this thread and its comments?")) return;
+      try {
+        await signedApi(`/api/v1/frays/${state.fray}/posts/${postId}`, {}, "DELETE");
+        if (state.postId === postId) {
+          state.postId = null;
+          el("thread").style.display = "none";
+          el("thread-empty").style.display = "block";
+          el("thread-actions").classList.add("hidden");
+          el("comments").innerHTML = "";
+        }
+        setStatus("thread removed", "ok");
+        await loadPosts();
+      } catch (err) {
+        setStatus(err.message, "err");
+      }
+    }
+
+    async function deleteComment(commentId) {
+      if (!commentId || !state.postId || !canModerateFray()) return;
+      if (!confirm("Remove this comment?")) return;
+      try {
+        await signedApi(`/api/v1/frays/${state.fray}/posts/${state.postId}/comments/${commentId}`, {}, "DELETE");
+        setStatus("comment removed", "ok");
+        await loadThread(state.postId);
       } catch (err) {
         setStatus(err.message, "err");
       }
@@ -1342,6 +1400,7 @@ pub fn page_html() -> &'static str {
     el("load").addEventListener("click", () => { state.postId = null; loadPosts(); });
     el("create").addEventListener("click", createPost);
     el("comment-create").addEventListener("click", createComment);
+    el("thread-delete").addEventListener("click", () => deletePost(el("thread-delete").dataset.id));
     el("sync-pull").addEventListener("click", syncPull);
     el("sync-publish").addEventListener("click", syncPublish);
     el("claim-fray").addEventListener("click", claimFray);

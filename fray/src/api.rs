@@ -113,10 +113,17 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/frays/{fray}/posts",
             get(list_posts).post(create_post),
         )
-        .route("/api/v1/frays/{fray}/posts/{post_id}", get(get_post))
+        .route(
+            "/api/v1/frays/{fray}/posts/{post_id}",
+            get(get_post).delete(delete_post),
+        )
         .route(
             "/api/v1/frays/{fray}/posts/{post_id}/comments",
             get(list_comments).post(create_comment),
+        )
+        .route(
+            "/api/v1/frays/{fray}/posts/{post_id}/comments/{comment_id}",
+            delete(delete_comment),
         )
         .route(
             "/api/v1/frays/{fray}/claim",
@@ -136,10 +143,17 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/frays/{fray}/sync/pull", post(pull_fray))
         .route("/api/v1/admin/blocklist", post(add_blocklist_hash))
         .route("/api/f/{fray}/posts", get(list_posts).post(create_post))
-        .route("/api/f/{fray}/posts/{post_id}", get(get_post))
+        .route(
+            "/api/f/{fray}/posts/{post_id}",
+            get(get_post).delete(delete_post),
+        )
         .route(
             "/api/f/{fray}/posts/{post_id}/comments",
             get(list_comments).post(create_comment),
+        )
+        .route(
+            "/api/f/{fray}/posts/{post_id}/comments/{comment_id}",
+            delete(delete_comment),
         )
         .route("/api/f/{fray}/sync/publish", post(publish_fray))
         .route("/api/f/{fray}/sync/pull", post(pull_fray))
@@ -185,8 +199,10 @@ async fn info(State(state): State<AppState>) -> impl IntoResponse {
         "GET /api/v1/frays/{fray}/posts",
         "POST /api/v1/frays/{fray}/posts",
         "GET /api/v1/frays/{fray}/posts/{post_id}",
+        "DELETE /api/v1/frays/{fray}/posts/{post_id}",
         "GET /api/v1/frays/{fray}/posts/{post_id}/comments",
         "POST /api/v1/frays/{fray}/posts/{post_id}/comments",
+        "DELETE /api/v1/frays/{fray}/posts/{post_id}/comments/{comment_id}",
         "POST /api/v1/frays/{fray}/sync/publish",
         "POST /api/v1/frays/{fray}/sync/pull",
         "POST /api/v1/admin/blocklist"
@@ -430,6 +446,28 @@ async fn get_post(
     }
 }
 
+async fn delete_post(
+    State(state): State<AppState>,
+    Path((fray, post_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let record = match load_owned_trust_record(&state, &fray) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let authorized_keys = moderator_authorized_keys(&record.record);
+    if let Err(err) = verify_body_signature(&headers, &body, &authorized_keys) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
+    }
+
+    match state.store.delete_post(&fray, &post_id) {
+        Ok(true) => Json(json!({ "status": "ok", "post_id": post_id })).into_response(),
+        Ok(false) => not_found("post not found"),
+        Err(err) => bad_request(err.to_string()),
+    }
+}
+
 async fn create_comment(
     State(state): State<AppState>,
     Path((fray, post_id)): Path<(String, String)>,
@@ -455,6 +493,28 @@ async fn create_comment(
                 .into_response()
         }
         Err(err) if err.to_string() == "post not found" => not_found("post not found"),
+        Err(err) => bad_request(err.to_string()),
+    }
+}
+
+async fn delete_comment(
+    State(state): State<AppState>,
+    Path((fray, post_id, comment_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let record = match load_owned_trust_record(&state, &fray) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let authorized_keys = moderator_authorized_keys(&record.record);
+    if let Err(err) = verify_body_signature(&headers, &body, &authorized_keys) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": err }))).into_response();
+    }
+
+    match state.store.delete_comment(&fray, &post_id, &comment_id) {
+        Ok(true) => Json(json!({ "status": "ok", "comment_id": comment_id })).into_response(),
+        Ok(false) => not_found("comment not found"),
         Err(err) => bad_request(err.to_string()),
     }
 }
@@ -1708,7 +1768,7 @@ mod tests {
         let state = app_state();
         state
             .store
-            .set_local_handle("fordz0")
+            .set_local_handle("alice")
             .expect("set local handle");
         let app = app(state.clone());
         let response = app
@@ -1732,7 +1792,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             state.store.get_local_handle().expect("get handle"),
-            Some("fordz0".to_string())
+            Some("alice".to_string())
         );
     }
 
@@ -1741,7 +1801,7 @@ mod tests {
         let state = app_state_with_rpc_port(9);
         state
             .store
-            .set_local_handle("fordz0")
+            .set_local_handle("alice")
             .expect("set local handle");
         let app = app(state.clone());
         let response = app
@@ -1774,7 +1834,7 @@ mod tests {
             .contains("failed to reach lattice daemon RPC"));
         assert_eq!(
             state.store.get_local_handle().expect("get handle"),
-            Some("fordz0".to_string())
+            Some("alice".to_string())
         );
     }
 
@@ -1801,7 +1861,7 @@ mod tests {
         let mut post = Post {
             id: "abc123-abcdef".to_string(),
             fray: "lattice".to_string(),
-            author: "fordz0".to_string(),
+            author: "alice".to_string(),
             title: "hello".to_string(),
             body: "world".to_string(),
             created_at: unix_ts(),
@@ -1857,7 +1917,7 @@ mod tests {
             id: "abc123-fedcba".to_string(),
             fray: "lattice".to_string(),
             post_id: "post-123".to_string(),
-            author: "fordz0".to_string(),
+            author: "alice".to_string(),
             body: "hello".to_string(),
             created_at: unix_ts(),
             key_b64: None,
@@ -1912,7 +1972,7 @@ mod tests {
             id: "abc123-999999".to_string(),
             fray: "lattice".to_string(),
             post_id: "post-123".to_string(),
-            author: "fordz0".to_string(),
+            author: "alice".to_string(),
             body: "hello".to_string(),
             created_at: unix_ts(),
             key_b64: None,

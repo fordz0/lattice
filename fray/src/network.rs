@@ -675,7 +675,7 @@ mod tests {
         let post = Post {
             id: "abc123-abcdef".into(),
             fray: "lattice".into(),
-            author: "fordz0".into(),
+            author: "alice".into(),
             title: "hello".into(),
             body: body.into(),
             created_at: unix_ts(),

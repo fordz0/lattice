@@ -90,7 +90,7 @@ mod tests {
         assert!(validate_app_key("app:my-app:type:record-01").is_ok());
         assert!(validate_fray_dht_key("app:fray:feed:lattice").is_ok());
         assert!(validate_fray_dht_key("app:fray:trust:lattice").is_ok());
-        assert!(validate_fray_dht_key("app:fray:identity:fordz0").is_ok());
+        assert!(validate_fray_dht_key("app:fray:identity:alice").is_ok());
         assert!(validate_fray_dht_key("app:fray:directory").is_ok());
     }
 

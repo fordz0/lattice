@@ -160,9 +160,9 @@ mod tests {
     #[test]
     fn parses_user() {
         assert_eq!(
-            FrayRoute::parse("/u/fordz0").unwrap(),
+            FrayRoute::parse("/u/alice").unwrap(),
             FrayRoute::User {
-                user: Username("fordz0".into())
+                user: Username("alice".into())
             }
         );
     }

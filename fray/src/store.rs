@@ -210,6 +210,74 @@ impl FrayStore {
         self.write_comment(comment, false)
     }
 
+    pub fn delete_post(&self, fray: &str, post_id: &str) -> Result<bool> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        validate_object_id(post_id)?;
+        let Some(post) = self.load_post_record(post_id)? else {
+            return Ok(false);
+        };
+        if post.fray != fray_name.as_str() {
+            return Ok(false);
+        }
+
+        let comment_prefix = comment_index_prefix(fray_name.as_str(), post_id);
+        let mut comment_entries = Vec::new();
+        for item in self.db.scan_prefix(comment_prefix.as_bytes()) {
+            let (idx_key, comment_id_value) = item.context("failed to iterate comment index")?;
+            let comment_id = std::str::from_utf8(&comment_id_value)
+                .context("invalid comment index value encoding")?
+                .to_string();
+            comment_entries.push((idx_key, comment_id));
+        }
+
+        for (idx_key, comment_id) in comment_entries {
+            self.db
+                .remove(idx_key)
+                .context("failed to remove comment index")?;
+            self.db
+                .remove(comment_key(&comment_id).as_bytes())
+                .context("failed to remove comment")?;
+        }
+
+        self.db
+            .remove(post_key(post_id).as_bytes())
+            .context("failed to remove post")?;
+        self.db
+            .remove(post_index_key(&post.fray, post.created_at, &post.id)?.as_bytes())
+            .context("failed to remove post index")?;
+        self.db.flush().context("failed to flush post delete")?;
+        Ok(true)
+    }
+
+    pub fn delete_comment(&self, fray: &str, post_id: &str, comment_id: &str) -> Result<bool> {
+        let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
+        validate_object_id(post_id)?;
+        validate_object_id(comment_id)?;
+        let Some(comment) = self.load_comment_record(comment_id)? else {
+            return Ok(false);
+        };
+        if comment.fray != fray_name.as_str() || comment.post_id != post_id {
+            return Ok(false);
+        }
+
+        self.db
+            .remove(comment_key(comment_id).as_bytes())
+            .context("failed to remove comment")?;
+        self.db
+            .remove(
+                comment_index_key(
+                    &comment.fray,
+                    &comment.post_id,
+                    comment.created_at,
+                    &comment.id,
+                )?
+                .as_bytes(),
+            )
+            .context("failed to remove comment index")?;
+        self.db.flush().context("failed to flush comment delete")?;
+        Ok(true)
+    }
+
     pub fn flush(&self) -> Result<()> {
         self.db.flush().context("failed to flush fray db")?;
         Ok(())
@@ -405,6 +473,30 @@ impl FrayStore {
     }
 
     fn get_comment(&self, comment_id: &str) -> Result<Option<Comment>> {
+        let Some(comment) = self.load_comment_record(comment_id)? else {
+            return Ok(None);
+        };
+        if comment.hidden {
+            return Ok(None);
+        }
+        Ok(Some(comment))
+    }
+
+    fn load_post_record(&self, post_id: &str) -> Result<Option<Post>> {
+        validate_object_id(post_id)?;
+        let key = post_key(post_id);
+        let Some(value) = self
+            .db
+            .get(key.as_bytes())
+            .context("failed to read post from db")?
+        else {
+            return Ok(None);
+        };
+        let post: Post = serde_json::from_slice(&value).context("failed to decode post")?;
+        Ok(Some(post))
+    }
+
+    fn load_comment_record(&self, comment_id: &str) -> Result<Option<Comment>> {
         validate_object_id(comment_id)?;
         let key = comment_key(comment_id);
         let Some(value) = self
@@ -416,9 +508,6 @@ impl FrayStore {
         };
         let comment: Comment =
             serde_json::from_slice(&value).context("failed to decode comment")?;
-        if comment.hidden {
-            return Ok(None);
-        }
         Ok(Some(comment))
     }
 
@@ -638,7 +727,7 @@ mod tests {
         let post = store
             .create_post(
                 "lattice",
-                "fordz0",
+                "alice",
                 CreatePostRequest {
                     title: "hello".to_string(),
                     body: "world".to_string(),
@@ -650,7 +739,7 @@ mod tests {
             .create_comment(
                 "lattice",
                 &post.id,
-                "fordz0",
+                "alice",
                 CreateCommentRequest {
                     body: "nice".to_string(),
                 },
@@ -672,6 +761,91 @@ mod tests {
             .expect("list comments");
         assert_eq!(listed_comments.len(), 1);
         assert_eq!(listed_comments[0].id, comment.id);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn delete_post_removes_post_and_comments() {
+        let path = temp_db_path();
+        let store = FrayStore::open(&path).expect("open db");
+
+        let post = store
+            .create_post(
+                "lattice",
+                "alice",
+                CreatePostRequest {
+                    title: "hello".to_string(),
+                    body: "world".to_string(),
+                },
+            )
+            .expect("create post");
+        store
+            .create_comment(
+                "lattice",
+                &post.id,
+                "alice",
+                CreateCommentRequest {
+                    body: "nice".to_string(),
+                },
+            )
+            .expect("create comment");
+
+        assert!(store.delete_post("lattice", &post.id).expect("delete post"));
+        assert!(store
+            .get_post("lattice", &post.id)
+            .expect("get post after delete")
+            .is_none());
+        assert!(store
+            .list_comments_full("lattice", &post.id, 20)
+            .expect("list comments after delete")
+            .is_empty());
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn delete_comment_removes_only_target_comment() {
+        let path = temp_db_path();
+        let store = FrayStore::open(&path).expect("open db");
+
+        let post = store
+            .create_post(
+                "lattice",
+                "alice",
+                CreatePostRequest {
+                    title: "hello".to_string(),
+                    body: "world".to_string(),
+                },
+            )
+            .expect("create post");
+        let first = store
+            .create_comment(
+                "lattice",
+                &post.id,
+                "alice",
+                CreateCommentRequest {
+                    body: "first".to_string(),
+                },
+            )
+            .expect("create first comment");
+        let second = store
+            .create_comment(
+                "lattice",
+                &post.id,
+                "alice",
+                CreateCommentRequest {
+                    body: "second".to_string(),
+                },
+            )
+            .expect("create second comment");
+
+        assert!(store
+            .delete_comment("lattice", &post.id, &first.id)
+            .expect("delete comment"));
+        let listed = store
+            .list_comments_full("lattice", &post.id, 20)
+            .expect("list comments");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, second.id);
         let _ = std::fs::remove_dir_all(path);
     }
 
@@ -706,10 +880,10 @@ mod tests {
     fn local_handle_roundtrip() {
         let path = temp_db_path();
         let store = FrayStore::open(&path).expect("open db");
-        store.set_local_handle("fordz0").expect("set handle");
+        store.set_local_handle("alice").expect("set handle");
         assert_eq!(
             store.get_local_handle().expect("get handle"),
-            Some("fordz0".to_string())
+            Some("alice".to_string())
         );
         let _ = std::fs::remove_dir_all(path);
     }

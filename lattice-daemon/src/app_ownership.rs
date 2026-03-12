@@ -110,8 +110,8 @@ mod tests {
     fn reclaiming_owned_fray_identity_skips_claim_rate_limit() {
         let dir = tempdir().expect("tempdir");
         let store = LocalRecordStore::open(dir.path(), [11; 32]).expect("open store");
-        let key = "app:fray:identity:fordz0";
-        let first_value = signed_record_json(7, br#"{"handle":"fordz0","display_name":"Ford"}"#);
+        let key = "app:fray:identity:alice";
+        let first_value = signed_record_json(7, br#"{"handle":"alice","display_name":"Alice"}"#);
         store
             .put_record(key, &first_value, false)
             .expect("seed record");
@@ -122,7 +122,7 @@ mod tests {
             .expect("seed claim window");
 
         let updated_value =
-            signed_record_json(7, br#"{"handle":"fordz0","display_name":"Ford Z"}"#);
+            signed_record_json(7, br#"{"handle":"alice","display_name":"Alice Z"}"#);
         enforce_app_record_ownership(&store, key, &updated_value, 30_000)
             .expect("owned update should not rate limit");
 

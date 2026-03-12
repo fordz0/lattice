@@ -81,8 +81,8 @@ mod tests {
 
     fn valid_record() -> FrayHandleRecord {
         FrayHandleRecord {
-            handle: "fordz0".to_string(),
-            display_name: Some("Ben".to_string()),
+            handle: "alice".to_string(),
+            display_name: Some("Alice".to_string()),
             bio: Some("hello".to_string()),
             claimed_at: now_secs(),
             previous_handle: None,
