@@ -196,7 +196,7 @@ async fn serve_site(
         return fail(plain(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"));
     }
 
-    let file = match find_manifest_file(&manifest.files, &request_path) {
+    let file = match find_manifest_file_or_index(&manifest.files, &request_path) {
         Some(file) => file,
         None => return fail(plain(StatusCode::NOT_FOUND, "site not found on Lattice")),
     };
@@ -708,6 +708,14 @@ fn find_manifest_file<'a>(files: &'a [FileEntry], request_path: &str) -> Option<
     None
 }
 
+fn find_manifest_file_or_index<'a>(
+    files: &'a [FileEntry],
+    request_path: &str,
+) -> Option<&'a FileEntry> {
+    find_manifest_file(files, request_path)
+        .or_else(|| files.iter().find(|f| f.path == "index.html"))
+}
+
 fn manifest_path_fallbacks(request_path: &str) -> Vec<String> {
     if request_path == "index.html" {
         return Vec::new();
@@ -967,6 +975,13 @@ mod tests {
         let files = vec![file("index.html"), file("projects.html")];
         let matched = find_manifest_file(&files, "projects").expect("match");
         assert_eq!(matched.path, "projects.html");
+    }
+
+    #[test]
+    fn falls_back_to_site_index_for_spa_routes() {
+        let files = vec![file("index.html"), file("assets/app.js")];
+        let matched = find_manifest_file_or_index(&files, "f/lattice/thread-1").expect("match");
+        assert_eq!(matched.path, "index.html");
     }
 
     #[test]
