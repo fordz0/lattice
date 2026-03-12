@@ -23,8 +23,8 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -39,6 +39,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Up,
+    Down,
     Status,
     Peers,
     Put {
@@ -95,6 +97,11 @@ enum Command {
     },
     Install {
         app_id: String,
+    },
+    Update {
+        app_id: Option<String>,
+        #[arg(long)]
+        all: bool,
     },
     Uninstall {
         app_id: String,
@@ -161,6 +168,12 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Up => {
+            up(cli.rpc_port).await?;
+        }
+        Command::Down => {
+            down()?;
+        }
         Command::Status => {
             let client = RpcClient::new(cli.rpc_port);
             let info = client.node_info().await?;
@@ -446,6 +459,9 @@ async fn run() -> Result<()> {
         Command::Install { app_id } => {
             install_app(cli.rpc_port, &app_id).await?;
         }
+        Command::Update { app_id, all } => {
+            update_apps(cli.rpc_port, app_id.as_deref(), all).await?;
+        }
         Command::Uninstall { app_id } => {
             uninstall_app(&app_id)?;
         }
@@ -642,12 +658,55 @@ fn lattice_apps_dir() -> Result<PathBuf> {
     Ok(lattice_data_dir()?.join("apps"))
 }
 
+fn daemon_pid_path() -> Result<PathBuf> {
+    Ok(lattice_data_dir()?.join("daemon.pid"))
+}
+
 fn installed_app_path(app_id: &str) -> Result<PathBuf> {
     Ok(lattice_apps_dir()?.join(app_id))
 }
 
 fn installed_app_meta_path(app_id: &str) -> Result<PathBuf> {
     Ok(lattice_apps_dir()?.join(format!("{app_id}.json")))
+}
+
+fn read_installed_app_meta(app_id: &str) -> Result<Option<InstalledAppMeta>> {
+    let path = installed_app_meta_path(app_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let meta = serde_json::from_slice::<InstalledAppMeta>(&bytes)
+        .with_context(|| format!("failed to decode {}", path.display()))?;
+    Ok(Some(meta))
+}
+
+fn installed_app_ids() -> Result<Vec<String>> {
+    let apps_dir = lattice_apps_dir()?;
+    if !apps_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut app_ids = Vec::new();
+    for entry in
+        fs::read_dir(&apps_dir).with_context(|| format!("failed to read {}", apps_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.ends_with(".json") {
+            continue;
+        }
+        app_ids.push(file_name.to_string());
+    }
+    app_ids.sort();
+    app_ids.dedup();
+    Ok(app_ids)
 }
 
 #[derive(Debug, Clone)]
@@ -692,6 +751,14 @@ fn user_service_file_path(app_id: &str) -> Result<PathBuf> {
         .join(format!("lattice-{app_id}.service")))
 }
 
+fn daemon_system_service_file_path() -> PathBuf {
+    system_service_file_path("daemon")
+}
+
+fn daemon_user_service_file_path() -> Result<PathBuf> {
+    user_service_file_path("daemon")
+}
+
 fn detect_service_mode(app_id: &str) -> Result<Option<ServiceMode>> {
     let system_path = system_service_file_path(app_id);
     let daemon_system_service = Path::new("/etc/systemd/system/lattice-daemon.service");
@@ -713,6 +780,44 @@ fn detect_service_mode(app_id: &str) -> Result<Option<ServiceMode>> {
     Ok(None)
 }
 
+fn detect_daemon_service_mode() -> Result<Option<ServiceMode>> {
+    let system_path = daemon_system_service_file_path();
+    if system_path.exists() {
+        return Ok(Some(ServiceMode::System {
+            service_path: system_path,
+        }));
+    }
+
+    let user_path = daemon_user_service_file_path()?;
+    if let Some(parent) = user_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        return Ok(Some(ServiceMode::User {
+            service_path: user_path,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn detect_existing_daemon_service_mode() -> Result<Option<ServiceMode>> {
+    let system_path = daemon_system_service_file_path();
+    if system_path.exists() {
+        return Ok(Some(ServiceMode::System {
+            service_path: system_path,
+        }));
+    }
+
+    let user_path = daemon_user_service_file_path()?;
+    if user_path.exists() {
+        return Ok(Some(ServiceMode::User {
+            service_path: user_path,
+        }));
+    }
+
+    Ok(None)
+}
+
 fn installed_manual_instructions(install_path: &Path) {
     println!("binary installed at {}", install_path.display());
     println!("to start manually: {}", install_path.display());
@@ -722,43 +827,261 @@ fn installed_manual_instructions(install_path: &Path) {
     );
 }
 
+fn render_daemon_systemd_service(mode: &ServiceMode, daemon_path: &Path, rpc_port: u16) -> String {
+    match mode {
+        ServiceMode::System { .. } => {
+            let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+            format!(
+                "[Unit]\nDescription=Lattice Daemon\nAfter=network.target\n\n[Service]\nType=simple\nUser={user}\nExecStart={} --rpc-port {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
+                daemon_path.display(),
+                rpc_port
+            )
+        }
+        ServiceMode::User { .. } => format!(
+            "[Unit]\nDescription=Lattice Daemon\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={} --rpc-port {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+            daemon_path.display(),
+            rpc_port
+        ),
+    }
+}
+
+fn find_executable_in_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn daemon_binary_path() -> Result<PathBuf> {
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(parent) = current.parent() {
+            let sibling = parent.join("lattice-daemon");
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+        }
+    }
+
+    find_executable_in_path("lattice-daemon")
+        .ok_or_else(|| anyhow!("lattice-daemon not found in PATH or next to lattice"))
+}
+
+async fn wait_for_daemon(rpc_port: u16, timeout: Duration) -> Result<Value> {
+    let client = RpcClient::new(rpc_port);
+    let start = std::time::Instant::now();
+    loop {
+        match client.node_info().await {
+            Ok(info) => return Ok(info),
+            Err(err) if err.downcast_ref::<DaemonNotRunning>().is_some() => {}
+            Err(err) => return Err(err),
+        }
+
+        if start.elapsed() >= timeout {
+            bail!("timed out waiting for lattice-daemon to become ready");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn write_daemon_pid(pid: u32) -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+    if let Some(parent) = pid_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&pid_path, pid.to_string())
+        .with_context(|| format!("failed to write {}", pid_path.display()))?;
+    Ok(())
+}
+
+fn pid_looks_like_lattice_daemon(pid: &str) -> bool {
+    #[cfg(unix)]
+    {
+        if let Ok(output) = ProcessCommand::new("ps")
+            .args(["-p", pid, "-o", "command="])
+            .output()
+        {
+            if output.status.success() {
+                let command = String::from_utf8_lossy(&output.stdout);
+                return command.contains("lattice-daemon");
+            }
+        }
+    }
+
+    false
+}
+
+fn clear_daemon_pid() -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+    if pid_path.exists() {
+        fs::remove_file(&pid_path)
+            .with_context(|| format!("failed to remove {}", pid_path.display()))?;
+    }
+    Ok(())
+}
+
+fn stop_manual_daemon() -> Result<bool> {
+    let pid_path = daemon_pid_path()?;
+    if !pid_path.exists() {
+        return Ok(false);
+    }
+    let pid = fs::read_to_string(&pid_path)
+        .with_context(|| format!("failed to read {}", pid_path.display()))?
+        .trim()
+        .to_string();
+    if pid.is_empty() {
+        clear_daemon_pid()?;
+        return Ok(false);
+    }
+
+    if !pid_looks_like_lattice_daemon(&pid) {
+        clear_daemon_pid()?;
+        return Ok(false);
+    }
+
+    let status = ProcessCommand::new("kill")
+        .arg(&pid)
+        .status()
+        .with_context(|| format!("failed to run kill {pid}"))?;
+    clear_daemon_pid()?;
+    if !status.success() {
+        bail!("failed to stop daemon process {pid}");
+    }
+    Ok(true)
+}
+
+async fn up(rpc_port: u16) -> Result<()> {
+    if let Ok(info) = RpcClient::new(rpc_port).node_info().await {
+        println!("lattice-daemon is already running");
+        print_status(&info);
+        return Ok(());
+    }
+
+    if std::env::consts::OS == "linux" {
+        let daemon_path = daemon_binary_path()?;
+        if let Some(mode) = detect_daemon_service_mode()? {
+            let service_path = mode.service_path().to_path_buf();
+            if matches!(mode, ServiceMode::User { .. }) {
+                let service = render_daemon_systemd_service(&mode, &daemon_path, rpc_port);
+                fs::write(&service_path, service)
+                    .with_context(|| format!("failed to write {}", service_path.display()))?;
+            }
+            let unit = "lattice-daemon.service";
+            let mut service_ok = true;
+            for args in [
+                vec!["daemon-reload"],
+                vec!["enable", unit],
+                vec!["start", unit],
+            ] {
+                let systemctl_args = mode.systemctl_args(&args);
+                if let Err(err) = run_systemctl(&systemctl_args) {
+                    service_ok = false;
+                    eprintln!("warning: {err}");
+                    break;
+                }
+            }
+            if service_ok {
+                clear_daemon_pid()?;
+                let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+                println!("lattice-daemon enabled and started");
+                print_status(&info);
+                return Ok(());
+            }
+        }
+    }
+
+    let daemon_path = daemon_binary_path()?;
+    let child = ProcessCommand::new(&daemon_path)
+        .arg("--rpc-port")
+        .arg(rpc_port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to start {}", daemon_path.display()))?;
+    write_daemon_pid(child.id())?;
+    let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+    println!("lattice-daemon started");
+    print_status(&info);
+    Ok(())
+}
+
+fn down() -> Result<()> {
+    if std::env::consts::OS == "linux" {
+        if let Some(mode) = detect_existing_daemon_service_mode()? {
+            let args = mode.systemctl_args(["stop", "lattice-daemon.service"].as_slice());
+            run_systemctl(&args)?;
+            clear_daemon_pid()?;
+            println!("lattice-daemon stopped");
+            return Ok(());
+        }
+    }
+
+    if stop_manual_daemon()? {
+        println!("lattice-daemon stopped");
+        return Ok(());
+    }
+
+    println!("lattice-daemon is not running");
+    Ok(())
+}
+
 async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
-    let value = RpcClient::new(rpc_port)
-        .get_record(&format!("{APP_REGISTRY_PREFIX}{app_id}"))
-        .await?;
+    install_or_update_app(rpc_port, app_id, false).await
+}
 
-    if value.is_null() {
-        println!("app {app_id} not found in registry");
+async fn update_apps(rpc_port: u16, app_id: Option<&str>, all: bool) -> Result<()> {
+    if all && app_id.is_some() {
+        bail!("use either `lattice update <app>` or `lattice update --all`");
+    }
+    if !all && app_id.is_none() {
+        bail!("specify an app id or use --all");
+    }
+
+    if all {
+        let app_ids = installed_app_ids()?;
+        if app_ids.is_empty() {
+            println!("No apps installed");
+            return Ok(());
+        }
+        for app_id in app_ids {
+            install_or_update_app(rpc_port, &app_id, true).await?;
+        }
         return Ok(());
     }
 
-    let value = value
-        .as_str()
-        .ok_or_else(|| anyhow!("app registry record was not a string"))?;
-    let signed: SignedRecord =
-        serde_json::from_str(value).context("failed to decode signed app registry record")?;
-    if !signed.verify() {
-        bail!("invalid signed app registry record");
+    let app_id = app_id.expect("validated above");
+    if read_installed_app_meta(app_id)?.is_none() && !installed_app_path(app_id)?.exists() {
+        bail!("app {app_id} is not installed");
     }
-    if !is_registry_operator(&signed.publisher_b64()) {
-        println!("registry record has invalid operator signature, refusing to install");
-        return Ok(());
-    }
-    let record: AppRegistryRecord = signed
-        .payload_json()
-        .context("failed to decode app registry payload")?;
-    validate_app_registry_record(&record)
-        .map_err(|err| anyhow!("invalid app registry record: {err}"))?;
-    if record.app_id != app_id {
-        bail!("registry app id mismatch");
-    }
+    install_or_update_app(rpc_port, app_id, true).await
+}
+
+async fn install_or_update_app(rpc_port: u16, app_id: &str, update_only: bool) -> Result<()> {
+    let record = fetch_app_registry_record(rpc_port, app_id).await?;
 
     let Some((url, sha256)) = platform_asset(&record) else {
         println!("no binary available for your platform");
         return Ok(());
     };
 
-    println!("installing {app_id} v{}...", record.version);
+    let installed_meta = read_installed_app_meta(app_id)?;
+    if update_only {
+        if let Some(meta) = &installed_meta {
+            if meta.version == record.version {
+                println!("{app_id} is already up to date ({})", meta.version);
+                return Ok(());
+            }
+        }
+        println!("updating {app_id} to v{}...", record.version);
+    } else {
+        println!("installing {app_id} v{}...", record.version);
+    }
+
     fs::create_dir_all(lattice_apps_dir()?).context("failed to create app install directory")?;
 
     let temp_path = std::env::temp_dir().join(format!(
@@ -846,6 +1169,37 @@ async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn fetch_app_registry_record(rpc_port: u16, app_id: &str) -> Result<AppRegistryRecord> {
+    let value = RpcClient::new(rpc_port)
+        .get_record(&format!("{APP_REGISTRY_PREFIX}{app_id}"))
+        .await?;
+
+    if value.is_null() {
+        bail!("app {app_id} not found in registry");
+    }
+
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow!("app registry record was not a string"))?;
+    let signed: SignedRecord =
+        serde_json::from_str(value).context("failed to decode signed app registry record")?;
+    if !signed.verify() {
+        bail!("invalid signed app registry record");
+    }
+    if !is_registry_operator(&signed.publisher_b64()) {
+        bail!("registry record has invalid operator signature");
+    }
+    let record: AppRegistryRecord = signed
+        .payload_json()
+        .context("failed to decode app registry payload")?;
+    validate_app_registry_record(&record)
+        .map_err(|err| anyhow!("invalid app registry record: {err}"))?;
+    if record.app_id != app_id {
+        bail!("registry app id mismatch");
+    }
+    Ok(record)
 }
 
 fn uninstall_app(app_id: &str) -> Result<()> {
