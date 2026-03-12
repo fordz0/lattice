@@ -1,3 +1,4 @@
+use crate::handle::validate_handle;
 use crate::model::{
     Comment, CommentSummary, CreateCommentRequest, CreatePostRequest, Post, PostSummary,
 };
@@ -16,17 +17,24 @@ const TRUST_PREFIX: &str = "trust:";
 const TRUST_RECORD_PREFIX: &str = "trust_record:";
 const DIRECTORY_KEY: &str = "directory:current";
 const OWNERSHIP_PREFIX: &str = "owner:";
+const LOCAL_HANDLE_KEY: &[u8] = b"local_handle";
+const LOCAL_DISPLAY_NAME_KEY: &[u8] = b"local_display_name";
+const LOCAL_BIO_KEY: &[u8] = b"local_bio";
 
 #[derive(Clone)]
 pub struct FrayStore {
     db: sled::Db,
+    identity: sled::Tree,
 }
 
 impl FrayStore {
     pub fn open(path: &Path) -> Result<Self> {
         let db = sled::open(path)
             .with_context(|| format!("failed to open fray db at {}", path.display()))?;
-        Ok(Self { db })
+        let identity = db
+            .open_tree("fray_identity")
+            .context("failed to open fray identity tree")?;
+        Ok(Self { db, identity })
     }
 
     pub fn create_post(&self, fray: &str, req: CreatePostRequest) -> Result<Post> {
@@ -44,7 +52,8 @@ impl FrayStore {
             title: req.title.trim().to_string(),
             body: req.body.trim().to_string(),
             created_at,
-            publisher_key_b64: None,
+            key_b64: None,
+            signature_b64: None,
             hidden: false,
         };
 
@@ -128,7 +137,8 @@ impl FrayStore {
             author: author.as_str().to_string(),
             body: req.body.trim().to_string(),
             created_at,
-            publisher_key_b64: None,
+            key_b64: None,
+            signature_b64: None,
             hidden: false,
         };
 
@@ -201,6 +211,47 @@ impl FrayStore {
 
     pub fn flush(&self) -> Result<()> {
         self.db.flush().context("failed to flush fray db")?;
+        Ok(())
+    }
+
+    pub fn get_local_handle(&self) -> Result<Option<String>> {
+        self.get_identity_value(LOCAL_HANDLE_KEY)
+    }
+
+    pub fn set_local_handle(&self, handle: &str) -> Result<()> {
+        validate_handle(handle).map_err(anyhow::Error::msg)?;
+        self.set_identity_value(LOCAL_HANDLE_KEY, handle)
+    }
+
+    pub fn get_local_display_name(&self) -> Result<Option<String>> {
+        self.get_identity_value(LOCAL_DISPLAY_NAME_KEY)
+    }
+
+    pub fn set_local_display_name(&self, name: &str) -> Result<()> {
+        self.set_identity_value(LOCAL_DISPLAY_NAME_KEY, name)
+    }
+
+    pub fn get_local_bio(&self) -> Result<Option<String>> {
+        self.get_identity_value(LOCAL_BIO_KEY)
+    }
+
+    pub fn set_local_bio(&self, bio: &str) -> Result<()> {
+        self.set_identity_value(LOCAL_BIO_KEY, bio)
+    }
+
+    pub fn clear_local_identity(&self) -> Result<()> {
+        self.identity
+            .remove(LOCAL_HANDLE_KEY)
+            .context("failed to remove local handle")?;
+        self.identity
+            .remove(LOCAL_DISPLAY_NAME_KEY)
+            .context("failed to remove local display name")?;
+        self.identity
+            .remove(LOCAL_BIO_KEY)
+            .context("failed to remove local bio")?;
+        self.identity
+            .flush()
+            .context("failed to flush fray identity tree")?;
         Ok(())
     }
 
@@ -408,6 +459,36 @@ impl FrayStore {
         }
         Ok(())
     }
+
+    fn get_identity_value(&self, key: &[u8]) -> Result<Option<String>> {
+        let Some(value) = self
+            .identity
+            .get(key)
+            .context("failed to read fray identity value")?
+        else {
+            return Ok(None);
+        };
+        let value = std::str::from_utf8(&value)
+            .context("fray identity value is not valid utf-8")?
+            .to_string();
+        Ok(Some(value))
+    }
+
+    fn set_identity_value(&self, key: &[u8], value: &str) -> Result<()> {
+        if value.is_empty() {
+            self.identity
+                .remove(key)
+                .context("failed to clear fray identity value")?;
+        } else {
+            self.identity
+                .insert(key, value.as_bytes())
+                .context("failed to write fray identity value")?;
+        }
+        self.identity
+            .flush()
+            .context("failed to flush fray identity tree")?;
+        Ok(())
+    }
 }
 
 fn validate_title(title: &str) -> Result<()> {
@@ -593,6 +674,26 @@ mod tests {
         let standings = store.list_key_standings("lattice").expect("list standings");
         assert_eq!(standings.len(), 1);
         assert_eq!(standings[0].key_b64, "key-abc");
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn local_handle_is_none_when_unset() {
+        let path = temp_db_path();
+        let store = FrayStore::open(&path).expect("open db");
+        assert_eq!(store.get_local_handle().expect("get handle"), None);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn local_handle_roundtrip() {
+        let path = temp_db_path();
+        let store = FrayStore::open(&path).expect("open db");
+        store.set_local_handle("fordz0").expect("set handle");
+        assert_eq!(
+            store.get_local_handle().expect("get handle"),
+            Some("fordz0".to_string())
+        );
         let _ = std::fs::remove_dir_all(path);
     }
 }

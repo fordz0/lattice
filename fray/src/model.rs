@@ -9,7 +9,9 @@ pub struct Post {
     pub body: String,
     pub created_at: u64,
     #[serde(default)]
-    pub publisher_key_b64: Option<String>,
+    pub key_b64: Option<String>,
+    #[serde(default)]
+    pub signature_b64: Option<String>,
     #[serde(default)]
     pub hidden: bool,
 }
@@ -30,7 +32,9 @@ pub struct Comment {
     pub body: String,
     pub created_at: u64,
     #[serde(default)]
-    pub publisher_key_b64: Option<String>,
+    pub key_b64: Option<String>,
+    #[serde(default)]
+    pub signature_b64: Option<String>,
     #[serde(default)]
     pub hidden: bool,
 }

@@ -2,6 +2,7 @@ pub const APP_PREFIX: &str = "app:";
 pub const APP_REGISTRY_PREFIX: &str = "app:lattice:registry:";
 pub const FRAY_FEED_PREFIX: &str = "app:fray:feed:";
 pub const FRAY_TRUST_PREFIX: &str = "app:fray:trust:";
+pub const FRAY_IDENTITY_PREFIX: &str = "app:fray:identity:";
 pub const FRAY_DIRECTORY_KEY: &str = "app:fray:directory";
 const MAX_APP_ID_LEN: usize = 32;
 const MAX_RECORD_TYPE_LEN: usize = 32;
@@ -31,10 +32,13 @@ pub fn validate_fray_dht_key(key: &str) -> Result<(), String> {
         return Ok(());
     }
     validate_app_key(key)?;
-    if key.starts_with(FRAY_FEED_PREFIX) || key.starts_with(FRAY_TRUST_PREFIX) {
+    if key.starts_with(FRAY_FEED_PREFIX)
+        || key.starts_with(FRAY_TRUST_PREFIX)
+        || key.starts_with(FRAY_IDENTITY_PREFIX)
+    {
         return Ok(());
     }
-    Err("fray only permits app:fray:feed:{fray_name}, app:fray:trust:{fray_name}, or app:fray:directory DHT keys".to_string())
+    Err("fray only permits app:fray:feed:{fray_name}, app:fray:trust:{fray_name}, app:fray:identity:{handle}, or app:fray:directory DHT keys".to_string())
 }
 
 fn validate_app_id(app_id: &str) -> Result<(), String> {
@@ -86,6 +90,7 @@ mod tests {
         assert!(validate_app_key("app:my-app:type:record-01").is_ok());
         assert!(validate_fray_dht_key("app:fray:feed:lattice").is_ok());
         assert!(validate_fray_dht_key("app:fray:trust:lattice").is_ok());
+        assert!(validate_fray_dht_key("app:fray:identity:fordz0").is_ok());
         assert!(validate_fray_dht_key("app:fray:directory").is_ok());
     }
 

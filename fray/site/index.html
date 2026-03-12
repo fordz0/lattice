@@ -158,6 +158,34 @@
       align-items: center;
     }
 
+    .identity-shell {
+      position: relative;
+    }
+
+    .identity-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 240px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .identity-dropdown {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 8px);
+      width: 320px;
+      padding: 14px;
+      border-radius: 12px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 10px;
+    }
+
     .shell {
       display: grid;
       grid-template-columns: 240px minmax(0, 1fr);
@@ -457,6 +485,61 @@
       margin-top: 8px;
     }
 
+    .banner {
+      margin-bottom: 16px;
+      padding: 12px 14px;
+      border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--warn) 10%, transparent);
+      color: var(--text);
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: rgba(1, 4, 9, 0.72);
+      backdrop-filter: blur(8px);
+    }
+
+    .modal-card {
+      width: min(560px, 100%);
+      padding: 20px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 12px;
+    }
+
+    .inline-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .profile-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .author-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .verify {
+      color: var(--good);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
     code {
       font-family: "SFMono-Regular", Consolas, monospace;
       font-size: 12px;
@@ -494,8 +577,28 @@
         <button id="theme-toggle" class="btn-ghost" type="button" aria-label="Toggle theme">☀</button>
         <button id="sync-pull" class="btn-ghost" type="button">Pull Network Feed</button>
         <button id="sync-publish" class="btn-ghost" type="button">Publish Feed</button>
+        <div class="identity-shell">
+          <button id="identity-toggle" class="btn-ghost identity-button" type="button">anonymous 🔑</button>
+          <div id="identity-dropdown" class="identity-dropdown hidden">
+            <div>
+              <div class="eyebrow">Node identity</div>
+              <div id="identity-handle" class="title">anonymous</div>
+              <div id="identity-display" class="muted"></div>
+            </div>
+            <div id="identity-bio" class="muted"></div>
+            <div class="muted">Key <code id="identity-key"></code></div>
+            <div class="inline-actions">
+              <button id="identity-edit" class="btn-primary" type="button">Edit Profile</button>
+              <button id="identity-transfer" class="btn-ghost" type="button">Transfer Handle</button>
+            </div>
+          </div>
+        </div>
       </div>
     </header>
+
+    <div id="identity-banner" class="banner hidden">
+      No handle claimed — your posts will be anonymous.
+    </div>
 
     <div class="shell">
       <aside class="sidebar">
@@ -574,6 +677,20 @@
         <section id="view-directory" class="card hidden">
           <h2 class="title">Directory</h2>
           <div class="muted">Listed frays published into the shared directory.</div>
+          <div class="card" style="margin-top:12px;">
+            <h3 class="title">Publish Directory Entry</h3>
+            <div class="stack">
+              <select id="directory-status">
+                <option selected>Listed</option>
+                <option>Unlisted</option>
+                <option>Banned</option>
+              </select>
+              <input id="directory-description" placeholder="short description">
+              <div class="inline-actions">
+                <button id="directory-publish" class="btn-primary" type="button">Publish Entry</button>
+              </div>
+            </div>
+          </div>
           <div id="directory-list" class="directory-list" style="margin-top:12px;"></div>
         </section>
 
@@ -591,10 +708,22 @@
             </div>
             <input id="trust-label" placeholder="label (optional)">
             <input id="trust-reason" placeholder="reason (used for Restricted)">
-            <div class="muted">Signed moderator actions are not wired into the browser yet. Use signed API requests locally for mutations.</div>
+            <div class="muted">Moderator actions are signed locally by your node before they are published.</div>
+            <div class="inline-actions">
+              <button id="trust-save" class="btn-primary" type="button">Save Standing</button>
+            </div>
             <div class="trust-list" id="trust-list"></div>
             <h3 class="title" style="margin-top:8px;">Moderators</h3>
+            <div class="inline-actions">
+              <input id="moderator-key" placeholder="moderator key (base64)">
+              <button id="moderator-add" class="btn-primary" type="button">Add Moderator</button>
+            </div>
             <div class="mods-list" id="mods-list"></div>
+            <h3 class="title" style="margin-top:8px;">Admin Blocklist</h3>
+            <div class="inline-actions">
+              <input id="blocklist-hash" placeholder="blake3 body hash">
+              <button id="blocklist-add" class="btn-primary" type="button">Block Hash</button>
+            </div>
           </div>
         </section>
 
@@ -602,9 +731,33 @@
       </main>
     </div>
   </div>
+
+  <div id="onboarding-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div>
+        <h2 class="title">Claim your handle</h2>
+        <div class="muted">Your handle is tied to your node key and claimed on the Lattice network. Once claimed, only you can use it.</div>
+      </div>
+      <input id="onboarding-handle" placeholder="handle">
+      <input id="onboarding-display-name" placeholder="display name (optional)">
+      <textarea id="onboarding-bio" placeholder="bio (optional)"></textarea>
+      <div id="onboarding-error" class="status err"></div>
+      <div class="inline-actions">
+        <button id="onboarding-claim" class="btn-primary" type="button">Claim Handle</button>
+        <button id="onboarding-skip" class="btn-ghost" type="button">skip for now</button>
+      </div>
+    </div>
+  </div>
   <script>
     const el = (id) => document.getElementById(id);
-    const state = { view: "feed", fray: "lattice", postId: null, posts: [] };
+    const state = {
+      view: "feed",
+      fray: "lattice",
+      postId: null,
+      posts: [],
+      identity: null,
+      onboardingSkipped: localStorage.getItem("fray-handle-skipped") === "1"
+    };
 
     function setStatus(message, kind) {
       const node = el("status");
@@ -617,6 +770,11 @@
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;");
+    }
+
+    function authorMarkup(item) {
+      const verified = item.verified ? `<span class="verify">✓</span>` : "";
+      return `<span class="author-mark">${esc(item.author)}${verified}</span>`;
     }
 
     function routeTo() {
@@ -655,6 +813,20 @@
         throw new Error(err);
       }
       return body;
+    }
+
+    async function signedApi(path, body) {
+      const raw = JSON.stringify(body);
+      const signed = await api("/api/v1/sign", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: raw
+      });
+      const headers = {
+        "content-type": "application/json",
+        "X-Fray-Signature": signed.signature_b64
+      };
+      return api(path, { method: "POST", headers, body: raw });
     }
 
     function standingMarkup(item) {
@@ -721,7 +893,7 @@
             <h3 class="post-title" data-id="${esc(p.id)}">${esc(p.title)}</h3>
             ${standingMarkup(p)}
           </div>
-          <div class="muted">by ${esc(p.author)} · id ${esc(p.id.slice(0, 12))}</div>
+          <div class="muted">by ${authorMarkup(p)} · id ${esc(p.id.slice(0, 12))}</div>
         </article>
       `).join("");
       posts.querySelectorAll(".post-title").forEach((node) => {
@@ -739,7 +911,7 @@
         el("thread-empty").style.display = "none";
         el("thread").style.display = "block";
         el("thread-title").textContent = post.title;
-        el("thread-meta").innerHTML = `by ${esc(post.author)} · ${new Date(post.created_at * 1000).toLocaleString()} ${standingMarkup(post)}`;
+        el("thread-meta").innerHTML = `by ${authorMarkup(post)} · ${new Date(post.created_at * 1000).toLocaleString()} ${standingMarkup(post)}`;
         el("thread-body").textContent = "";
         el("thread-body").innerHTML = post.standing === "Restricted"
           ? maybeRestrictedBody(post, post.body, `thread-${post.id}`)
@@ -761,7 +933,7 @@
       box.innerHTML = comments.map((c) => `
         <div class="comment ${c.standing === "Restricted" ? "restricted" : ""}">
           <div style="display:flex;justify-content:space-between;gap:10px;align-items:start;">
-            <div><strong>${esc(c.author)}</strong> <span class="muted">${new Date(c.created_at * 1000).toLocaleString()}</span></div>
+            <div><strong>${authorMarkup(c)}</strong> <span class="muted">${new Date(c.created_at * 1000).toLocaleString()}</span></div>
             ${standingMarkup(c)}
           </div>
           ${maybeRestrictedBody(c, c.body, `comment-${c.id}`)}
@@ -918,6 +1090,115 @@
       }
     }
 
+    function renderIdentity() {
+      const identity = state.identity;
+      const hasHandle = identity && identity.handle;
+      const label = hasHandle ? `${identity.handle} 🔑` : "anonymous 🔑";
+      el("identity-toggle").textContent = label;
+      el("identity-handle").textContent = hasHandle ? identity.handle : "anonymous";
+      el("identity-display").textContent = identity && identity.display_name ? identity.display_name : "No display name set";
+      el("identity-bio").textContent = identity && identity.bio ? identity.bio : "No bio set";
+      el("identity-key").textContent = identity && identity.key_b64 ? `${identity.key_b64.slice(0, 16)}...` : "";
+      el("identity-banner").classList.toggle("hidden", !!hasHandle || !state.onboardingSkipped);
+    }
+
+    async function loadIdentity() {
+      try {
+        state.identity = await api("/api/v1/identity");
+      } catch (_) {
+        state.identity = null;
+      }
+      renderIdentity();
+      const shouldPrompt = !state.identity || !state.identity.handle;
+      el("onboarding-modal").classList.toggle("hidden", !shouldPrompt || state.onboardingSkipped);
+    }
+
+    async function submitHandleClaim(handleOverride) {
+      const body = {
+        handle: (handleOverride || el("onboarding-handle").value).trim().toLowerCase(),
+        display_name: el("onboarding-display-name").value.trim() || null,
+        bio: el("onboarding-bio").value.trim() || null
+      };
+      if (!/^[a-z0-9_-]{1,32}$/.test(body.handle)) {
+        el("onboarding-error").textContent = "handle must be 1-32 chars: lowercase letters, digits, hyphens, underscores";
+        return;
+      }
+      try {
+        await api("/api/v1/identity/claim", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        state.onboardingSkipped = false;
+        localStorage.removeItem("fray-handle-skipped");
+        el("onboarding-error").textContent = "";
+        el("onboarding-modal").classList.add("hidden");
+        await loadIdentity();
+        setStatus(`claimed @${body.handle}`, "ok");
+      } catch (err) {
+        el("onboarding-error").textContent = err.message;
+      }
+    }
+
+    async function publishDirectoryEntry() {
+      if (!state.identity || !state.identity.key_b64) {
+        setStatus("load identity first", "err");
+        return;
+      }
+      try {
+        await signedApi("/api/v1/directory/entries", {
+          fray_name: state.fray,
+          owner_key_b64: state.identity.key_b64,
+          status: el("directory-status").value,
+          description: el("directory-description").value.trim() || null
+        });
+        setStatus("directory entry published", "ok");
+        await loadDirectory();
+      } catch (err) {
+        setStatus(err.message, "err");
+      }
+    }
+
+    async function saveStanding() {
+      try {
+        await signedApi(`/api/v1/frays/${state.fray}/trust/standings`, {
+          key_b64: el("trust-key").value.trim(),
+          standing: el("trust-standing").value,
+          label: el("trust-label").value.trim() || null,
+          reason: el("trust-reason").value.trim() || null
+        });
+        setStatus("trust standing updated", "ok");
+        await loadModPanel();
+      } catch (err) {
+        setStatus(err.message, "err");
+      }
+    }
+
+    async function addModerator() {
+      try {
+        await signedApi(`/api/v1/frays/${state.fray}/trust/moderators`, {
+          key_b64: el("moderator-key").value.trim()
+        });
+        el("moderator-key").value = "";
+        setStatus("moderator added", "ok");
+        await loadModPanel();
+      } catch (err) {
+        setStatus(err.message, "err");
+      }
+    }
+
+    async function addBlockHash() {
+      try {
+        await signedApi("/api/v1/admin/blocklist", {
+          hash_hex: el("blocklist-hash").value.trim()
+        });
+        el("blocklist-hash").value = "";
+        setStatus("hash blocklisted", "ok");
+      } catch (err) {
+        setStatus(err.message, "err");
+      }
+    }
+
     function applyTheme(theme) {
       document.body.dataset.theme = theme;
       el("theme-toggle").textContent = theme === "dark" ? "☀" : "☽";
@@ -933,6 +1214,21 @@
       el("new-thread-panel").classList.add("hidden");
     }
 
+    el("identity-toggle").addEventListener("click", () => {
+      el("identity-dropdown").classList.toggle("hidden");
+    });
+    el("identity-edit").addEventListener("click", () => {
+      el("onboarding-handle").value = state.identity && state.identity.handle ? state.identity.handle : "";
+      el("onboarding-display-name").value = state.identity && state.identity.display_name ? state.identity.display_name : "";
+      el("onboarding-bio").value = state.identity && state.identity.bio ? state.identity.bio : "";
+      el("onboarding-error").textContent = "";
+      el("onboarding-modal").classList.remove("hidden");
+    });
+    el("identity-transfer").addEventListener("click", () => {
+      el("onboarding-handle").value = "";
+      el("onboarding-error").textContent = "claiming a new handle will release your old one";
+      el("onboarding-modal").classList.remove("hidden");
+    });
     el("nav-home").addEventListener("click", () => { state.view = "feed"; loadPosts(); });
     el("nav-directory").addEventListener("click", () => { loadDirectory(); });
     el("nav-mod").addEventListener("click", () => { state.view = "mod"; loadModPanel(); });
@@ -941,16 +1237,27 @@
     el("comment-create").addEventListener("click", createComment);
     el("sync-pull").addEventListener("click", syncPull);
     el("sync-publish").addEventListener("click", syncPublish);
+    el("directory-publish").addEventListener("click", publishDirectoryEntry);
+    el("trust-save").addEventListener("click", saveStanding);
+    el("moderator-add").addEventListener("click", addModerator);
+    el("blocklist-add").addEventListener("click", addBlockHash);
     el("new-thread-toggle").addEventListener("click", openComposer);
     el("new-thread-inline").addEventListener("click", openComposer);
     el("new-thread-close").addEventListener("click", closeComposer);
+    el("onboarding-claim").addEventListener("click", () => submitHandleClaim());
+    el("onboarding-skip").addEventListener("click", () => {
+      state.onboardingSkipped = true;
+      localStorage.setItem("fray-handle-skipped", "1");
+      el("onboarding-modal").classList.add("hidden");
+      renderIdentity();
+    });
     el("theme-toggle").addEventListener("click", () => {
       applyTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
     });
     applyTheme(localStorage.getItem("fray-theme") || "dark");
     readRoute();
     toggleViews();
-    loadView();
+    loadIdentity().then(loadView);
   </script>
 </body>
 </html>

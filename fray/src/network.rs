@@ -1,3 +1,4 @@
+use crate::handle::{validate_handle_record, FrayHandleRecord};
 use crate::blocklist::ContentBlocklist;
 use crate::directory::{
     sign_directory, validate_directory, verify_signed_directory, FrayDirectory, SignedFrayDirectory,
@@ -22,6 +23,7 @@ const MAX_FEED_BYTES: usize = 256 * 1024;
 const MAX_FEED_POSTS: usize = 64;
 const MAX_FEED_COMMENTS: usize = 256;
 const TRUST_RECORD_KEY_PREFIX: &str = "app:fray:trust:";
+const HANDLE_RECORD_KEY_PREFIX: &str = "app:fray:identity:";
 const DIRECTORY_RECORD_KEY: &str = "app:fray:directory";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +39,11 @@ pub struct FrayFeedRecord {
 pub struct SignedFrayFeedRecord {
     pub signed: SignedRecord,
     pub feed: FrayFeedRecord,
+}
+
+pub struct SignedFrayHandleRecord {
+    pub signed: SignedRecord,
+    pub record: FrayHandleRecord,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +173,60 @@ pub async fn publish_trust_record(
         payload,
     )
     .await
+}
+
+pub async fn publish_handle_record(
+    handle: &str,
+    record: &FrayHandleRecord,
+    signing_key: &SigningKey,
+    lattice_rpc_port: u16,
+) -> Result<()> {
+    validate_handle_record(record).map_err(anyhow::Error::msg)?;
+    let payload = canonical_json_bytes(record).context("failed to encode handle record")?;
+    let signed = SignedRecord::sign(signing_key, payload);
+    let value = serde_json::to_string(&signed).context("failed to encode signed handle record")?;
+    put_record(
+        lattice_rpc_port,
+        &format!("{HANDLE_RECORD_KEY_PREFIX}{handle}"),
+        value,
+    )
+    .await
+}
+
+pub async fn fetch_handle_record(
+    lattice_rpc_port: u16,
+    handle: &str,
+) -> Result<Option<SignedFrayHandleRecord>> {
+    let Some(raw) = get_record(lattice_rpc_port, &format!("{HANDLE_RECORD_KEY_PREFIX}{handle}")).await? else {
+        return Ok(None);
+    };
+    let signed: SignedRecord =
+        serde_json::from_str(&raw).context("failed to decode signed handle record")?;
+    if !signed.verify() {
+        bail!("handle record signature verification failed");
+    }
+    let record: FrayHandleRecord = signed
+        .payload_json()
+        .context("failed to decode fray handle payload")?;
+    validate_handle_record(&record).map_err(anyhow::Error::msg)?;
+    if record.handle != handle {
+        bail!("handle record mismatch");
+    }
+    Ok(Some(SignedFrayHandleRecord { signed, record }))
+}
+
+pub async fn publisher_owns_handle(
+    lattice_rpc_port: u16,
+    handle: &str,
+    key_b64: &str,
+) -> Result<bool> {
+    let Some(record) = fetch_handle_record(lattice_rpc_port, handle).await? else {
+        return Ok(false);
+    };
+    if record.record.claimed_at == 0 {
+        return Ok(false);
+    }
+    Ok(record.signed.publisher_b64() == key_b64)
 }
 
 pub async fn fetch_trust_record(
@@ -443,7 +504,8 @@ mod tests {
             title: "hello".into(),
             body: body.into(),
             created_at: unix_ts(),
-            publisher_key_b64: None,
+            key_b64: None,
+            signature_b64: None,
             hidden: false,
         };
         assert!(post_should_drop(&blocklist, &post));
