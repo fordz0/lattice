@@ -18,7 +18,6 @@ pub struct Post {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreatePostRequest {
-    pub author: String,
     pub title: String,
     pub body: String,
 }
@@ -41,7 +40,6 @@ pub struct Comment {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateCommentRequest {
-    pub author: String,
     pub body: String,
 }
 

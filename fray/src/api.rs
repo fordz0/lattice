@@ -9,8 +9,9 @@ use crate::trust::{
     SignedTrustRecord,
 };
 use crate::ui;
+use axum::body::to_bytes;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request as AxumRequest, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -21,6 +22,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use lattice_core::identity::canonical_json_bytes;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -102,6 +104,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/sign", post(sign_payload))
         .route("/api/v1/identity", get(get_local_identity))
         .route("/api/v1/identity/claim", post(claim_handle))
+        .route("/api/v1/identity/transfer", post(transfer_handle))
         .route("/api/v1/identity/release", post(release_handle))
         .route("/api/v1/identity/{handle}", get(get_handle_identity))
         .route("/api/v1/directory", get(get_directory))
@@ -170,6 +173,7 @@ async fn info(State(state): State<AppState>) -> impl IntoResponse {
         "POST /api/v1/sign",
         "GET /api/v1/identity",
         "POST /api/v1/identity/claim",
+        "POST /api/v1/identity/transfer",
         "POST /api/v1/identity/release",
         "GET /api/v1/identity/{handle}",
         "GET /api/v1/directory",
@@ -191,7 +195,27 @@ async fn info(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
-async fn sign_payload(State(state): State<AppState>, body: Bytes) -> Response {
+// /api/v1/sign is intentionally localhost-only. It signs arbitrary JSON with the
+// node's private key so the browser UI can make authenticated admin requests without
+// the key ever touching the browser. Since Fray binds to 127.0.0.1, this is only
+// reachable from the local machine, but we add an explicit remote address check as
+// defence in depth.
+async fn sign_payload(State(state): State<AppState>, request: AxumRequest) -> Response {
+    let remote_addr = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|value| value.0);
+    if !remote_addr_is_loopback(remote_addr) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "sign endpoint is localhost-only" })),
+        )
+            .into_response();
+    }
+    let body = match to_bytes(request.into_body(), MAX_JSON_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(err) => return bad_request(format!("failed to read request body: {err}")),
+    };
     let value: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(err) => return bad_request(format!("invalid json: {err}")),
@@ -255,122 +279,67 @@ async fn claim_handle(
     State(state): State<AppState>,
     Json(request): Json<ClaimHandleRequest>,
 ) -> Response {
-    if let Err(err) = validate_handle(&request.handle) {
-        return bad_request(err);
-    }
     let handle = request.handle.trim().to_lowercase();
-    let local_key_b64 = signing_key_b64(state.signing_key.as_ref());
-
-    match state.store.get_local_handle() {
-        Ok(Some(existing_handle)) if existing_handle != handle => {
-            match network::fetch_handle_record(state.lattice_rpc_port, &existing_handle).await {
-                Ok(Some(existing))
-                    if existing.record.claimed_at != 0
-                        && existing.signed.publisher_b64() == local_key_b64 =>
-                {
-                    let tombstone = FrayHandleRecord {
-                        handle: existing_handle.clone(),
-                        display_name: None,
-                        bio: None,
-                        claimed_at: 0,
-                        previous_handle: None,
-                    };
-                    if let Err(err) = network::publish_handle_record(
-                        &existing_handle,
-                        &tombstone,
-                        state.signing_key.as_ref(),
-                        state.lattice_rpc_port,
-                    )
-                    .await
-                    {
-                        return bad_gateway(err.to_string());
-                    }
-                }
-                Ok(_) => {}
-                Err(err) => return bad_gateway(err.to_string()),
-            }
-        }
-        Ok(_) => {}
-        Err(err) => return bad_request(err.to_string()),
-    }
-
-    match network::fetch_handle_record(state.lattice_rpc_port, &handle).await {
-        Ok(Some(existing))
-            if existing.record.claimed_at != 0
-                && existing.signed.publisher_b64() != local_key_b64 =>
-        {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "handle already claimed by another key" })),
-            )
-                .into_response();
-        }
-        Ok(_) => {}
-        Err(err) => return bad_gateway(err.to_string()),
-    }
-
-    let previous_handle = match state.store.get_local_handle() {
-        Ok(Some(existing_handle)) if existing_handle != handle => Some(existing_handle),
-        Ok(_) => None,
-        Err(err) => return bad_request(err.to_string()),
-    };
-    let record = FrayHandleRecord {
-        handle: handle.clone(),
-        display_name: request
-            .display_name
-            .as_ref()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        bio: request
-            .bio
-            .as_ref()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        claimed_at: unix_ts(),
-        previous_handle,
-    };
-    if let Err(err) = validate_handle_record(&record) {
+    if let Err(err) = validate_handle(&handle) {
         return bad_request(err);
     }
-    if let Err(err) = network::publish_handle_record(
-        &handle,
-        &record,
-        state.signing_key.as_ref(),
-        state.lattice_rpc_port,
-    )
-    .await
-    {
-        return if err
-            .to_string()
-            .contains("app record owned by a different key")
-        {
-            (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "handle already claimed by another key" })),
-            )
-                .into_response()
-        } else {
-            bad_gateway(err.to_string())
-        };
-    }
-    if let Err(err) = state.store.set_local_handle(&handle) {
-        return bad_request(err.to_string());
-    }
-    if let Some(display_name) = &record.display_name {
-        if let Err(err) = state.store.set_local_display_name(display_name) {
-            return bad_request(err.to_string());
+
+    let existing_handle = match state.store.get_local_handle() {
+        Ok(handle) => handle,
+        Err(err) => return bad_request(err.to_string()),
+    };
+    if let Some(existing_handle) = existing_handle.as_ref() {
+        if existing_handle != &handle {
+            return bad_request(
+                "handle cannot be changed via this endpoint — use the transfer flow".to_string(),
+            );
         }
-    } else if let Err(err) = state.store.set_local_display_name("") {
-        return bad_request(err.to_string());
     }
-    if let Some(bio) = &record.bio {
-        if let Err(err) = state.store.set_local_bio(bio) {
-            return bad_request(err.to_string());
-        }
-    } else if let Err(err) = state.store.set_local_bio("") {
-        return bad_request(err.to_string());
+
+    let record = match publish_handle_claim(&state, &handle, &request, None).await {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    if let Err(response) = persist_local_identity(&state.store, &record) {
+        return response;
     }
+
     Json(json!({ "handle": handle, "claimed": true })).into_response()
+}
+
+async fn transfer_handle(
+    State(state): State<AppState>,
+    Json(request): Json<ClaimHandleRequest>,
+) -> Response {
+    let new_handle = request.handle.trim().to_lowercase();
+    if let Err(err) = validate_handle(&new_handle) {
+        return bad_request(err);
+    }
+
+    let Some(old_handle) = (match state.store.get_local_handle() {
+        Ok(handle) => handle,
+        Err(err) => return bad_request(err.to_string()),
+    }) else {
+        return not_found("no local handle claimed");
+    };
+
+    if old_handle == new_handle {
+        return bad_request("new handle must differ from current handle".to_string());
+    }
+
+    let record =
+        match publish_handle_claim(&state, &new_handle, &request, Some(old_handle.clone())).await {
+            Ok(record) => record,
+            Err(response) => return response,
+        };
+    if let Err(response) = tombstone_handle(&state, &old_handle).await {
+        return response;
+    }
+    if let Err(response) = persist_local_identity(&state.store, &record) {
+        return response;
+    }
+
+    Json(json!({ "handle": new_handle, "claimed": true, "transferred": true })).into_response()
 }
 
 async fn release_handle(
@@ -416,16 +385,11 @@ async fn create_post(
     Path(fray): Path<String>,
     Json(request): Json<CreatePostRequest>,
 ) -> Response {
-    let author = match resolved_author(&state, &request.author) {
+    let author = match resolved_author(&state) {
         Ok(author) => author,
         Err(err) => return bad_request(err.to_string()),
     };
-    let signed_request = CreatePostRequest {
-        author,
-        title: request.title,
-        body: request.body,
-    };
-    match state.store.create_post(&fray, signed_request) {
+    match state.store.create_post(&fray, &author, request) {
         Ok(mut post) => {
             apply_post_signature(&state, &mut post);
             if let Err(err) = state.store.upsert_post(post.clone()) {
@@ -472,15 +436,14 @@ async fn create_comment(
     Path((fray, post_id)): Path<(String, String)>,
     Json(request): Json<CreateCommentRequest>,
 ) -> Response {
-    let author = match resolved_author(&state, &request.author) {
+    let author = match resolved_author(&state) {
         Ok(author) => author,
         Err(err) => return bad_request(err.to_string()),
     };
-    let signed_request = CreateCommentRequest {
-        author,
-        body: request.body,
-    };
-    match state.store.create_comment(&fray, &post_id, signed_request) {
+    match state
+        .store
+        .create_comment(&fray, &post_id, &author, request)
+    {
         Ok(mut comment) => {
             apply_comment_signature(&state, &mut comment);
             if let Err(err) = state.store.upsert_comment(comment.clone()) {
@@ -549,13 +512,6 @@ async fn claim_fray(
             .into_response();
     }
 
-    if let Err(err) = state
-        .store
-        .store_fray_ownership(&fray, &request.owner_key_b64)
-    {
-        return bad_request(err.to_string());
-    }
-
     let trust_record = FrayTrustRecord {
         version: 1,
         fray: fray.clone(),
@@ -568,9 +524,6 @@ async fn claim_fray(
         Ok(record) => record,
         Err(err) => return bad_request(err.to_string()),
     };
-    if let Err(err) = state.store.store_trust_record(&fray, &signed) {
-        return bad_request(err.to_string());
-    }
     if let Err(err) = network::publish_trust_record(
         &fray,
         &trust_record,
@@ -580,6 +533,15 @@ async fn claim_fray(
     .await
     {
         return bad_gateway(err.to_string());
+    }
+    if let Err(err) = state.store.store_trust_record(&fray, &signed) {
+        return bad_request(err.to_string());
+    }
+    if let Err(err) = state
+        .store
+        .store_fray_ownership(&fray, &request.owner_key_b64)
+    {
+        return bad_request(err.to_string());
     }
 
     Json(json!({ "status": "ok", "fray": fray })).into_response()
@@ -1017,14 +979,6 @@ async fn persist_trust_record(
     fray: &str,
     record: &SignedTrustRecord,
 ) -> Response {
-    if let Err(err) = state.store.store_trust_record(fray, record) {
-        return bad_request(err.to_string());
-    }
-    for entry in &record.record.entries {
-        if let Err(err) = state.store.store_key_record(fray, entry.clone()) {
-            return bad_request(err.to_string());
-        }
-    }
     match network::publish_trust_record(
         fray,
         &record.record,
@@ -1033,9 +987,18 @@ async fn persist_trust_record(
     )
     .await
     {
-        Ok(()) => Json(json!({ "status": "ok" })).into_response(),
-        Err(err) => bad_gateway(err.to_string()),
+        Ok(()) => {}
+        Err(err) => return bad_gateway(err.to_string()),
     }
+    if let Err(err) = state.store.store_trust_record(fray, record) {
+        return bad_request(err.to_string());
+    }
+    for entry in &record.record.entries {
+        if let Err(err) = state.store.store_key_record(fray, entry.clone()) {
+            return bad_request(err.to_string());
+        }
+    }
+    Json(json!({ "status": "ok" })).into_response()
 }
 
 fn load_owned_trust_record(state: &AppState, fray: &str) -> Result<SignedTrustRecord, Response> {
@@ -1227,15 +1190,17 @@ async fn comment_response(state: &AppState, fray: &str, comment: &Comment) -> Va
     })
 }
 
-fn resolved_author(state: &AppState, fallback_author: &str) -> Result<String, anyhow::Error> {
+fn resolved_author(state: &AppState) -> Result<String, anyhow::Error> {
     if let Some(handle) = state.store.get_local_handle()? {
         return Ok(handle);
     }
-    Ok(fallback_author.trim().to_string())
+    Ok("anonymous".to_string())
 }
 
 #[derive(serde::Serialize)]
 struct PostSignaturePayload<'a> {
+    fray: &'a str,
+    author: &'a str,
     title: &'a str,
     body: &'a str,
     created_at: u64,
@@ -1243,12 +1208,22 @@ struct PostSignaturePayload<'a> {
 
 #[derive(serde::Serialize)]
 struct CommentSignaturePayload<'a> {
+    fray: &'a str,
+    post_id: &'a str,
+    author: &'a str,
     body: &'a str,
     created_at: u64,
 }
 
+enum AuthorshipPayload<'a> {
+    Post(PostSignaturePayload<'a>),
+    Comment(CommentSignaturePayload<'a>),
+}
+
 fn apply_post_signature(state: &AppState, post: &mut Post) {
     if let Ok(payload) = canonical_json_bytes(&PostSignaturePayload {
+        fray: &post.fray,
+        author: &post.author,
         title: &post.title,
         body: &post.body,
         created_at: post.created_at,
@@ -1261,6 +1236,9 @@ fn apply_post_signature(state: &AppState, post: &mut Post) {
 
 fn apply_comment_signature(state: &AppState, comment: &mut Comment) {
     if let Ok(payload) = canonical_json_bytes(&CommentSignaturePayload {
+        fray: &comment.fray,
+        post_id: &comment.post_id,
+        author: &comment.author,
         body: &comment.body,
         created_at: comment.created_at,
     }) {
@@ -1276,11 +1254,13 @@ async fn verify_post_identity(state: &AppState, post: &Post) -> bool {
         &post.author,
         post.key_b64.as_deref(),
         post.signature_b64.as_deref(),
-        &PostSignaturePayload {
+        AuthorshipPayload::Post(PostSignaturePayload {
+            fray: &post.fray,
+            author: &post.author,
             title: &post.title,
             body: &post.body,
             created_at: post.created_at,
-        },
+        }),
     )
     .await
 }
@@ -1291,20 +1271,23 @@ async fn verify_comment_identity(state: &AppState, comment: &Comment) -> bool {
         &comment.author,
         comment.key_b64.as_deref(),
         comment.signature_b64.as_deref(),
-        &CommentSignaturePayload {
+        AuthorshipPayload::Comment(CommentSignaturePayload {
+            fray: &comment.fray,
+            post_id: &comment.post_id,
+            author: &comment.author,
             body: &comment.body,
             created_at: comment.created_at,
-        },
+        }),
     )
     .await
 }
 
-async fn verify_authorship<T: serde::Serialize>(
+async fn verify_authorship(
     state: &AppState,
     author: &str,
     key_b64: Option<&str>,
     signature_b64: Option<&str>,
-    payload: &T,
+    payload: AuthorshipPayload<'_>,
 ) -> bool {
     let (Some(key_b64), Some(signature_b64)) = (key_b64, signature_b64) else {
         return false;
@@ -1321,9 +1304,15 @@ async fn verify_authorship<T: serde::Serialize>(
         Ok(signature) => signature,
         Err(_) => return false,
     };
-    let payload = match canonical_json_bytes(payload) {
-        Ok(payload) => payload,
-        Err(_) => return false,
+    let payload = match payload {
+        AuthorshipPayload::Post(payload) => match canonical_json_bytes(&payload) {
+            Ok(payload) => payload,
+            Err(_) => return false,
+        },
+        AuthorshipPayload::Comment(payload) => match canonical_json_bytes(&payload) {
+            Ok(payload) => payload,
+            Err(_) => return false,
+        },
     };
     if verifying_key.verify(&payload, &signature).is_err() {
         return false;
@@ -1349,23 +1338,157 @@ fn not_found(message: &str) -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": message }))).into_response()
 }
 
+fn remote_addr_is_loopback(remote_addr: Option<SocketAddr>) -> bool {
+    remote_addr
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false)
+}
+
+async fn publish_handle_claim(
+    state: &AppState,
+    handle: &str,
+    request: &ClaimHandleRequest,
+    previous_handle: Option<String>,
+) -> Result<FrayHandleRecord, Response> {
+    let local_key_b64 = signing_key_b64(state.signing_key.as_ref());
+    match network::fetch_handle_record(state.lattice_rpc_port, handle).await {
+        Ok(Some(existing))
+            if existing.record.claimed_at != 0
+                && existing.signed.publisher_b64() != local_key_b64 =>
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "handle already claimed by another key" })),
+            )
+                .into_response());
+        }
+        Ok(_) => {}
+        Err(err) => return Err(bad_gateway(err.to_string())),
+    }
+
+    let record = FrayHandleRecord {
+        handle: handle.to_string(),
+        display_name: request
+            .display_name
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        bio: request
+            .bio
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        claimed_at: unix_ts(),
+        previous_handle,
+    };
+    if let Err(err) = validate_handle_record(&record) {
+        return Err(bad_request(err));
+    }
+    if let Err(err) = network::publish_handle_record(
+        handle,
+        &record,
+        state.signing_key.as_ref(),
+        state.lattice_rpc_port,
+    )
+    .await
+    {
+        return Err(map_handle_publish_error(err));
+    }
+    Ok(record)
+}
+
+async fn tombstone_handle(state: &AppState, handle: &str) -> Result<(), Response> {
+    let tombstone = FrayHandleRecord {
+        handle: handle.to_string(),
+        display_name: None,
+        bio: None,
+        claimed_at: 0,
+        previous_handle: None,
+    };
+    if let Err(err) = network::publish_handle_record(
+        handle,
+        &tombstone,
+        state.signing_key.as_ref(),
+        state.lattice_rpc_port,
+    )
+    .await
+    {
+        return Err(bad_gateway(err.to_string()));
+    }
+    Ok(())
+}
+
+fn persist_local_identity(store: &FrayStore, record: &FrayHandleRecord) -> Result<(), Response> {
+    if let Err(err) = store.set_local_handle(&record.handle) {
+        return Err(bad_request(err.to_string()));
+    }
+    if let Some(display_name) = &record.display_name {
+        if let Err(err) = store.set_local_display_name(display_name) {
+            return Err(bad_request(err.to_string()));
+        }
+    } else if let Err(err) = store.set_local_display_name("") {
+        return Err(bad_request(err.to_string()));
+    }
+    if let Some(bio) = &record.bio {
+        if let Err(err) = store.set_local_bio(bio) {
+            return Err(bad_request(err.to_string()));
+        }
+    } else if let Err(err) = store.set_local_bio("") {
+        return Err(bad_request(err.to_string()));
+    }
+    Ok(())
+}
+
+fn map_handle_publish_error(err: anyhow::Error) -> Response {
+    if err
+        .to_string()
+        .contains("app record owned by a different key")
+    {
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "handle already claimed by another key" })),
+        )
+            .into_response()
+    } else {
+        bad_gateway(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::body::Body;
     use axum::http::Request;
     use tower::util::ServiceExt;
 
-    fn app_state() -> AppState {
-        let path = std::env::temp_dir().join(format!("fray-api-test-{}", unix_ts()));
+    fn temp_db_path() -> std::path::PathBuf {
+        let mut random = [0_u8; 4];
+        let _ = getrandom::getrandom(&mut random);
+        std::env::temp_dir().join(format!("fray-api-test-{}", hex::encode(random)))
+    }
+
+    fn app_state_with_rpc_port(rpc_port: u16) -> AppState {
+        let path = temp_db_path();
         let _ = std::fs::create_dir_all(&path);
         AppState {
             store: FrayStore::open(&path).expect("open store"),
-            lattice_rpc_port: 9,
+            lattice_rpc_port: rpc_port,
             signing_key: Arc::new(SigningKey::from_bytes(&[7; 32])),
             blocklist: ContentBlocklist::new(),
             blocklist_path: path.join("blocklist.txt"),
         }
+    }
+
+    fn app_state() -> AppState {
+        app_state_with_rpc_port(9)
+    }
+
+    fn decode_signature(signature_b64: &str) -> Signature {
+        let bytes = BASE64_STANDARD
+            .decode(signature_b64)
+            .expect("decode signature");
+        Signature::from_slice(&bytes).expect("parse signature")
     }
 
     #[tokio::test]
@@ -1385,5 +1508,238 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn claim_handle_rejects_handle_change_when_handle_is_already_set() {
+        let state = app_state();
+        state
+            .store
+            .set_local_handle("fordz0")
+            .expect("set local handle");
+        let app = app(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/identity/claim")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "handle": "newhandle",
+                            "display_name": "Ford",
+                            "bio": "hello"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state.store.get_local_handle().expect("get handle"),
+            Some("fordz0".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_handle_leaves_old_handle_intact_if_new_claim_fails() {
+        let state = app_state_with_rpc_port(9);
+        state
+            .store
+            .set_local_handle("fordz0")
+            .expect("set local handle");
+        let app = app(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/identity/transfer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "handle": "newhandle",
+                            "display_name": "Ford",
+                            "bio": "hello"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let value: Value = serde_json::from_slice(&body).expect("decode response");
+        assert!(value
+            .get("error")
+            .and_then(Value::as_str)
+            .expect("error string")
+            .contains("failed to reach lattice daemon RPC"));
+        assert_eq!(
+            state.store.get_local_handle().expect("get handle"),
+            Some("fordz0".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_endpoint_rejects_requests_without_loopback_remote_addr() {
+        let app = app(app_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "ok": true }).to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn post_signatures_bind_fray_and_author() {
+        let state = app_state();
+        let mut post = Post {
+            id: "abc123-abcdef".to_string(),
+            fray: "lattice".to_string(),
+            author: "fordz0".to_string(),
+            title: "hello".to_string(),
+            body: "world".to_string(),
+            created_at: unix_ts(),
+            key_b64: None,
+            signature_b64: None,
+            hidden: false,
+        };
+        apply_post_signature(&state, &mut post);
+
+        let signature = decode_signature(post.signature_b64.as_deref().expect("signature"));
+        let verifying_key = state.signing_key.verifying_key();
+        let exact_payload = canonical_json_bytes(&PostSignaturePayload {
+            fray: &post.fray,
+            author: &post.author,
+            title: &post.title,
+            body: &post.body,
+            created_at: post.created_at,
+        })
+        .expect("encode exact payload");
+        verifying_key
+            .verify(&exact_payload, &signature)
+            .expect("verify exact payload");
+
+        let wrong_author_payload = canonical_json_bytes(&PostSignaturePayload {
+            fray: &post.fray,
+            author: "someoneelse",
+            title: &post.title,
+            body: &post.body,
+            created_at: post.created_at,
+        })
+        .expect("encode wrong author payload");
+        assert!(verifying_key
+            .verify(&wrong_author_payload, &signature)
+            .is_err());
+
+        let wrong_fray_payload = canonical_json_bytes(&PostSignaturePayload {
+            fray: "otherfray",
+            author: &post.author,
+            title: &post.title,
+            body: &post.body,
+            created_at: post.created_at,
+        })
+        .expect("encode wrong fray payload");
+        assert!(verifying_key
+            .verify(&wrong_fray_payload, &signature)
+            .is_err());
+    }
+
+    #[test]
+    fn comment_signatures_bind_fray_post_id_and_author() {
+        let state = app_state();
+        let mut comment = Comment {
+            id: "abc123-fedcba".to_string(),
+            fray: "lattice".to_string(),
+            post_id: "post-123".to_string(),
+            author: "fordz0".to_string(),
+            body: "hello".to_string(),
+            created_at: unix_ts(),
+            key_b64: None,
+            signature_b64: None,
+            hidden: false,
+        };
+        apply_comment_signature(&state, &mut comment);
+
+        let signature = decode_signature(comment.signature_b64.as_deref().expect("signature"));
+        let verifying_key = state.signing_key.verifying_key();
+        let exact_payload = canonical_json_bytes(&CommentSignaturePayload {
+            fray: &comment.fray,
+            post_id: &comment.post_id,
+            author: &comment.author,
+            body: &comment.body,
+            created_at: comment.created_at,
+        })
+        .expect("encode exact payload");
+        verifying_key
+            .verify(&exact_payload, &signature)
+            .expect("verify exact payload");
+
+        let wrong_context_payload = canonical_json_bytes(&CommentSignaturePayload {
+            fray: "otherfray",
+            post_id: &comment.post_id,
+            author: &comment.author,
+            body: &comment.body,
+            created_at: comment.created_at,
+        })
+        .expect("encode wrong fray payload");
+        assert!(verifying_key
+            .verify(&wrong_context_payload, &signature)
+            .is_err());
+
+        let wrong_post_payload = canonical_json_bytes(&CommentSignaturePayload {
+            fray: &comment.fray,
+            post_id: "post-999",
+            author: &comment.author,
+            body: &comment.body,
+            created_at: comment.created_at,
+        })
+        .expect("encode wrong post payload");
+        assert!(verifying_key
+            .verify(&wrong_post_payload, &signature)
+            .is_err());
+    }
+
+    #[test]
+    fn comment_signature_from_one_fray_does_not_verify_in_another_context() {
+        let state = app_state();
+        let mut comment = Comment {
+            id: "abc123-999999".to_string(),
+            fray: "lattice".to_string(),
+            post_id: "post-123".to_string(),
+            author: "fordz0".to_string(),
+            body: "hello".to_string(),
+            created_at: unix_ts(),
+            key_b64: None,
+            signature_b64: None,
+            hidden: false,
+        };
+        apply_comment_signature(&state, &mut comment);
+
+        let signature = decode_signature(comment.signature_b64.as_deref().expect("signature"));
+        let verifying_key = state.signing_key.verifying_key();
+        let transplanted_payload = canonical_json_bytes(&CommentSignaturePayload {
+            fray: "garden",
+            post_id: &comment.post_id,
+            author: &comment.author,
+            body: &comment.body,
+            created_at: comment.created_at,
+        })
+        .expect("encode transplanted payload");
+        assert!(verifying_key
+            .verify(&transplanted_payload, &signature)
+            .is_err());
     }
 }

@@ -5,6 +5,7 @@ use fray::api::{app, AppState};
 use fray::blocklist::ContentBlocklist;
 use fray::store::FrayStore;
 use serde_json::json;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,10 +55,13 @@ async fn main() -> Result<()> {
     if let Err(err) = register_local_app(lattice_rpc_port, port, pid).await {
         warn!(error = %err, "failed to register Fray as a local app");
     }
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(lattice_rpc_port, pid))
-        .await
-        .context("fray api stopped unexpectedly")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(lattice_rpc_port, pid))
+    .await
+    .context("fray api stopped unexpectedly")?;
     Ok(())
 }
 

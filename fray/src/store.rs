@@ -37,9 +37,9 @@ impl FrayStore {
         Ok(Self { db, identity })
     }
 
-    pub fn create_post(&self, fray: &str, req: CreatePostRequest) -> Result<Post> {
+    pub fn create_post(&self, fray: &str, author: &str, req: CreatePostRequest) -> Result<Post> {
         let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
-        let author = Username::parse(&req.author).map_err(map_route_error)?;
+        let author = Username::parse(author).map_err(map_route_error)?;
         validate_title(&req.title)?;
         validate_post_body(&req.body)?;
 
@@ -114,11 +114,12 @@ impl FrayStore {
         &self,
         fray: &str,
         post_id: &str,
+        author: &str,
         req: CreateCommentRequest,
     ) -> Result<Comment> {
         let fray_name = FrayName::parse(fray).map_err(map_route_error)?;
         validate_object_id(post_id)?;
-        let author = Username::parse(&req.author).map_err(map_route_error)?;
+        let author = Username::parse(author).map_err(map_route_error)?;
         validate_comment_body(&req.body)?;
 
         let Some(post) = self.get_post(fray_name.as_str(), post_id)? else {
@@ -637,8 +638,8 @@ mod tests {
         let post = store
             .create_post(
                 "lattice",
+                "fordz0",
                 CreatePostRequest {
-                    author: "fordz0".to_string(),
                     title: "hello".to_string(),
                     body: "world".to_string(),
                 },
@@ -649,8 +650,8 @@ mod tests {
             .create_comment(
                 "lattice",
                 &post.id,
+                "fordz0",
                 CreateCommentRequest {
-                    author: "fordz0".to_string(),
                     body: "nice".to_string(),
                 },
             )
