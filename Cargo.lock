@@ -2014,7 +2014,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-cli"
+name = "lattice"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2022,10 +2022,13 @@ dependencies = [
  "directories 5.0.1",
  "ed25519-dalek",
  "getrandom 0.2.17",
+ "lattice-core",
  "lattice-site",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toml",
 ]
@@ -2036,6 +2039,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "semver",
  "serde",
  "serde_json",
 ]
@@ -3474,7 +3478,9 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",

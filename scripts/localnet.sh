@@ -12,7 +12,7 @@ NODE_COUNT="${LATTICE_LOCALNET_NODES:-3}"
 RUST_LOG_LEVEL="${RUST_LOG:-info}"
 
 DAEMON_BIN="${LATTICE_DAEMON_BIN:-$REPO_ROOT/target/release/lattice-daemon}"
-CLI_BIN="${LATTICE_CLI_BIN:-$REPO_ROOT/target/release/lattice-cli}"
+CLI_BIN="${LATTICE_CLI_BIN:-$REPO_ROOT/target/release/lattice}"
 
 if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]] || (( NODE_COUNT < 1 )); then
   echo "LATTICE_LOCALNET_NODES must be a positive integer"
@@ -61,8 +61,8 @@ node_pidfile() {
 
 ensure_bins() {
   if [[ ! -x "$DAEMON_BIN" || ! -x "$CLI_BIN" ]]; then
-    echo "Building lattice-daemon and lattice-cli..."
-    (cd "$REPO_ROOT" && cargo build --release -p lattice-daemon -p lattice-cli)
+    echo "Building lattice-daemon and lattice..."
+    (cd "$REPO_ROOT" && cargo build --release -p lattice-daemon -p lattice)
   fi
 }
 

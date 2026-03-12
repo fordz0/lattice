@@ -4,20 +4,30 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use directories::BaseDirs;
 use ed25519_dalek::SigningKey;
+use lattice_core::app_namespace::APP_REGISTRY_PREFIX;
+use lattice_core::app_registry_record::{validate_app_registry_record, AppRegistryRecord};
+use lattice_core::identity::{canonical_json_bytes, SignedRecord};
+use lattice_core::registry::is_registry_operator;
 use lattice_site::manifest::{
     hash_bytes, hash_file, verify_manifest, FileEntry, SiteManifest, DEFAULT_CHUNK_SIZE_BYTES,
 };
 use lattice_site::publisher as site_publisher;
 use rpc::{DaemonNotRunning, RpcClient};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::fmt;
 use std::fs;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(name = "lattice-cli")]
+#[command(name = "lattice")]
 #[command(about = "CLI client for lattice-daemon JSON-RPC")]
 struct Cli {
     #[arg(long, global = true, default_value_t = 7780)]
@@ -60,6 +70,36 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    PublishApp {
+        app_id: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long = "linux-x86-64")]
+        linux_x86_64: Option<String>,
+        #[arg(long = "linux-x86-64-sha256")]
+        linux_x86_64_sha256: Option<String>,
+        #[arg(long = "linux-aarch64")]
+        linux_aarch64: Option<String>,
+        #[arg(long = "linux-aarch64-sha256")]
+        linux_aarch64_sha256: Option<String>,
+        #[arg(long = "macos-aarch64")]
+        macos_aarch64: Option<String>,
+        #[arg(long = "macos-aarch64-sha256")]
+        macos_aarch64_sha256: Option<String>,
+        #[arg(long = "macos-x86-64")]
+        macos_x86_64: Option<String>,
+        #[arg(long = "macos-x86-64-sha256")]
+        macos_x86_64_sha256: Option<String>,
+    },
+    Install {
+        app_id: String,
+    },
+    Uninstall {
+        app_id: String,
+    },
+    Apps,
 }
 
 #[derive(Subcommand)]
@@ -81,6 +121,13 @@ impl fmt::Display for NameClaimedByOther {
 }
 
 impl Error for NameClaimedByOther {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstalledAppMeta {
+    app_id: String,
+    version: String,
+    description: String,
+}
 
 const MAX_FETCH_SITE_FILES: usize = 1000;
 const MAX_FETCH_SITE_BYTES: u64 = 100 * 1024 * 1024;
@@ -339,6 +386,67 @@ async fn run() -> Result<()> {
                 manifest.files.len()
             );
         }
+        Command::PublishApp {
+            app_id,
+            version,
+            description,
+            linux_x86_64,
+            linux_x86_64_sha256,
+            linux_aarch64,
+            linux_aarch64_sha256,
+            macos_aarch64,
+            macos_aarch64_sha256,
+            macos_x86_64,
+            macos_x86_64_sha256,
+        } => {
+            let record = AppRegistryRecord {
+                app_id: app_id.clone(),
+                version: version.clone(),
+                description,
+                linux_x86_64_url: linux_x86_64,
+                linux_x86_64_sha256,
+                linux_aarch64_url: linux_aarch64,
+                linux_aarch64_sha256,
+                macos_aarch64_url: macos_aarch64,
+                macos_aarch64_sha256,
+                macos_x86_64_url: macos_x86_64,
+                macos_x86_64_sha256,
+                published_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| anyhow!("system clock error: {e}"))?
+                    .as_secs(),
+            };
+            validate_app_registry_record(&record)
+                .map_err(|err| anyhow!("invalid app registry record: {err}"))?;
+            let signing_key = load_site_signing_key()?;
+            let payload = canonical_json_bytes(&record).context("failed to encode app registry record")?;
+            let signed = SignedRecord::sign(&signing_key, payload);
+            let value = serde_json::to_string(&signed).context("failed to encode signed app record")?;
+            let key = format!("{APP_REGISTRY_PREFIX}{app_id}");
+            let client = RpcClient::new(cli.rpc_port);
+            let result = client.put_record(&key, &value).await?;
+            let status = result.get("status").and_then(Value::as_str).unwrap_or("err");
+            if status != "ok" {
+                let error = result
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("publish-app failed");
+                if error == "app registry records may only be published by the Lattice operator" {
+                    bail!("only the Lattice operator key can publish to the app registry");
+                }
+                bail!("{error}");
+            }
+            println!("published app registry record for {app_id} v{version}");
+        }
+        Command::Install { app_id } => {
+            install_app(cli.rpc_port, &app_id).await?;
+        }
+        Command::Uninstall { app_id } => {
+            uninstall_app(&app_id)?;
+        }
+        Command::Apps => {
+            list_installed_apps()?;
+        }
     }
 
     Ok(())
@@ -505,6 +613,16 @@ fn load_identity_public_key_hex() -> Result<String> {
     Ok(hex_encode(&signing_key.verifying_key().to_bytes()))
 }
 
+fn load_site_signing_key() -> Result<SigningKey> {
+    let key_path = lattice_data_dir()?.join("site_signing.key");
+    let bytes = fs::read(&key_path)
+        .with_context(|| format!("failed to read {}", key_path.display()))?;
+    let key_bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow!("invalid site signing key length in {}", key_path.display()))?;
+    Ok(SigningKey::from_bytes(&key_bytes))
+}
+
 fn lattice_data_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("LATTICE_DATA_DIR") {
         return Ok(PathBuf::from(dir));
@@ -513,6 +631,309 @@ fn lattice_data_dir() -> Result<PathBuf> {
     let base_dirs =
         BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
     Ok(base_dirs.home_dir().join(".lattice"))
+}
+
+fn lattice_apps_dir() -> Result<PathBuf> {
+    Ok(lattice_data_dir()?.join("apps"))
+}
+
+fn installed_app_path(app_id: &str) -> Result<PathBuf> {
+    Ok(lattice_apps_dir()?.join(app_id))
+}
+
+fn installed_app_meta_path(app_id: &str) -> Result<PathBuf> {
+    Ok(lattice_apps_dir()?.join(format!("{app_id}.json")))
+}
+
+fn service_file_path(app_id: &str) -> PathBuf {
+    PathBuf::from(format!("/etc/systemd/system/lattice-{app_id}.service"))
+}
+
+async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
+    let value = RpcClient::new(rpc_port)
+        .get_record(&format!("{APP_REGISTRY_PREFIX}{app_id}"))
+        .await?;
+
+    if value.is_null() {
+        println!("app {app_id} not found in registry");
+        return Ok(());
+    }
+
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow!("app registry record was not a string"))?;
+    let signed: SignedRecord = serde_json::from_str(value).context("failed to decode signed app registry record")?;
+    if !signed.verify() {
+        bail!("invalid signed app registry record");
+    }
+    if !is_registry_operator(&signed.publisher_b64()) {
+        println!("registry record has invalid operator signature, refusing to install");
+        return Ok(());
+    }
+    let record: AppRegistryRecord = signed
+        .payload_json()
+        .context("failed to decode app registry payload")?;
+    validate_app_registry_record(&record).map_err(|err| anyhow!("invalid app registry record: {err}"))?;
+    if record.app_id != app_id {
+        bail!("registry app id mismatch");
+    }
+
+    let Some((url, sha256)) = platform_asset(&record) else {
+        println!("no binary available for your platform");
+        return Ok(());
+    };
+
+    println!("installing {app_id} v{}...", record.version);
+    fs::create_dir_all(lattice_apps_dir()?)
+        .context("failed to create app install directory")?;
+
+    let temp_path = std::env::temp_dir().join(format!(
+        "lattice-install-{app_id}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    download_with_progress(url, &temp_path)?;
+    verify_sha256_file(&temp_path, sha256)?;
+
+    let install_path = installed_app_path(app_id)?;
+    if install_path.exists() {
+        fs::remove_file(&install_path)
+            .with_context(|| format!("failed to replace {}", install_path.display()))?;
+    }
+    fs::rename(&temp_path, &install_path).or_else(|_| {
+        fs::copy(&temp_path, &install_path)
+            .map(|_| ())
+            .with_context(|| format!("failed to install {}", install_path.display()))
+    })?;
+    let _ = fs::remove_file(&temp_path);
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&install_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to mark {} executable", install_path.display()))?;
+    }
+
+    let meta = InstalledAppMeta {
+        app_id: app_id.to_string(),
+        version: record.version.clone(),
+        description: record.description.clone(),
+    };
+    fs::write(
+        installed_app_meta_path(app_id)?,
+        serde_json::to_vec_pretty(&meta).context("failed to encode app metadata")?,
+    )
+    .context("failed to write app metadata")?;
+
+    if std::env::consts::OS == "linux" {
+        let service_path = service_file_path(app_id);
+        let service_contents = render_systemd_service(app_id, &install_path);
+        match fs::write(&service_path, service_contents) {
+            Ok(()) => {
+                let mut warned = false;
+                for args in [
+                    ["daemon-reload"].as_slice(),
+                    ["enable", &format!("lattice-{app_id}.service")].as_slice(),
+                    ["start", &format!("lattice-{app_id}.service")].as_slice(),
+                ] {
+                    if let Err(err) = run_systemctl(args) {
+                        warned = true;
+                        eprintln!("warning: {err}");
+                        eprintln!("service file written to {}", service_path.display());
+                        break;
+                    }
+                }
+                if !warned {
+                    println!("{app_id} installed and started");
+                }
+            }
+            Err(err) => {
+                eprintln!("warning: failed to write service file {}: {err}", service_path.display());
+                eprintln!("binary installed at {}", install_path.display());
+            }
+        }
+    } else if std::env::consts::OS == "macos" {
+        println!("installed at {}", install_path.display());
+        println!("run it manually for now");
+    } else {
+        println!("installed at {}", install_path.display());
+    }
+
+    Ok(())
+}
+
+fn uninstall_app(app_id: &str) -> Result<()> {
+    if std::env::consts::OS == "linux" {
+        let unit = format!("lattice-{app_id}.service");
+        let _ = run_systemctl(["stop", &unit].as_slice());
+        let _ = run_systemctl(["disable", &unit].as_slice());
+    }
+
+    let install_path = installed_app_path(app_id)?;
+    if install_path.exists() {
+        fs::remove_file(&install_path)
+            .with_context(|| format!("failed to delete {}", install_path.display()))?;
+    }
+
+    let meta_path = installed_app_meta_path(app_id)?;
+    if meta_path.exists() {
+        let _ = fs::remove_file(&meta_path);
+    }
+
+    if std::env::consts::OS == "linux" {
+        let service_path = service_file_path(app_id);
+        if service_path.exists() {
+            let _ = fs::remove_file(&service_path);
+        }
+        let _ = run_systemctl(["daemon-reload"].as_slice());
+    }
+
+    println!("{app_id} uninstalled");
+    Ok(())
+}
+
+fn list_installed_apps() -> Result<()> {
+    let apps_dir = lattice_apps_dir()?;
+    if !apps_dir.exists() {
+        println!("No apps installed");
+        return Ok(());
+    }
+
+    let mut found = false;
+    for entry in fs::read_dir(&apps_dir).with_context(|| format!("failed to read {}", apps_dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.ends_with(".json") {
+            continue;
+        }
+        found = true;
+        let app_id = file_name.to_string();
+        let meta = installed_app_meta_path(&app_id)
+            .ok()
+            .and_then(|path| fs::read(&path).ok())
+            .and_then(|bytes| serde_json::from_slice::<InstalledAppMeta>(&bytes).ok());
+        let version = meta
+            .as_ref()
+            .map(|meta| meta.version.as_str())
+            .unwrap_or("unknown");
+        let status = service_status(&app_id);
+        println!("{app_id} {version} {status}");
+    }
+
+    if !found {
+        println!("No apps installed");
+    }
+
+    Ok(())
+}
+
+fn platform_asset(record: &AppRegistryRecord) -> Option<(&str, &str)> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => pair(record.linux_x86_64_url.as_deref(), record.linux_x86_64_sha256.as_deref()),
+        ("linux", "aarch64") => pair(record.linux_aarch64_url.as_deref(), record.linux_aarch64_sha256.as_deref()),
+        ("macos", "aarch64") => pair(record.macos_aarch64_url.as_deref(), record.macos_aarch64_sha256.as_deref()),
+        ("macos", "x86_64") => pair(record.macos_x86_64_url.as_deref(), record.macos_x86_64_sha256.as_deref()),
+        _ => None,
+    }
+}
+
+fn pair<'a>(url: Option<&'a str>, sha256: Option<&'a str>) -> Option<(&'a str, &'a str)> {
+    match (url, sha256) {
+        (Some(url), Some(sha256)) => Some((url, sha256)),
+        _ => None,
+    }
+}
+
+fn download_with_progress(url: &str, output: &Path) -> Result<()> {
+    let client = reqwest::blocking::Client::new();
+    let mut response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("failed to download {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download failed for {url}"))?;
+    let mut file = fs::File::create(output)
+        .with_context(|| format!("failed to create {}", output.display()))?;
+    let mut downloaded = 0_u64;
+    let mut next_report = 1_048_576_u64;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = response.read(&mut buffer).context("failed to read download response")?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .with_context(|| format!("failed to write {}", output.display()))?;
+        downloaded = downloaded.saturating_add(read as u64);
+        if downloaded >= next_report {
+            println!("{downloaded} bytes downloaded");
+            next_report = next_report.saturating_add(1_048_576);
+        }
+    }
+    Ok(())
+}
+
+fn verify_sha256_file(path: &Path, expected_hex: &str) -> Result<()> {
+    let mut file = fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file.read(&mut buffer).with_context(|| format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = hex_encode(&hasher.finalize());
+    if actual != expected_hex {
+        let _ = fs::remove_file(path);
+        bail!("checksum mismatch, aborting");
+    }
+    Ok(())
+}
+
+fn render_systemd_service(app_id: &str, install_path: &Path) -> String {
+    let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+    format!(
+        "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target lattice-daemon.service\nRequires=lattice-daemon.service\n\n[Service]\nType=simple\nUser={user}\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT=7779\n\n[Install]\nWantedBy=multi-user.target\n",
+        install_path.display()
+    )
+}
+
+fn run_systemctl(args: &[&str]) -> Result<()> {
+    let status = ProcessCommand::new("systemctl")
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run systemctl {}", args.join(" ")))?;
+    if !status.success() {
+        bail!("systemctl {} failed", args.join(" "));
+    }
+    Ok(())
+}
+
+fn service_status(app_id: &str) -> String {
+    if std::env::consts::OS != "linux" {
+        return "manual".to_string();
+    }
+    let unit = format!("lattice-{app_id}.service");
+    match ProcessCommand::new("systemctl")
+        .args(["is-active", &unit])
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Ok(output) => {
+            let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if status.is_empty() { "inactive".to_string() } else { status }
+        }
+        Err(_) => "unknown".to_string(),
+    }
 }
 
 fn safe_join(base: &Path, untrusted: &str) -> Result<PathBuf> {

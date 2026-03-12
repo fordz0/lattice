@@ -41,21 +41,21 @@ optional and mainly useful for advanced testing/operator workflows.
 ### Basic commands
 ```bash
 # check your node status
-./target/release/lattice-cli status
+./target/release/lattice status
 
 # optionally claim a .loom name up front
 # (publish auto-claims if the name is currently unclaimed)
-./target/release/lattice-cli name claim yourname
+./target/release/lattice name claim yourname
 
 # create a new site in the current directory
 mkdir mysite && cd mysite
-./target/release/lattice-cli init --name yourname
+./target/release/lattice init --name yourname
 
 # publish your site to the network
-./target/release/lattice-cli publish
+./target/release/lattice publish
 
 # fetch someone else's site
-./target/release/lattice-cli fetch website --out ./website
+./target/release/lattice fetch website --out ./website
 ```
 
 ### Visit .loom sites in Firefox
@@ -63,7 +63,7 @@ mkdir mysite && cd mysite
 - Firefox extension install steps: [lattice-ext/INSTALL.md](lattice-ext/INSTALL.md)
 - For secure lock icons, import the local Lattice CA (`/__lattice_ca.pem`) as documented.
 - The extension keeps `https://*.loom` in the URL bar while routing traffic through your local daemon proxy.
-- You can also use `lattice-cli fetch` to retrieve site content locally.
+- You can also use `lattice fetch` to retrieve site content locally.
 
 ---
 

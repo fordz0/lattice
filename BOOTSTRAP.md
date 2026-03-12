@@ -23,7 +23,7 @@ sudo apt install build-essential
 git clone https://github.com/fordz0/lattice.git
 cd lattice
 cargo build --release -p lattice-daemon
-cargo build --release -p lattice-cli
+cargo build --release -p lattice
 ```
 
 ## Run as a systemd service
@@ -62,7 +62,7 @@ sudo systemctl status lattice-daemon
 
 Once running, grab your peer ID:
 ```bash
-~/lattice/target/release/lattice-cli --rpc-port 7780 status
+~/lattice/target/release/lattice --rpc-port 7780 status
 ```
 
 Send your public IP and peer ID to be added to the default bootstrap

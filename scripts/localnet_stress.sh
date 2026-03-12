@@ -6,7 +6,7 @@ CMD="${1:-run}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 LOCALNET_SCRIPT="$REPO_ROOT/scripts/localnet.sh"
-CLI_BIN="${LATTICE_CLI_BIN:-$REPO_ROOT/target/release/lattice-cli}"
+CLI_BIN="${LATTICE_CLI_BIN:-$REPO_ROOT/target/release/lattice}"
 
 NODES="${LATTICE_STRESS_NODES:-12}"
 ROUNDS="${LATTICE_STRESS_ROUNDS:-3}"
