@@ -1255,8 +1255,9 @@ pub fn page_html() -> &'static str {
       el("identity-dropdown").classList.toggle("hidden");
     });
     el("identity-edit").addEventListener("click", () => {
-      setIdentityModalMode("edit");
-      el("onboarding-handle").value = state.identity && state.identity.handle ? state.identity.handle : "";
+      const hasHandle = state.identity && state.identity.handle;
+      setIdentityModalMode(hasHandle ? "edit" : "onboarding");
+      el("onboarding-handle").value = hasHandle ? state.identity.handle : "";
       el("onboarding-display-name").value = state.identity && state.identity.display_name ? state.identity.display_name : "";
       el("onboarding-bio").value = state.identity && state.identity.bio ? state.identity.bio : "";
       el("onboarding-error").textContent = "";
