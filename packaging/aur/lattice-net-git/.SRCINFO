@@ -13,6 +13,8 @@ pkgbase = lattice-net-git
 	provides = lattice-net
 	conflicts = lattice-net
 	conflicts = lattice-net-bin
+	options = !lto
+	options = !debug
 	source = git+https://github.com/fordz0/lattice.git
 	sha256sums = SKIP
 

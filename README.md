@@ -23,20 +23,20 @@ No single point anyone can lean on to take something down.
 ```bash
 git clone https://github.com/fordz0/lattice.git
 cd lattice
-cargo build --release
+cargo build --release -p lattice-daemon -p lattice
 ```
 
 ### Run the daemon
 
-Open a terminal and keep it running:
+Bring the local daemon online:
 ```bash
-./target/release/lattice-daemon
+./target/release/lattice up
 ```
 
-This connects you to the Lattice network automatically via the
-default bootstrap node. Leave it running while you use Lattice.
-One daemon is enough for normal use; running multiple local nodes is
-optional and mainly useful for advanced testing/operator workflows.
+This starts or enables `lattice-daemon`, connects you to the default
+bootstrap node, and waits for the daemon to become ready. One daemon is
+enough for normal use; running multiple local nodes is optional and mainly
+useful for advanced testing/operator workflows.
 
 ### Basic commands
 ```bash
@@ -56,6 +56,9 @@ mkdir mysite && cd mysite
 
 # fetch someone else's site
 ./target/release/lattice fetch website --out ./website
+
+# update installed lattice apps from the registry
+./target/release/lattice update --all
 ```
 
 ### Visit .loom sites in Firefox

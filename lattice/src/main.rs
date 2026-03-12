@@ -145,7 +145,7 @@ async fn main() {
         Ok(()) => 0,
         Err(err) => {
             if err.downcast_ref::<DaemonNotRunning>().is_some() {
-                eprintln!("lattice daemon is not running. Start it with: lattice-daemon");
+                eprintln!("lattice daemon is not running. Start it with: lattice up");
             } else if let Some(claimed) = err.downcast_ref::<NameClaimedByOther>() {
                 println!(
                     "Error: {}.loom is already claimed by another key",
@@ -755,6 +755,10 @@ fn daemon_system_service_file_path() -> PathBuf {
     system_service_file_path("daemon")
 }
 
+fn packaged_daemon_user_service_file_path() -> PathBuf {
+    PathBuf::from("/usr/lib/systemd/user/lattice-daemon.service")
+}
+
 fn daemon_user_service_file_path() -> Result<PathBuf> {
     user_service_file_path("daemon")
 }
@@ -788,6 +792,13 @@ fn detect_daemon_service_mode() -> Result<Option<ServiceMode>> {
         }));
     }
 
+    let packaged_user_path = packaged_daemon_user_service_file_path();
+    if packaged_user_path.exists() {
+        return Ok(Some(ServiceMode::User {
+            service_path: packaged_user_path,
+        }));
+    }
+
     let user_path = daemon_user_service_file_path()?;
     if let Some(parent) = user_path.parent() {
         fs::create_dir_all(parent)
@@ -805,6 +816,13 @@ fn detect_existing_daemon_service_mode() -> Result<Option<ServiceMode>> {
     if system_path.exists() {
         return Ok(Some(ServiceMode::System {
             service_path: system_path,
+        }));
+    }
+
+    let packaged_user_path = packaged_daemon_user_service_file_path();
+    if packaged_user_path.exists() {
+        return Ok(Some(ServiceMode::User {
+            service_path: packaged_user_path,
         }));
     }
 
@@ -954,6 +972,52 @@ fn stop_manual_daemon() -> Result<bool> {
     Ok(true)
 }
 
+fn has_manual_daemon_pid() -> Result<bool> {
+    Ok(daemon_pid_path()?.exists())
+}
+
+fn start_manual_daemon(rpc_port: u16) -> Result<()> {
+    let daemon_path = daemon_binary_path()?;
+    let child = ProcessCommand::new(&daemon_path)
+        .arg("--rpc-port")
+        .arg(rpc_port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to start {}", daemon_path.display()))?;
+    write_daemon_pid(child.id())
+}
+
+async fn restart_daemon_if_managed(rpc_port: u16) -> Result<()> {
+    if RpcClient::new(rpc_port).node_info().await.is_err() {
+        return Ok(());
+    }
+
+    if std::env::consts::OS == "linux" {
+        if let Some(mode) = detect_existing_daemon_service_mode()? {
+            let args = mode.systemctl_args(["restart", "lattice-daemon.service"].as_slice());
+            run_systemctl(&args)?;
+            let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+            println!("lattice-daemon restarted");
+            return Ok(());
+        }
+    }
+
+    if has_manual_daemon_pid()? {
+        stop_manual_daemon()?;
+        start_manual_daemon(rpc_port)?;
+        let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+        println!("lattice-daemon restarted");
+        return Ok(());
+    }
+
+    eprintln!(
+        "warning: lattice-daemon is running but not managed by `lattice up`; restart it manually to pick up app changes"
+    );
+    Ok(())
+}
+
 async fn up(rpc_port: u16) -> Result<()> {
     if let Ok(info) = RpcClient::new(rpc_port).node_info().await {
         println!("lattice-daemon is already running");
@@ -965,7 +1029,9 @@ async fn up(rpc_port: u16) -> Result<()> {
         let daemon_path = daemon_binary_path()?;
         if let Some(mode) = detect_daemon_service_mode()? {
             let service_path = mode.service_path().to_path_buf();
-            if matches!(mode, ServiceMode::User { .. }) {
+            if matches!(mode, ServiceMode::User { .. })
+                && service_path == daemon_user_service_file_path()?
+            {
                 let service = render_daemon_systemd_service(&mode, &daemon_path, rpc_port);
                 fs::write(&service_path, service)
                     .with_context(|| format!("failed to write {}", service_path.display()))?;
@@ -994,16 +1060,7 @@ async fn up(rpc_port: u16) -> Result<()> {
         }
     }
 
-    let daemon_path = daemon_binary_path()?;
-    let child = ProcessCommand::new(&daemon_path)
-        .arg("--rpc-port")
-        .arg(rpc_port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to start {}", daemon_path.display()))?;
-    write_daemon_pid(child.id())?;
+    start_manual_daemon(rpc_port)?;
     let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
     println!("lattice-daemon started");
     print_status(&info);
@@ -1167,6 +1224,8 @@ async fn install_or_update_app(rpc_port: u16, app_id: &str, update_only: bool) -
     } else {
         println!("installed at {}", install_path.display());
     }
+
+    restart_daemon_if_managed(rpc_port).await?;
 
     Ok(())
 }
