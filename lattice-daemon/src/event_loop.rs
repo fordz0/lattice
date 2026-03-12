@@ -153,6 +153,17 @@ fn current_dht_site_version(
     }
 }
 
+fn should_rate_limit_existing_name_claim(existing_owner_pubkey_hex: Option<&str>, claimant_pubkey_hex: &str) -> bool {
+    !matches!(existing_owner_pubkey_hex, Some(owner) if owner == claimant_pubkey_hex)
+}
+
+fn should_rate_limit_publish_claim(owned_names: &Arc<Mutex<HashSet<String>>>, name: &str) -> bool {
+    !owned_names
+        .lock()
+        .map(|owned| owned.contains(name))
+        .unwrap_or(false)
+}
+
 
 #[allow(clippy::too_many_arguments)]
 fn handle_claim_name_lookup_result(
@@ -172,6 +183,7 @@ fn handle_claim_name_lookup_result(
     } = claim;
 
     let mut record_to_store = NameRecord::new_signed(pubkey_hex.clone(), &name, site_signing_key);
+    let mut existing_owner_pubkey_hex = None;
 
     if let Ok(kad::GetRecordOk::FoundRecord(record)) = result {
         let existing_value = match String::from_utf8(record.record.value) {
@@ -189,6 +201,7 @@ fn handle_claim_name_lookup_result(
             }
 
             if existing_record.key == pubkey_hex {
+                existing_owner_pubkey_hex = Some(existing_record.key.clone());
                 existing_record.refresh_signed(&name, site_signing_key);
                 record_to_store = existing_record;
             }
@@ -209,9 +222,11 @@ fn handle_claim_name_lookup_result(
         let _ = respond_to.send(Err("invalid claim key".to_string()));
         return;
     };
-    if let Err(err) = local_record_store.check_and_update_claim_rate_limit(&pubkey_b64, unix_ts()) {
-        let _ = respond_to.send(Err(err));
-        return;
+    if should_rate_limit_existing_name_claim(existing_owner_pubkey_hex.as_deref(), &pubkey_hex) {
+        if let Err(err) = local_record_store.check_and_update_claim_rate_limit(&pubkey_b64, unix_ts()) {
+            let _ = respond_to.send(Err(err));
+            return;
+        }
     }
     remember_local_record(
         local_record_store,
@@ -1652,11 +1667,13 @@ pub fn handle_swarm_event(
                                     let _ = pending.respond_to.send(Err("invalid claim key".to_string()));
                                     return;
                                 };
-                                if let Err(err) = local_record_store
-                                    .check_and_update_claim_rate_limit(&pubkey_b64, unix_ts())
-                                {
-                                    let _ = pending.respond_to.send(Err(err));
-                                    return;
+                                if should_rate_limit_publish_claim(owned_names, &pending.name) {
+                                    if let Err(err) = local_record_store
+                                        .check_and_update_claim_rate_limit(&pubkey_b64, unix_ts())
+                                    {
+                                        let _ = pending.respond_to.send(Err(err));
+                                        return;
+                                    }
                                 }
                                 remember_local_record(
                                     local_record_store,
@@ -1978,5 +1995,40 @@ pub fn handle_swarm_event(
             error!(error = %error, "listener error");
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_rate_limit_existing_name_claim, should_rate_limit_publish_claim};
+    use lattice_daemon::store::LocalRecordStore;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    #[test]
+    fn skips_rate_limit_for_existing_owned_name_claim() {
+        assert!(!should_rate_limit_existing_name_claim(Some("owner"), "owner"));
+        assert!(should_rate_limit_existing_name_claim(Some("other"), "owner"));
+        assert!(should_rate_limit_existing_name_claim(None, "owner"));
+    }
+
+    #[test]
+    fn republishing_existing_owned_name_does_not_consume_rate_limit_window() {
+        let dir = tempdir().expect("tempdir");
+        let store = LocalRecordStore::open(dir.path(), [42; 32]).expect("open store");
+        let key_b64 = "owner-key";
+        store
+            .check_and_update_claim_rate_limit(key_b64, 10_000)
+            .expect("first claim");
+
+        let owned_names = Arc::new(Mutex::new(HashSet::from([String::from("lattice")])));
+        assert!(!should_rate_limit_publish_claim(&owned_names, "lattice"));
+
+        let last_claim = store
+            .get_last_claim_ts(key_b64)
+            .expect("read claim ts")
+            .expect("claim ts present");
+        assert_eq!(last_claim, 10_000);
     }
 }

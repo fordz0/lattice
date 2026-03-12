@@ -16,11 +16,15 @@ pub fn enforce_app_record_ownership(
         serde_json::from_str::<SignedRecord>(value_str).map_err(|_| "invalid signed record".to_string())?;
     let publisher_b64 = signed.publisher_b64();
 
-    match local_record_store
+    let existing_owner = local_record_store
         .get_app_record_owner(key)
-        .map_err(|err| err.to_string())?
-    {
-        Some(owner) if owner == publisher_b64 => Ok(()),
+        .map_err(|err| err.to_string())?;
+
+    if existing_owner.as_deref() == Some(publisher_b64.as_str()) {
+        return Ok(());
+    }
+
+    match existing_owner {
         Some(_) => Err("app record owned by a different key".to_string()),
         None => {
             local_record_store.check_and_update_claim_rate_limit(&publisher_b64, now)?;
