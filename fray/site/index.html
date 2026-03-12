@@ -6,62 +6,368 @@
   <title>Fray</title>
   <style>
     :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-alt: #11161d;
+      --line: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #f78166;
+      --accent-soft: #3d1f1a;
+      --good: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --input: #0d1117;
+      --hover: #1c2128;
+      --shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+    }
+
+    body[data-theme="light"] {
       --bg: #f6f1e9;
-      --ink: #1e2a33;
-      --muted: #5f6d75;
+      --surface: #fffaf3;
+      --surface-alt: #f3e7d9;
       --line: #d8c7b2;
-      --panel: #fffaf3;
-      --brand: #cc5a21;
-      --brand-soft: #f4d8c7;
+      --text: #1e2a33;
+      --muted: #5f6d75;
+      --accent: #cc5a21;
+      --accent-soft: #f4d8c7;
       --good: #1f8a4d;
       --warn: #8a6c18;
       --bad: #a22929;
+      --input: #f6f1e9;
+      --hover: #f4ede4;
+      --shadow: 0 18px 40px rgba(71, 48, 29, 0.12);
     }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      color: var(--ink);
-      font-family: "Avenir Next", "Gill Sans", "Trebuchet MS", sans-serif;
-      background:
-        radial-gradient(circle at 12% 0%, #f7ddc6 0, transparent 35%),
-        radial-gradient(circle at 88% 0%, #efe2cb 0, transparent 28%),
-        var(--bg);
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
     }
-    a { color: inherit; }
-    .wrap { max-width: 1180px; margin: 0 auto; padding: 20px; }
-    header { display: flex; justify-content: space-between; gap: 16px; align-items: end; flex-wrap: wrap; }
-    h1 {
-      margin: 0;
-      font-size: clamp(34px, 7vw, 64px);
-      line-height: 0.95;
-      letter-spacing: 0.02em;
-      font-family: "Palatino Linotype", "Book Antiqua", Palatino, serif;
-    }
-    .sub { margin-top: 8px; color: var(--muted); font-size: 14px; }
-    .toolbar, .nav { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .nav { margin-top: 12px; }
-    input, textarea, button, select {
+
+    a { color: inherit; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    button,
+    input,
+    textarea,
+    select {
       font: inherit;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 10px 12px;
-      background: var(--panel);
-      color: var(--ink);
+      color: inherit;
     }
-    input, textarea, select { width: 100%; }
-    textarea { min-height: 110px; resize: vertical; }
+
+    button,
+    input,
+    textarea,
+    select {
+      border: 1px solid var(--line);
+      background: var(--input);
+      border-radius: 8px;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      padding: 10px 12px;
+    }
+
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+
     button {
-      background: linear-gradient(180deg, #ffd6bb 0%, var(--brand-soft) 100%);
-      border-color: #d09a74;
       cursor: pointer;
+      padding: 8px 12px;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    }
+
+    button:hover {
+      filter: brightness(1.03);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: transparent;
       font-weight: 600;
     }
-    button:hover { filter: brightness(0.98); }
+
     .btn-ghost {
-      background: #fff;
+      background: transparent;
+      color: var(--muted);
       border-color: var(--line);
       font-weight: 500;
     }
+
+    .btn-ghost:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
+
+    .wrap {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 0 20px 28px;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 20px;
+      margin: 0 -20px 20px;
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      backdrop-filter: blur(18px);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brandmark {
+      display: grid;
+      gap: 4px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .sidebar,
+    .card,
+    .thread-shell {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 86px;
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    .sidebar-section {
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      gap: 10px;
+    }
+
+    .sidebar-section:last-child {
+      border-bottom: 0;
+    }
+
+    .wordmark {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .sidebar-label,
+    .eyebrow {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .nav {
+      display: grid;
+      gap: 8px;
+    }
+
+    .nav button {
+      width: 100%;
+      text-align: left;
+    }
+
+    .main-column {
+      min-width: 0;
+      display: grid;
+      gap: 16px;
+    }
+
+    .feed-topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .card {
+      border-radius: 14px;
+      padding: 16px;
+    }
+
+    .composer {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .composer.hidden {
+      display: none !important;
+    }
+
+    .posts {
+      display: grid;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+    .post {
+      position: relative;
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 0 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+    }
+
+    .post:last-child {
+      border-bottom: 0;
+    }
+
+    .post::before {
+      content: "▲";
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      grid-row: 1 / span 2;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.8;
+      opacity: 0.7;
+    }
+
+    .post:hover {
+      background: var(--hover);
+    }
+
+    .post-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 500;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .post > div:first-of-type {
+      min-width: 0;
+    }
+
+    .post > .muted {
+      grid-column: 2;
+      font-size: 12px;
+    }
+
+    .post.restricted .post-title,
+    .post.restricted .muted,
+    .comment.restricted strong {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .thread-shell {
+      border-radius: 14px;
+      padding: 16px;
+    }
+
+    .thread-shell h4 {
+      margin: 18px 0 10px;
+      font-size: 13px;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    #thread-title {
+      margin: 0 0 8px;
+      font-size: 24px;
+      line-height: 1.15;
+    }
+
+    #thread-body,
+    .comment,
+    .directory-entry,
+    .trust-entry,
+    .mod-entry {
+      font-size: 14px;
+    }
+
+    #thread-body {
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+
+    .comments,
+    .directory-list,
+    .trust-list,
+    .mods-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .comment,
+    .directory-entry,
+    .trust-entry,
+    .mod-entry {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      background: var(--surface-alt);
+    }
+
+    .comment {
+      border-left: 3px solid color-mix(in srgb, var(--accent) 65%, transparent);
+    }
+
     .chip {
       display: inline-flex;
       align-items: center;
@@ -70,10 +376,21 @@
       border-radius: 999px;
       padding: 4px 9px;
       font-size: 12px;
-      background: #fff;
+      line-height: 1;
+      background: transparent;
+      white-space: nowrap;
     }
-    .chip.good { color: var(--good); border-color: #9dc9ad; }
-    .chip.warn { color: var(--warn); border-color: #d8c78b; }
+
+    .chip.good {
+      color: var(--good);
+      border-color: color-mix(in srgb, var(--good) 55%, var(--line));
+    }
+
+    .chip.warn {
+      color: var(--warn);
+      border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+    }
+
     .dot {
       width: 8px;
       height: 8px;
@@ -81,154 +398,209 @@
       display: inline-block;
       background: currentColor;
     }
-    .grid {
+
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .row > * {
+      min-width: 0;
+    }
+
+    .stack {
       display: grid;
-      grid-template-columns: 1.25fr 1fr;
-      gap: 14px;
-      margin-top: 14px;
+      gap: 10px;
     }
-    .card {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
-    }
-    .title {
-      margin: 0 0 8px;
-      font-size: 17px;
-      font-weight: 700;
-      letter-spacing: 0.01em;
-    }
-    .muted { color: var(--muted); font-size: 13px; }
-    .hidden { display: none !important; }
-    .row { display: flex; gap: 8px; }
-    .stack { display: grid; gap: 10px; }
-    .posts, .directory-list, .trust-list, .mods-list { display: grid; gap: 10px; }
-    .post, .directory-entry, .trust-entry, .mod-entry {
-      border: 1px solid var(--line);
+
+    .status {
+      position: sticky;
+      bottom: 16px;
+      margin-top: 4px;
+      min-height: 18px;
+      padding: 10px 12px;
       border-radius: 10px;
-      padding: 10px;
-      background: #fffdf9;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
     }
-    .post-title {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 700;
-      color: #26333c;
-      cursor: pointer;
+
+    .status.ok {
+      color: var(--good);
+      background: color-mix(in srgb, var(--good) 10%, transparent);
+      border-color: color-mix(in srgb, var(--good) 28%, transparent);
     }
-    .comments { display: grid; gap: 8px; margin-top: 10px; }
-    .comment {
-      border-left: 3px solid #e6c5a9;
-      padding-left: 10px;
-      background: #fffdfa;
-      border-radius: 4px;
+
+    .status.err {
+      color: var(--bad);
+      background: color-mix(in srgb, var(--bad) 10%, transparent);
+      border-color: color-mix(in srgb, var(--bad) 28%, transparent);
     }
+
     .restricted {
-      color: #7a7a7a;
+      color: var(--muted);
     }
+
     .collapsed-body {
       display: none;
       margin-top: 8px;
     }
-    .status {
-      margin-top: 8px;
-      min-height: 18px;
-      font-size: 13px;
-      color: var(--muted);
+
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      word-break: break-all;
     }
-    .status.ok { color: var(--good); }
-    .status.err { color: var(--bad); }
-    code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
-    @media (max-width: 900px) {
-      .grid { grid-template-columns: 1fr; }
+
+    @media (max-width: 960px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: static;
+      }
+
+      header {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .toolbar {
+        justify-content: flex-start;
+      }
     }
   </style>
 </head>
-<body>
+<body data-theme="dark">
   <div class="wrap">
     <header>
-      <div>
+      <div class="brandmark">
         <h1>Fray</h1>
         <div class="sub">Distributed threads and local trust for Lattice</div>
-        <div class="nav">
-          <button id="nav-home" class="btn-ghost">Feed</button>
-          <button id="nav-directory" class="btn-ghost">Directory</button>
-          <button id="nav-mod" class="btn-ghost">Mod Panel</button>
-        </div>
       </div>
       <div class="toolbar">
-        <button id="sync-pull" class="btn-ghost">Pull Network Feed</button>
-        <button id="sync-publish">Publish Feed</button>
+        <button id="theme-toggle" class="btn-ghost" type="button" aria-label="Toggle theme">☀</button>
+        <button id="sync-pull" class="btn-ghost" type="button">Pull Network Feed</button>
+        <button id="sync-publish" class="btn-ghost" type="button">Publish Feed</button>
       </div>
     </header>
 
-    <section id="view-feed">
-      <div class="grid">
-        <section class="card">
-          <h2 class="title">Fray Feed</h2>
-          <div class="row">
-            <input id="fray-name" placeholder="fray name (e.g. lattice)" value="lattice">
-            <button id="load">Load</button>
-          </div>
-          <div id="posts" class="posts" style="margin-top:10px;"></div>
+    <div class="shell">
+      <aside class="sidebar">
+        <section class="sidebar-section">
+          <div class="eyebrow">Local app</div>
+          <div class="wordmark">Fray</div>
+          <div class="sub">Threads, directories, and trust records over Lattice.</div>
         </section>
 
-        <section class="card">
-          <h2 class="title">Create Thread</h2>
-          <input id="author" placeholder="author (e.g. fordz0)" value="fordz0">
-          <input id="title" placeholder="thread title" style="margin-top:8px;">
-          <textarea id="body" placeholder="write your thread..."></textarea>
-          <button id="create">Post Thread</button>
+        <section class="sidebar-section">
+          <div class="sidebar-label">Current Fray</div>
+          <input id="fray-name" placeholder="fray name (e.g. lattice)" value="lattice">
+          <button id="load" class="btn-primary" type="button">Load /f/</button>
         </section>
-      </div>
 
-      <section class="card" style="margin-top:14px;">
-        <h2 class="title">Thread</h2>
-        <div id="thread-empty" class="muted">Select a thread to view comments.</div>
-        <article id="thread" style="display:none;">
-          <h3 id="thread-title" style="margin:0 0 6px;font-size:22px;"></h3>
-          <div id="thread-meta" class="muted"></div>
-          <p id="thread-body" style="white-space:pre-wrap;"></p>
-          <h4 style="margin:14px 0 8px;">Comments</h4>
-          <div id="comments" class="comments"></div>
-          <div style="margin-top:10px;">
-            <input id="comment-author" placeholder="comment author" value="fordz0">
-            <textarea id="comment-body" placeholder="add a comment..."></textarea>
-            <button id="comment-create">Add Comment</button>
+        <section class="sidebar-section">
+          <div class="sidebar-label">Navigate</div>
+          <div class="nav">
+            <button id="nav-home" class="btn-ghost" type="button">Feed</button>
+            <button id="nav-directory" class="btn-ghost" type="button">Directory</button>
+            <button id="nav-mod" class="btn-ghost" type="button">Mod Panel</button>
           </div>
-        </article>
-      </section>
-    </section>
+        </section>
 
-    <section id="view-directory" class="card hidden" style="margin-top:14px;">
-      <h2 class="title">Directory</h2>
-      <div class="muted">Listed frays published into the shared directory.</div>
-      <div id="directory-list" class="directory-list" style="margin-top:10px;"></div>
-    </section>
+        <section class="sidebar-section">
+          <div class="sidebar-label">Compose</div>
+          <button id="new-thread-toggle" class="btn-primary" type="button">+ New Thread</button>
+        </section>
+      </aside>
 
-    <section id="view-mod" class="card hidden" style="margin-top:14px;">
-      <h2 class="title">Mod Panel</h2>
-      <div id="mod-summary" class="muted">Load a fray you own to inspect its trust record.</div>
-      <div id="mod-owned" class="stack hidden" style="margin-top:10px;">
-        <div class="row">
-          <input id="trust-key" placeholder="publisher key (base64)">
-          <select id="trust-standing">
-            <option>Trusted</option>
-            <option selected>Normal</option>
-            <option>Restricted</option>
-          </select>
-        </div>
-        <input id="trust-label" placeholder="label (optional)">
-        <input id="trust-reason" placeholder="reason (used for Restricted)">
-        <div class="muted">Signed moderator actions are not wired into the browser yet. Use signed API requests locally for mutations.</div>
-        <div class="trust-list" id="trust-list"></div>
-        <h3 class="title" style="margin-top:8px;">Moderators</h3>
-        <div class="mods-list" id="mods-list"></div>
-      </div>
-    </section>
+      <main class="main-column">
+        <section id="view-feed">
+          <section class="card">
+            <div class="feed-topbar">
+              <div>
+                <h2 class="title">Fray Feed</h2>
+                <div class="muted">Browsing threads in the current fray.</div>
+              </div>
+              <button id="new-thread-inline" class="btn-ghost" type="button">+ New Thread</button>
+            </div>
 
-    <div id="status" class="status"></div>
+            <div id="new-thread-panel" class="card composer hidden">
+              <h3 class="title">Create Thread</h3>
+              <input id="author" placeholder="author (e.g. fordz0)" value="fordz0">
+              <input id="title" placeholder="thread title">
+              <textarea id="body" placeholder="write your thread..."></textarea>
+              <div class="row">
+                <button id="create" class="btn-primary" type="button">Post Thread</button>
+                <button id="new-thread-close" class="btn-ghost" type="button">Close</button>
+              </div>
+            </div>
+
+            <div id="posts" class="posts"></div>
+          </section>
+
+          <section class="thread-shell">
+            <h2 class="title">Thread</h2>
+            <div id="thread-empty" class="muted">Select a thread to view comments.</div>
+            <article id="thread" style="display:none;">
+              <h3 id="thread-title"></h3>
+              <div id="thread-meta" class="muted"></div>
+              <p id="thread-body"></p>
+              <h4>Comments</h4>
+              <div id="comments" class="comments"></div>
+              <div class="stack" style="margin-top:14px;">
+                <input id="comment-author" placeholder="comment author" value="fordz0">
+                <textarea id="comment-body" placeholder="add a comment..."></textarea>
+                <div class="row">
+                  <button id="comment-create" class="btn-primary" type="button">Add Comment</button>
+                </div>
+              </div>
+            </article>
+          </section>
+        </section>
+
+        <section id="view-directory" class="card hidden">
+          <h2 class="title">Directory</h2>
+          <div class="muted">Listed frays published into the shared directory.</div>
+          <div id="directory-list" class="directory-list" style="margin-top:12px;"></div>
+        </section>
+
+        <section id="view-mod" class="card hidden">
+          <h2 class="title">Mod Panel</h2>
+          <div id="mod-summary" class="muted">Load a fray you own to inspect its trust record.</div>
+          <div id="mod-owned" class="stack hidden" style="margin-top:12px;">
+            <div class="row">
+              <input id="trust-key" placeholder="publisher key (base64)">
+              <select id="trust-standing">
+                <option>Trusted</option>
+                <option selected>Normal</option>
+                <option>Restricted</option>
+              </select>
+            </div>
+            <input id="trust-label" placeholder="label (optional)">
+            <input id="trust-reason" placeholder="reason (used for Restricted)">
+            <div class="muted">Signed moderator actions are not wired into the browser yet. Use signed API requests locally for mutations.</div>
+            <div class="trust-list" id="trust-list"></div>
+            <h3 class="title" style="margin-top:8px;">Moderators</h3>
+            <div class="mods-list" id="mods-list"></div>
+          </div>
+        </section>
+
+        <div id="status" class="status"></div>
+      </main>
+    </div>
   </div>
   <script>
     const el = (id) => document.getElementById(id);
@@ -340,7 +712,7 @@
     function renderPosts() {
       const posts = el("posts");
       if (!state.posts.length) {
-        posts.innerHTML = `<div class="muted">No threads yet in /f/${esc(state.fray)}</div>`;
+        posts.innerHTML = `<div class="muted" style="padding:16px;">No threads yet in /f/${esc(state.fray)}</div>`;
         return;
       }
       posts.innerHTML = state.posts.map((p) => `
@@ -498,6 +870,7 @@
         el("title").value = "";
         el("body").value = "";
         setStatus("Thread posted", "ok");
+        closeComposer();
         await loadPosts();
         await loadThread(post.id);
       } catch (err) {
@@ -545,6 +918,21 @@
       }
     }
 
+    function applyTheme(theme) {
+      document.body.dataset.theme = theme;
+      el("theme-toggle").textContent = theme === "dark" ? "☀" : "☽";
+      localStorage.setItem("fray-theme", theme);
+    }
+
+    function openComposer() {
+      el("new-thread-panel").classList.remove("hidden");
+      el("title").focus();
+    }
+
+    function closeComposer() {
+      el("new-thread-panel").classList.add("hidden");
+    }
+
     el("nav-home").addEventListener("click", () => { state.view = "feed"; loadPosts(); });
     el("nav-directory").addEventListener("click", () => { loadDirectory(); });
     el("nav-mod").addEventListener("click", () => { state.view = "mod"; loadModPanel(); });
@@ -553,6 +941,13 @@
     el("comment-create").addEventListener("click", createComment);
     el("sync-pull").addEventListener("click", syncPull);
     el("sync-publish").addEventListener("click", syncPublish);
+    el("new-thread-toggle").addEventListener("click", openComposer);
+    el("new-thread-inline").addEventListener("click", openComposer);
+    el("new-thread-close").addEventListener("click", closeComposer);
+    el("theme-toggle").addEventListener("click", () => {
+      applyTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
+    });
+    applyTheme(localStorage.getItem("fray-theme") || "dark");
     readRoute();
     toggleViews();
     loadView();
