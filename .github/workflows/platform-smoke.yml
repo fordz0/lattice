@@ -47,6 +47,9 @@ jobs:
       - name: Check service status command
         run: cargo run -p lattice -- service status
 
+      - name: Check doctor command
+        run: cargo run -p lattice -- doctor --json
+
       - name: Start daemon and check status (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -63,6 +66,7 @@ jobs:
           for _ in $(seq 1 30); do
             if cargo run -p lattice -- --rpc-port 17880 status >/tmp/lattice-status.txt 2>&1; then
               cat /tmp/lattice-status.txt
+              cargo run -p lattice -- --rpc-port 17880 doctor --json
               exit 0
             fi
             sleep 1
@@ -86,6 +90,7 @@ jobs:
               cargo run -p lattice -- --rpc-port 17880 status *> status.log
               if ($LASTEXITCODE -eq 0) {
                 Get-Content status.log
+                cargo run -p lattice -- --rpc-port 17880 doctor --json
                 exit 0
               }
               Start-Sleep -Seconds 1

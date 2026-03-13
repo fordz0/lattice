@@ -45,6 +45,7 @@ cargo build --release -p lattice-daemon -p lattice
 Bring the local daemon online:
 ```bash
 lattice up
+lattice doctor
 ```
 
 This starts or enables `lattice-daemon`, connects you to the default
@@ -52,10 +53,14 @@ bootstrap node, and waits for the daemon to become ready. One daemon is
 enough for normal use; running multiple local nodes is optional and mainly
 useful for advanced testing/operator workflows.
 
+If something feels off, run `lattice doctor` for a quick health check and
+actionable next steps.
+
 ### Basic commands
 ```bash
 # check your node status
 lattice status
+lattice doctor
 
 # optionally claim a .loom name up front
 # (publish auto-claims if the name is currently unclaimed)

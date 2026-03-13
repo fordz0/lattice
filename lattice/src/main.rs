@@ -1788,6 +1788,7 @@ async fn up(rpc_port: u16) -> Result<()> {
     if let Ok(info) = RpcClient::new(rpc_port).node_info().await {
         println!("lattice-daemon is already running");
         print_status(&info);
+        print_up_next_steps();
         return Ok(());
     }
 
@@ -1821,6 +1822,7 @@ async fn up(rpc_port: u16) -> Result<()> {
                 let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
                 println!("lattice-daemon enabled and started");
                 print_status(&info);
+                print_up_next_steps();
                 return Ok(());
             }
         }
@@ -1849,6 +1851,7 @@ async fn up(rpc_port: u16) -> Result<()> {
         let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
         println!("lattice-daemon enabled and started");
         print_status(&info);
+        print_up_next_steps();
         return Ok(());
     }
 
@@ -1863,6 +1866,7 @@ async fn up(rpc_port: u16) -> Result<()> {
                 let info = wait_for_daemon(rpc_port, Duration::from_secs(15)).await?;
                 println!("lattice-daemon enabled and started");
                 print_status(&info);
+                print_up_next_steps();
                 return Ok(());
             }
             Err(err) => {
@@ -1878,7 +1882,16 @@ async fn up(rpc_port: u16) -> Result<()> {
     let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
     println!("lattice-daemon started");
     print_status(&info);
+    print_up_next_steps();
     Ok(())
+}
+
+fn print_up_next_steps() {
+    println!();
+    println!("Next steps:");
+    println!("  - verify the local setup: lattice doctor");
+    println!("  - browse .loom sites in Firefox: https://addons.mozilla.org/en-US/firefox/addon/lattice/");
+    println!("  - publish your first site: lattice publish --dir ./site --name mysite");
 }
 
 fn down() -> Result<()> {
