@@ -26,27 +26,31 @@ if ($outputDir) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 }
 
-$wixVersion = (& wix --version).Trim()
-if (-not $wixVersion) {
-    throw "Failed to determine WiX tool version"
+function Invoke-Wix {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+
+    $output = & wix @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("wix {0} failed:`n{1}" -f ($Arguments -join ' '), ($output -join [Environment]::NewLine))
+    }
+    return $output
 }
 
-$uiExtensionList = & wix extension list --global
+$uiExtensionList = Invoke-Wix extension list --global
 if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
-    & wix extension add --global "WixToolset.UI.wixext/$wixVersion"
+    Invoke-Wix extension add --global WixToolset.UI.wixext | Out-Null
+    $uiExtensionList = Invoke-Wix extension list --global
+}
+if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
+    throw "WiX UI extension is still unavailable after installation attempt"
 }
 
-$uiExtensionDir = Join-Path $env:USERPROFILE ".wix\extensions\WixToolset.UI.wixext"
-$uiExtensionDll = Get-ChildItem -Path $uiExtensionDir -Filter "WixToolset.UI.wixext.dll" -Recurse -File |
-    Sort-Object FullName -Descending |
-    Select-Object -First 1
-if ($null -eq $uiExtensionDll) {
-    throw "Failed to locate WixToolset.UI.wixext.dll under $uiExtensionDir"
-}
-
-& wix build `
+Invoke-Wix build `
     -arch x64 `
-    -ext $uiExtensionDll.FullName `
+    -ext WixToolset.UI.wixext `
     -d SourceDir="$resolvedSource" `
     -d Version="$Version" `
     $wxsPath `
