@@ -50,7 +50,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Up,
+    Up {
+        #[arg(long)]
+        bootstrap: bool,
+    },
+    Bootstrap,
     Down,
     Doctor {
         #[arg(long)]
@@ -217,8 +221,11 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Up => {
-            up(cli.rpc_port).await?;
+        Command::Up { bootstrap } => {
+            up(cli.rpc_port, bootstrap).await?;
+        }
+        Command::Bootstrap => {
+            bootstrap(cli.rpc_port).await?;
         }
         Command::Down => {
             down()?;
@@ -1006,15 +1013,67 @@ fn uninstall_macos_app_launch_agent(app_id: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn linux_service_user() -> String {
+    std::env::var("SUDO_USER")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "root".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_home_dir_for_user(user: &str) -> Option<PathBuf> {
+    if std::env::var("USER").ok().as_deref() == Some(user) {
+        if let Ok(home) = std::env::var("HOME") {
+            let path = PathBuf::from(home);
+            if path.is_absolute() {
+                return Some(path);
+            }
+        }
+    }
+
+    let output = ProcessCommand::new("getent")
+        .args(["passwd", user])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let entry = String::from_utf8(output.stdout).ok()?;
+    let home = entry.split(':').nth(5)?.trim();
+    if home.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(home))
+}
+
 fn render_daemon_systemd_service(mode: &ServiceMode, daemon_path: &Path, rpc_port: u16) -> String {
     match mode {
         ServiceMode::System { .. } => {
-            let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-            format!(
-                "[Unit]\nDescription=Lattice Daemon\nAfter=network.target\n\n[Service]\nType=simple\nUser={user}\nExecStart={} --rpc-port {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
-                daemon_path.display(),
-                rpc_port
-            )
+            #[cfg(target_os = "linux")]
+            {
+                let user = linux_service_user();
+                let data_dir = linux_home_dir_for_user(&user)
+                    .map(|home| home.join(".lattice"))
+                    .unwrap_or_else(|| PathBuf::from(format!("/home/{user}/.lattice")));
+                return format!(
+                    "[Unit]\nDescription=Lattice Daemon\nAfter=network.target\n\n[Service]\nType=simple\nUser={user}\nExecStart={} --rpc-port {}\nRestart=on-failure\nRestartSec=5\nEnvironment=RUST_LOG=info\nEnvironment=LATTICE_DATA_DIR={}\n\n[Install]\nWantedBy=multi-user.target\n",
+                    daemon_path.display(),
+                    rpc_port,
+                    data_dir.display()
+                );
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+                format!(
+                    "[Unit]\nDescription=Lattice Daemon\nAfter=network.target\n\n[Service]\nType=simple\nUser={user}\nExecStart={} --rpc-port {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
+                    daemon_path.display(),
+                    rpc_port
+                )
+            }
         }
         ServiceMode::User { .. } => format!(
             "[Unit]\nDescription=Lattice Daemon\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={} --rpc-port {}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
@@ -1144,6 +1203,58 @@ fn macos_app_launchctl_service_target(app_id: &str) -> Result<String> {
         macos_launchctl_domain()?,
         macos_app_label(app_id)
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_linux_user_daemon_service() -> Result<()> {
+    let service_user = linux_service_user();
+
+    let _ = ProcessCommand::new("pkill")
+        .args(["-u", &service_user, "-x", "lattice-daemon"])
+        .status();
+
+    if let Some(home) = linux_home_dir_for_user(&service_user) {
+        let user_systemd_dir = home.join(".config/systemd/user");
+        let user_service = user_systemd_dir.join("lattice-daemon.service");
+        let wanted_link = user_systemd_dir.join("default.target.wants/lattice-daemon.service");
+
+        if wanted_link.exists() {
+            let _ = fs::remove_file(&wanted_link);
+        }
+        if user_service.exists() {
+            let _ = fs::remove_file(&user_service);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn start_linux_bootstrap_daemon_service(rpc_port: u16) -> Result<()> {
+    if std::env::var("USER").ok().as_deref() != Some("root") && std::env::var("SUDO_USER").is_err()
+    {
+        bail!("`lattice up --bootstrap` needs sudo so it can install a system service");
+    }
+
+    cleanup_linux_user_daemon_service()?;
+
+    let daemon_path = daemon_binary_path()?;
+    let mode = ServiceMode::System {
+        service_path: daemon_system_service_file_path(),
+    };
+    let service = render_daemon_systemd_service(&mode, &daemon_path, rpc_port);
+    fs::write(mode.service_path(), service)
+        .with_context(|| format!("failed to write {}", mode.service_path().display()))?;
+
+    for args in [
+        ["daemon-reload"].as_slice(),
+        ["enable", "lattice-daemon.service"].as_slice(),
+        ["start", "lattice-daemon.service"].as_slice(),
+    ] {
+        run_systemctl(args)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1792,7 +1903,7 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
     }
 }
 
-async fn up(rpc_port: u16) -> Result<()> {
+async fn up(rpc_port: u16, bootstrap: bool) -> Result<()> {
     if let Ok(info) = RpcClient::new(rpc_port).node_info().await {
         println!("lattice-daemon is already running");
         print_status(&info);
@@ -1801,6 +1912,21 @@ async fn up(rpc_port: u16) -> Result<()> {
     }
 
     if std::env::consts::OS == "linux" {
+        if bootstrap {
+            start_linux_bootstrap_daemon_service(rpc_port)?;
+            clear_daemon_pid()?;
+            let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+            println!("lattice-daemon enabled and started in bootstrap mode");
+            print_status(&info);
+            println!();
+            println!("Bootstrap mode:");
+            println!("  - system service installed at /etc/systemd/system/lattice-daemon.service");
+            println!("  - user-level lattice-daemon units were disabled where possible");
+            println!("  - keep using: sudo systemctl status lattice-daemon");
+            print_up_next_steps();
+            return Ok(());
+        }
+
         let daemon_path = daemon_binary_path()?;
         if let Some(mode) = detect_daemon_service_mode()? {
             let service_path = mode.service_path().to_path_buf();
@@ -1891,6 +2017,22 @@ async fn up(rpc_port: u16) -> Result<()> {
     println!("lattice-daemon started");
     print_status(&info);
     print_up_next_steps();
+    Ok(())
+}
+
+async fn bootstrap(rpc_port: u16) -> Result<()> {
+    if std::env::consts::OS == "linux" {
+        up(rpc_port, true).await?;
+        println!();
+        println!("Share this node as a bootstrap peer once the public address is reachable:");
+        println!("  - verify peer identity: lattice status");
+        println!("  - make sure TCP and UDP port 7779 are open");
+        return Ok(());
+    }
+
+    up(rpc_port, false).await?;
+    println!();
+    println!("Bootstrap nodes are typically Linux servers with a stable public address.");
     Ok(())
 }
 
