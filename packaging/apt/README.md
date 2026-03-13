@@ -18,11 +18,28 @@ to every `lattice-v*` GitHub release.
 
 ## What this is not
 
-This repo does not publish a live signed APT repository by itself.
+This repo now feeds the live published snapshot at:
+
+- `https://fordz0.github.io/lattice-packages/apt`
+
+The repo is currently unsigned, so clients use `Trusted: yes` for now.
+
+This repo does not publish a live **signed** APT repository by itself.
 
 For a real public APT repo, you still want a dedicated host or repo, plus GPG
 signing for `Release` metadata. The generated `lattice-apt-repo.tar.gz` is the
 snapshot you would publish there.
+
+Users can currently install with a `.sources` file like:
+
+```text
+Types: deb
+URIs: https://fordz0.github.io/lattice-packages/apt
+Suites: stable
+Components: main
+Architectures: amd64 arm64
+Trusted: yes
+```
 
 If you want the release workflow to push that snapshot automatically, configure:
 

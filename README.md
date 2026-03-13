@@ -27,17 +27,37 @@ yay -S lattice-net-git
 ```
 
 Debian and Ubuntu:
-- download the matching `.deb` package from:
-  `https://github.com/fordz0/lattice/releases/latest`
-- `amd64` and `arm64` packages are attached to each release
+- add the published APT repo:
+  ```bash
+  sudo tee /etc/apt/sources.list.d/lattice.sources >/dev/null <<'EOF'
+  Types: deb
+  URIs: https://fordz0.github.io/lattice-packages/apt
+  Suites: stable
+  Components: main
+  Architectures: amd64 arm64
+  Trusted: yes
+  EOF
 
-macOS and Windows:
+  sudo apt update
+  sudo apt install lattice
+  ```
+- if you prefer a one-off install, matching `.deb` packages are also attached to:
+  `https://github.com/fordz0/lattice/releases/latest`
+
+macOS:
+- use the Homebrew tap:
+  ```bash
+  brew tap fordz0/lattice
+  brew install lattice-net
+  ```
+- or download the matching `.tar.gz` from:
+  `https://github.com/fordz0/lattice/releases/latest`
+
+Windows:
 - download the latest release artifacts from:
   `https://github.com/fordz0/lattice/releases/latest`
 - Windows users should prefer the `.msi`
-- macOS users should prefer the matching `.tar.gz` for their CPU
 - release attachments also include:
-  - `lattice-net.rb` for a Homebrew tap
   - `lattice-apt-repo.tar.gz` as an APT repo snapshot for Debian-style hosting
 
 Build from source on any platform:
@@ -110,6 +130,9 @@ build/
 *.bak
 private/**
 ```
+
+Entries are matched against the site-relative publish path. Lattice still skips
+`.git/`, `.DS_Store`, and `Thumbs.db` by default even without a `.latticeignore`.
 
 ### Visit .loom sites in Firefox
 

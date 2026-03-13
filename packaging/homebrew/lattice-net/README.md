@@ -5,6 +5,9 @@ This directory is the upstream staging area for a personal Homebrew tap for
 
 It is not the tap repo itself. The release workflow now generates a ready-to-use
 `lattice-net.rb` formula asset from the macOS release tarballs and checksums.
+The live tap repo is:
+
+- `https://github.com/fordz0/homebrew-lattice`
 
 The intended flow is:
 
@@ -12,6 +15,13 @@ The intended flow is:
 2. Let the GitHub release workflow publish macOS tarballs, checksum files, and
    a rendered `lattice-net.rb`.
 3. Copy that generated formula into your tap repo.
+
+Users can then install with:
+
+```sh
+brew tap fordz0/lattice
+brew install lattice-net
+```
 
 If you want the release workflow to update the tap repo automatically, configure:
 
