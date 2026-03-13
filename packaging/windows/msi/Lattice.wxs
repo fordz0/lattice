@@ -15,6 +15,12 @@
       <Directory Id="INSTALLFOLDER" Name="Lattice">
         <Component Id="LatticeExeComponent" Guid="*">
           <File Id="LatticeExe" Name="lattice.exe" Source="$(var.SourceDir)\lattice.exe" KeyPath="yes" />
+          <Shortcut
+            Id="LatticeProgramMenuShortcut"
+            Directory="ProgramMenuLatticeFolder"
+            Name="Lattice"
+            Description="Lattice command line"
+            WorkingDirectory="INSTALLFOLDER" />
         </Component>
         <Component Id="LatticeDaemonExeComponent" Guid="*">
           <File Id="LatticeDaemonExe" Name="lattice-daemon.exe" Source="$(var.SourceDir)\lattice-daemon.exe" KeyPath="yes" />
@@ -61,12 +67,28 @@
       </Directory>
     </StandardDirectory>
 
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuLatticeFolder" Name="Lattice">
+        <Component Id="ProgramMenuFolderComponent" Guid="*">
+          <RemoveFolder Id="RemoveProgramMenuLatticeFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\Lattice"
+            Name="ProgramMenuFolder"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
     <Feature Id="MainFeature" Title="Lattice" Level="1">
       <ComponentRef Id="LatticeExeComponent" />
       <ComponentRef Id="LatticeDaemonExeComponent" />
       <ComponentRef Id="LicenseComponent" />
       <ComponentRef Id="ReadmeComponent" />
       <ComponentRef Id="PathComponent" />
+      <ComponentRef Id="ProgramMenuFolderComponent" />
     </Feature>
   </Package>
 </Wix>
