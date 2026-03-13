@@ -52,7 +52,10 @@ struct Cli {
 enum Command {
     Up,
     Down,
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -165,6 +168,21 @@ struct InstalledAppMeta {
     description: String,
 }
 
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    platform: String,
+    rpc_endpoint: String,
+    data_directory: String,
+    daemon_binary: Option<String>,
+    managed_service: String,
+    manual_daemon_pid: String,
+    rpc_status: String,
+    peer_id: Option<String>,
+    connected_peers: Option<u64>,
+    healthy: bool,
+    next_steps: Vec<String>,
+}
+
 const MAX_FETCH_SITE_FILES: usize = 1000;
 const MAX_FETCH_SITE_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -203,8 +221,8 @@ async fn run() -> Result<()> {
         Command::Down => {
             down()?;
         }
-        Command::Doctor => {
-            doctor(cli.rpc_port).await?;
+        Command::Doctor { json } => {
+            doctor(cli.rpc_port, json).await?;
         }
         Command::Service { command } => {
             service_command(command, cli.rpc_port).await?;
@@ -1904,82 +1922,125 @@ fn down() -> Result<()> {
     Ok(())
 }
 
-async fn doctor(rpc_port: u16) -> Result<()> {
+async fn doctor(rpc_port: u16, json: bool) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_port);
     let rpc_url = rpc_client.base_url.clone();
     let data_dir = lattice_data_dir()?;
-
-    println!("Lattice doctor");
-    println!("Platform: {}", std::env::consts::OS);
-    println!("RPC endpoint: {rpc_url}");
-    println!("Data directory: {}", data_dir.display());
-
     let daemon_path = daemon_binary_path().ok();
-    match &daemon_path {
-        Some(path) => println!("Daemon binary: {}", path.display()),
-        None => println!("Daemon binary: not found"),
-    }
-
     let service_status = doctor_service_status()?;
-    println!("Managed service: {service_status}");
-
     let manual_status = if has_manual_daemon_pid()? {
         "present".to_string()
     } else {
         "not detected".to_string()
     };
-    println!("Manual daemon PID: {manual_status}");
+
+    let mut report = DoctorReport {
+        platform: std::env::consts::OS.to_string(),
+        rpc_endpoint: rpc_url,
+        data_directory: data_dir.display().to_string(),
+        daemon_binary: daemon_path.as_ref().map(|path| path.display().to_string()),
+        managed_service: service_status.clone(),
+        manual_daemon_pid: manual_status,
+        rpc_status: "not reachable".to_string(),
+        peer_id: None,
+        connected_peers: None,
+        healthy: false,
+        next_steps: Vec::new(),
+    };
 
     match rpc_client.node_info().await {
         Ok(info) => {
-            println!("RPC status: reachable");
-            if let Some(peer_id) = info.get("peer_id").and_then(Value::as_str) {
-                println!("Peer ID: {peer_id}");
-            }
-            if let Some(count) = info.get("connected_peers").and_then(Value::as_u64) {
-                println!("Connected peers: {count}");
-            }
-            println!();
-            println!("Everything looks healthy.");
-            println!("Next steps:");
-            println!("  - publish a site: lattice publish --dir ./site --name mysite");
-            println!(
-                "  - browse .loom sites in Firefox: https://addons.mozilla.org/en-US/firefox/addon/lattice/"
-            );
-            return Ok(());
+            report.rpc_status = "reachable".to_string();
+            report.peer_id = info
+                .get("peer_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            report.connected_peers = info.get("connected_peers").and_then(Value::as_u64);
+            report.healthy = true;
+            report.next_steps = vec![
+                "publish a site: lattice publish --dir ./site --name mysite".to_string(),
+                "browse .loom sites in Firefox: https://addons.mozilla.org/en-US/firefox/addon/lattice/"
+                    .to_string(),
+            ];
         }
         Err(err) if err.downcast_ref::<DaemonNotRunning>().is_some() => {
-            println!("RPC status: not reachable");
+            if daemon_path.is_none() {
+                report.next_steps.push(
+                    "install Lattice from a release, package manager, or build it from source"
+                        .to_string(),
+                );
+            }
+            match service_status.as_str() {
+                "not installed" => {
+                    report
+                        .next_steps
+                        .push("start the daemon with: lattice up".to_string());
+                }
+                "installed" | "inactive" | "stopped" => {
+                    report
+                        .next_steps
+                        .push("start the service with: lattice service start".to_string());
+                    report.next_steps.push("or use: lattice up".to_string());
+                }
+                status if status.contains("STOPPED") => {
+                    report
+                        .next_steps
+                        .push("start the service with: lattice service start".to_string());
+                    report.next_steps.push("or use: lattice up".to_string());
+                }
+                _ => {
+                    report.next_steps.push(
+                        "if the daemon should be running, try: lattice service restart".to_string(),
+                    );
+                    report
+                        .next_steps
+                        .push("otherwise start it with: lattice up".to_string());
+                }
+            }
+            report
+                .next_steps
+                .push("once it is running, verify with: lattice status".to_string());
+            report.next_steps.push(
+                "for browser setup, follow: https://addons.mozilla.org/en-US/firefox/addon/lattice/"
+                    .to_string(),
+            );
         }
         Err(err) => return Err(err),
     }
 
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("Lattice doctor");
+    println!("Platform: {}", report.platform);
+    println!("RPC endpoint: {}", report.rpc_endpoint);
+    println!("Data directory: {}", report.data_directory);
+
+    match &report.daemon_binary {
+        Some(path) => println!("Daemon binary: {path}"),
+        None => println!("Daemon binary: not found"),
+    }
+    println!("Managed service: {}", report.managed_service);
+    println!("Manual daemon PID: {}", report.manual_daemon_pid);
+    println!("RPC status: {}", report.rpc_status);
+
+    if let Some(peer_id) = &report.peer_id {
+        println!("Peer ID: {peer_id}");
+    }
+    if let Some(count) = report.connected_peers {
+        println!("Connected peers: {count}");
+    }
+
     println!();
+    if report.healthy {
+        println!("Everything looks healthy.");
+    }
     println!("Next steps:");
-    if daemon_path.is_none() {
-        println!("  - install Lattice from a release, package manager, or build it from source");
+    for step in &report.next_steps {
+        println!("  - {step}");
     }
-    match service_status.as_str() {
-        "not installed" => {
-            println!("  - start the daemon with: lattice up");
-        }
-        "installed" | "inactive" | "stopped" => {
-            println!("  - start the service with: lattice service start");
-            println!("  - or use: lattice up");
-        }
-        status if status.contains("STOPPED") => {
-            println!("  - start the service with: lattice service start");
-            println!("  - or use: lattice up");
-        }
-        _ => {
-            println!("  - if the daemon should be running, try: lattice service restart");
-            println!("  - otherwise start it with: lattice up");
-        }
-    }
-    println!("  - once it is running, verify with: lattice status");
-    println!(
-        "  - for browser setup, follow: https://addons.mozilla.org/en-US/firefox/addon/lattice/"
-    );
 
     Ok(())
 }
