@@ -40,6 +40,10 @@ function Invoke-Wix {
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".wix\extensions") | Out-Null
+$wixVersion = (& wix --version).Trim()
+if (-not $wixVersion) {
+    throw "Failed to determine WiX tool version"
+}
 
 $uiExtensionList = ""
 try {
@@ -49,13 +53,18 @@ try {
 }
 
 if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
-    Invoke-Wix -Arguments @('extension', 'add', '-g', 'WixToolset.UI.wixext') | Out-Null
+    Invoke-Wix -Arguments @('extension', 'add', '-g', "WixToolset.UI.wixext/$wixVersion") | Out-Null
+}
+
+$uiExtensionDll = Join-Path $env:USERPROFILE ".wix\extensions\WixToolset.UI.wixext\$wixVersion\wixext4\WixToolset.UI.wixext.dll"
+if (-not (Test-Path $uiExtensionDll)) {
+    throw "WiX UI extension DLL not found at expected path: $uiExtensionDll"
 }
 
 Invoke-Wix -Arguments @(
     'build',
     '-arch', 'x64',
-    '-ext', 'WixToolset.UI.wixext',
+    '-ext', $uiExtensionDll,
     '-d', "SourceDir=$resolvedSource",
     '-d', "Version=$Version",
     $wxsPath,
