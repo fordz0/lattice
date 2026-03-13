@@ -58,10 +58,6 @@ If GetPropertyValue("Manufacturer") <> "benjf" Then
   Fail "Unexpected Manufacturer: " & GetPropertyValue("Manufacturer")
 End If
 
-If GetPropertyValue("ARPINSTALLLOCATION") <> "[INSTALLFOLDER]" Then
-  Fail "Unexpected ARPINSTALLLOCATION: " & GetPropertyValue("ARPINSTALLLOCATION")
-End If
-
 If GetPropertyValue("ARPHELPLINK") <> "https://lattice.benjf.dev/getting-started" Then
   Fail "Unexpected ARPHELPLINK: " & GetPropertyValue("ARPHELPLINK")
 End If

@@ -16,8 +16,6 @@
     <Property Id="ARPHELPLINK" Value="https://lattice.benjf.dev/getting-started" />
     <Property Id="ARPREADME" Value="https://github.com/fordz0/lattice" />
     <Property Id="ARPCONTACT" Value="https://github.com/fordz0/lattice/issues" />
-    <Property Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" />
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
