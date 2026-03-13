@@ -6,7 +6,7 @@ Current behavior:
 
 - installs `lattice.exe` and `lattice-daemon.exe` into `Program Files\Lattice`
 - adds the install directory to the system `PATH`
-- adds a `Lattice` Start Menu shortcut
+- adds `Lattice` and `Lattice README` Start Menu shortcuts
 - includes `LICENSE` and `README.md`
 - installs and starts the `lattice-daemon` Windows service automatically
 - configures the service to run with:

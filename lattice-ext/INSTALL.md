@@ -1,6 +1,13 @@
 # Installing the Lattice Firefox Extension
 
-## Load the extension
+## Install the extension
+
+Preferred:
+
+1. Open the AMO listing: https://addons.mozilla.org/en-US/firefox/addon/lattice/
+2. Install the add-on normally
+
+Development / temporary install:
 
 1. Open Firefox and go to about:debugging
 2. Click "This Firefox"

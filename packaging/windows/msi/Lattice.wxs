@@ -46,7 +46,14 @@
           <File Id="LicenseFile" Name="LICENSE" Source="$(var.SourceDir)\LICENSE" KeyPath="yes" />
         </Component>
         <Component Id="ReadmeComponent" Guid="*">
-          <File Id="ReadmeFile" Name="README.md" Source="$(var.SourceDir)\README.md" KeyPath="yes" />
+          <File Id="ReadmeFile" Name="README.md" Source="$(var.SourceDir)\README.md" KeyPath="yes">
+            <Shortcut
+              Id="LatticeReadmeShortcut"
+              Directory="ProgramMenuLatticeFolder"
+              Name="Lattice README"
+              Description="Open the local Lattice README"
+              WorkingDirectory="INSTALLFOLDER" />
+          </File>
         </Component>
         <Component Id="PathComponent" Guid="*">
           <Environment

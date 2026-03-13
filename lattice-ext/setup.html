@@ -111,6 +111,56 @@
       color: var(--text);
     }
 
+    .notice {
+      margin: 0 0 22px;
+      padding: 14px 16px;
+      border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--border));
+      border-radius: 12px;
+      background: color-mix(in oklab, var(--panel) 80%, var(--accent));
+    }
+
+    .notice[hidden] {
+      display: none;
+    }
+
+    .notice-title {
+      margin: 0 0 6px;
+      font-size: 0.98rem;
+      font-weight: 700;
+    }
+
+    .notice p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .split {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-bottom: 28px;
+    }
+
+    .mini-panel {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #0b1220;
+    }
+
+    .mini-panel h2 {
+      margin-bottom: 8px;
+    }
+
+    .mini-panel p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    a.inline-link {
+      color: #9ed8bc;
+    }
+
     footer {
       margin-top: 24px;
       color: var(--muted);
@@ -122,6 +172,32 @@
   <main class="container">
     <h1>Lattice</h1>
     <p class="subtitle">Decentralised web. No censorship. No registrar.</p>
+
+    <section id="release-notice" class="notice" hidden>
+      <div class="notice-title">A newer Lattice release is available</div>
+      <p id="release-copy">We found a newer release on GitHub.</p>
+      <div class="actions">
+        <button class="primary" id="view-release" type="button">View latest release</button>
+      </div>
+    </section>
+
+    <section class="split">
+      <div class="mini-panel">
+        <h2>Firefox extension</h2>
+        <p>Install or update the Firefox add-on from Mozilla if you are setting up a new browser profile.</p>
+        <div class="actions">
+          <button class="secondary" id="open-amo" type="button">Open Firefox add-on page</button>
+        </div>
+      </div>
+
+      <div class="mini-panel">
+        <h2>Latest release</h2>
+        <p>We can check the latest published Lattice release on GitHub and point you at it if this extension is behind.</p>
+        <div class="actions">
+          <button class="secondary" id="check-release" type="button">Check for updates</button>
+        </div>
+      </div>
+    </section>
 
     <section>
       <h2>Setup required</h2>
@@ -153,10 +229,11 @@
       </div>
     </section>
 
-    <footer>Make sure lattice-daemon is running before browsing.</footer>
+    <footer>Make sure lattice-daemon is running before browsing. Need help? See the <a class="inline-link" href="https://lattice.benjf.dev/getting-started#extension" target="_blank" rel="noopener noreferrer">getting started guide</a>.</footer>
   </main>
 
   <script src="config.js"></script>
+  <script src="setup-helpers.js"></script>
   <script src="setup.js"></script>
 </body>
 </html>

@@ -1,4 +1,6 @@
 const prefKey = document.getElementById('pref-key').textContent.trim();
+const amoUrl = 'https://addons.mozilla.org/en-US/firefox/addon/lattice/';
+const latestReleaseApi = 'https://api.github.com/repos/fordz0/lattice/releases/latest';
 
 var latticeConfigApi = typeof LatticeConfig !== 'undefined' && LatticeConfig.defaults
   ? LatticeConfig
@@ -15,6 +17,76 @@ var latticeConfigApi = typeof LatticeConfig !== 'undefined' && LatticeConfig.def
         return 'http://' + config.localHost + ':' + config.httpPort + '/__lattice_ca.pem';
       }
     };
+
+var latticeSetupHelpers = typeof LatticeSetupHelpers !== 'undefined'
+  ? LatticeSetupHelpers
+  : {
+      parseGithubReleaseVersion: function(tagName) {
+        return String(tagName || '').replace(/^lattice-v/i, '').replace(/^v/i, '').trim();
+      },
+      compareVersions: function(left, right) {
+        const parse = function(value) {
+          return String(value || '')
+            .split(/[^0-9]+/)
+            .filter(Boolean)
+            .map(function(part) { return parseInt(part, 10) || 0; });
+        };
+        const a = parse(left);
+        const b = parse(right);
+        const len = Math.max(a.length, b.length);
+        for (let index = 0; index < len; index += 1) {
+          const av = a[index] || 0;
+          const bv = b[index] || 0;
+          if (av > bv) return 1;
+          if (av < bv) return -1;
+        }
+        return 0;
+      }
+    };
+
+function setReleaseNotice(copy, htmlUrl) {
+  document.getElementById('release-copy').textContent = copy;
+  const notice = document.getElementById('release-notice');
+  notice.hidden = false;
+  const button = document.getElementById('view-release');
+  button.onclick = function() {
+    browser.tabs.create({ url: htmlUrl });
+  };
+}
+
+async function checkForLatestRelease(showUpToDateMessage) {
+  try {
+    const response = await fetch(latestReleaseApi, {
+      headers: { Accept: 'application/vnd.github+json' }
+    });
+    if (!response.ok) {
+      throw new Error('GitHub returned HTTP ' + response.status);
+    }
+    const release = await response.json();
+    const manifestVersion = browser.runtime.getManifest().version;
+    const releaseVersion = latticeSetupHelpers.parseGithubReleaseVersion(release.tag_name);
+    if (latticeSetupHelpers.compareVersions(releaseVersion, manifestVersion) > 0) {
+      setReleaseNotice(
+        'Version ' + releaseVersion + ' is available on GitHub. You are running extension version ' + manifestVersion + '.',
+        release.html_url || 'https://github.com/fordz0/lattice/releases/latest'
+      );
+      return;
+    }
+    if (showUpToDateMessage) {
+      setReleaseNotice(
+        'You are already on the newest release we could find (' + manifestVersion + ').',
+        release.html_url || 'https://github.com/fordz0/lattice/releases/latest'
+      );
+    }
+  } catch (_err) {
+    if (showUpToDateMessage) {
+      setReleaseNotice(
+        'We could not check GitHub right now, but you can still view the latest releases manually.',
+        'https://github.com/fordz0/lattice/releases/latest'
+      );
+    }
+  }
+}
 
 document.getElementById('copy-pref').addEventListener('click', async () => {
   try {
@@ -41,6 +113,14 @@ document.getElementById('open-certs').addEventListener('click', () => {
   browser.tabs.create({ url: 'about:preferences#privacy' });
 });
 
+document.getElementById('open-amo').addEventListener('click', () => {
+  browser.tabs.create({ url: amoUrl });
+});
+
+document.getElementById('check-release').addEventListener('click', () => {
+  checkForLatestRelease(true);
+});
+
 document.getElementById('done-test').addEventListener('click', async () => {
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });
   if (tabs.length > 0 && tabs[0].id) {
@@ -49,3 +129,5 @@ document.getElementById('done-test').addEventListener('click', async () => {
     browser.tabs.create({ url: 'https://benjf.loom' });
   }
 });
+
+checkForLatestRelease(false);
