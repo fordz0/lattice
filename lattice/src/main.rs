@@ -52,6 +52,8 @@ struct Cli {
 enum Command {
     Up {
         #[arg(long)]
+        server: bool,
+        #[arg(long)]
         bootstrap: bool,
     },
     Bootstrap,
@@ -221,8 +223,8 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Up { bootstrap } => {
-            up(cli.rpc_port, bootstrap).await?;
+        Command::Up { server, bootstrap } => {
+            up(cli.rpc_port, server, bootstrap).await?;
         }
         Command::Bootstrap => {
             bootstrap(cli.rpc_port).await?;
@@ -1230,10 +1232,10 @@ fn cleanup_linux_user_daemon_service() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn start_linux_bootstrap_daemon_service(rpc_port: u16) -> Result<()> {
+fn start_linux_server_daemon_service(rpc_port: u16) -> Result<()> {
     if std::env::var("USER").ok().as_deref() != Some("root") && std::env::var("SUDO_USER").is_err()
     {
-        bail!("`lattice up --bootstrap` needs sudo so it can install a system service");
+        bail!("`lattice up --server` needs sudo so it can install a system service");
     }
 
     cleanup_linux_user_daemon_service()?;
@@ -1258,8 +1260,8 @@ fn start_linux_bootstrap_daemon_service(rpc_port: u16) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn start_linux_bootstrap_daemon_service(_rpc_port: u16) -> Result<()> {
-    bail!("bootstrap mode is only supported on Linux")
+fn start_linux_server_daemon_service(_rpc_port: u16) -> Result<()> {
+    bail!("server mode is only supported on Linux")
 }
 
 #[cfg(target_os = "linux")]
@@ -1908,7 +1910,7 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
     }
 }
 
-async fn up(rpc_port: u16, bootstrap: bool) -> Result<()> {
+async fn up(rpc_port: u16, server: bool, bootstrap: bool) -> Result<()> {
     if let Ok(info) = RpcClient::new(rpc_port).node_info().await {
         println!("lattice-daemon is already running");
         print_status(&info);
@@ -1917,17 +1919,25 @@ async fn up(rpc_port: u16, bootstrap: bool) -> Result<()> {
     }
 
     if std::env::consts::OS == "linux" {
-        if bootstrap {
-            start_linux_bootstrap_daemon_service(rpc_port)?;
+        let server = server || bootstrap;
+        if server {
+            start_linux_server_daemon_service(rpc_port)?;
             clear_daemon_pid()?;
             let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
-            println!("lattice-daemon enabled and started in bootstrap mode");
+            if bootstrap {
+                println!("lattice-daemon enabled and started in bootstrap mode");
+            } else {
+                println!("lattice-daemon enabled and started in server mode");
+            }
             print_status(&info);
             println!();
-            println!("Bootstrap mode:");
+            println!("Server mode:");
             println!("  - system service installed at /etc/systemd/system/lattice-daemon.service");
             println!("  - user-level lattice-daemon units were disabled where possible");
             println!("  - keep using: sudo systemctl status lattice-daemon");
+            if bootstrap {
+                println!("  - this node is ready to be used as a bootstrap host once its public address is reachable");
+            }
             print_up_next_steps();
             return Ok(());
         }
@@ -2027,7 +2037,7 @@ async fn up(rpc_port: u16, bootstrap: bool) -> Result<()> {
 
 async fn bootstrap(rpc_port: u16) -> Result<()> {
     if std::env::consts::OS == "linux" {
-        up(rpc_port, true).await?;
+        up(rpc_port, true, true).await?;
         println!();
         println!("Share this node as a bootstrap peer once the public address is reachable:");
         println!("  - verify peer identity: lattice status");
@@ -2035,7 +2045,7 @@ async fn bootstrap(rpc_port: u16) -> Result<()> {
         return Ok(());
     }
 
-    up(rpc_port, false).await?;
+    up(rpc_port, false, false).await?;
     println!();
     println!("Bootstrap nodes are typically Linux servers with a stable public address.");
     Ok(())

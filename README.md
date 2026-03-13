@@ -64,6 +64,16 @@ useful for advanced testing/operator workflows.
 If something feels off, run `lattice doctor` for a quick health check and
 actionable next steps.
 
+For Linux servers that should run continuously under a system service, use:
+```bash
+sudo lattice up --server
+```
+
+If the machine is specifically meant to act as a bootstrap node, use:
+```bash
+sudo lattice up --bootstrap
+```
+
 For scripts or CI, `lattice doctor --json --strict` will emit a machine-readable
 report and exit nonzero if the local setup is unhealthy.
 
@@ -104,6 +114,12 @@ lattice update --all
 
 Want to help keep the network alive by running a bootstrap node?
 See [BOOTSTRAP.md](BOOTSTRAP.md).
+
+For a regular always-on Linux host that serves `.loom` sites but is not a
+bootstrap node, prefer:
+```bash
+sudo lattice up --server
+```
 
 ## For App Builders
 

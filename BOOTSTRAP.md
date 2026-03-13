@@ -38,7 +38,19 @@ cd lattice
 cargo build --release -p lattice-daemon -p lattice
 ```
 
-## Run as a systemd service
+## Bootstrap setup shortcut
+
+On a Linux VPS, the fastest path is now:
+
+```bash
+sudo lattice up --bootstrap
+```
+
+That installs or refreshes a system service, disables conflicting user-level
+`lattice-daemon` units where possible, and starts the daemon in a
+server-oriented configuration.
+
+## Run as a systemd service manually
 
 Create the service file:
 ```bash
@@ -79,6 +91,16 @@ sudo systemctl start lattice-daemon
 sudo systemctl status lattice-daemon
 ```
 
+If the machine is a normal always-on site host rather than a bootstrap node,
+use this shortcut instead:
+
+```bash
+sudo lattice up --server
+```
+
+That gives you the same system-service behavior without the bootstrap-specific
+guidance.
+
 ## Safe migration from a source-built node to the APT package
 
 Yes, you can safely move an existing source-built server to the APT package.
@@ -95,7 +117,9 @@ For a source-built node currently running as `YOUR_USER`:
    ```bash
    sudo apt install lattice
    ```
-3. Point your systemd service at `/usr/bin/lattice-daemon`
+3. Either:
+   - run `sudo lattice up --server`, or
+   - point your systemd service at `/usr/bin/lattice-daemon`
 4. Keep:
    ```ini
    User=YOUR_USER
