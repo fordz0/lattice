@@ -39,10 +39,10 @@ function Invoke-Wix {
     return $output
 }
 
-$uiExtensionList = Invoke-Wix extension list --global
+$uiExtensionList = Invoke-Wix extension list -g
 if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
-    Invoke-Wix extension add --global WixToolset.UI.wixext | Out-Null
-    $uiExtensionList = Invoke-Wix extension list --global
+    Invoke-Wix extension add -g WixToolset.UI.wixext | Out-Null
+    $uiExtensionList = Invoke-Wix extension list -g
 }
 if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
     throw "WiX UI extension is still unavailable after installation attempt"
