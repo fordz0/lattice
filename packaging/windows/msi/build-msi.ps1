@@ -28,7 +28,7 @@ if ($outputDir) {
 
 function Invoke-Wix {
     param(
-        [Parameter(ValueFromRemainingArguments = $true)]
+        [Parameter(Mandatory = $true)]
         [string[]]$Arguments
     )
 
@@ -43,19 +43,21 @@ New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".wix\exte
 
 $uiExtensionList = ""
 try {
-    $uiExtensionList = Invoke-Wix extension list -g
+    $uiExtensionList = Invoke-Wix -Arguments @('extension', 'list', '-g')
 } catch {
     $uiExtensionList = ""
 }
 
 if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
-    Invoke-Wix extension add -g WixToolset.UI.wixext | Out-Null
+    Invoke-Wix -Arguments @('extension', 'add', '-g', 'WixToolset.UI.wixext') | Out-Null
 }
 
-Invoke-Wix build `
-    -arch x64 `
-    -ext WixToolset.UI.wixext `
-    -d SourceDir="$resolvedSource" `
-    -d Version="$Version" `
-    $wxsPath `
-    -o $OutputPath
+Invoke-Wix -Arguments @(
+    'build',
+    '-arch', 'x64',
+    '-ext', 'WixToolset.UI.wixext',
+    '-d', "SourceDir=$resolvedSource",
+    '-d', "Version=$Version",
+    $wxsPath,
+    '-o', $OutputPath
+)

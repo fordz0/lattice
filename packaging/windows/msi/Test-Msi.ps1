@@ -47,7 +47,11 @@ function Test-MsiTableHasRows {
 
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
-$database = $installer.GetType().InvokeMember('OpenDatabase', [System.Reflection.BindingFlags]::InvokeMethod, $null, $installer, @($resolvedPath, 0))
+$invokeFlags = [System.Reflection.BindingFlags]::InvokeMethod
+$invokeArgs = New-Object object[] 2
+$invokeArgs[0] = $resolvedPath
+$invokeArgs[1] = 0
+$database = $installer.GetType().InvokeMember('OpenDatabase', $invokeFlags, $null, $installer, $invokeArgs)
 
 $productName = Get-MsiPropertyValue -Database $database -Name "ProductName"
 if ($productName -ne "Lattice") {
