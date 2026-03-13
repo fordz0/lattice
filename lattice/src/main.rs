@@ -917,6 +917,9 @@ fn write_daemon_pid(pid: u32) -> Result<()> {
 }
 
 fn pid_looks_like_lattice_daemon(pid: &str) -> bool {
+    #[cfg(not(unix))]
+    let _ = pid;
+
     #[cfg(unix)]
     {
         if let Ok(output) = ProcessCommand::new("ps")
