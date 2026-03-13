@@ -96,6 +96,26 @@ def write_control_file(path: Path, version: str, arch: str, installed_size_kib: 
     path.write_text(control, encoding="utf-8")
 
 
+def write_postinst(path: Path) -> None:
+    script = """#!/bin/sh
+set -e
+
+HELPER="/usr/lib/lattice/restart-daemon-if-active.sh"
+
+case "$1" in
+  configure|triggered)
+    if [ -x "$HELPER" ]; then
+      "$HELPER" || true
+    fi
+    ;;
+esac
+
+exit 0
+"""
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+
+
 def create_deb(
     tarball: Path, arch: str, version: str, output_dir: Path, repo_root: Path, service_file: Path
 ) -> PackageInfo:
@@ -124,8 +144,20 @@ def create_deb(
         systemd_user_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(service_file, systemd_user_dir / "lattice-daemon.service")
 
+        helper_script = (
+            Path(__file__).resolve().parents[1]
+            / "shared"
+            / "restart-daemon-if-active.sh"
+        )
+        helper_dir = pkg_root / "usr" / "lib" / PACKAGE_NAME
+        helper_dir.mkdir(parents=True, exist_ok=True)
+        helper_dest = helper_dir / "restart-daemon-if-active.sh"
+        shutil.copy2(helper_script, helper_dest)
+        helper_dest.chmod(0o755)
+
         installed_size_kib = package_installed_size(pkg_root)
         write_control_file(debian_dir / "control", deb_version, arch, installed_size_kib)
+        write_postinst(debian_dir / "postinst")
 
         subprocess.run(
             ["dpkg-deb", "--build", "--root-owner-group", str(pkg_root), str(package_path)],

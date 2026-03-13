@@ -41,6 +41,10 @@ Architectures: amd64 arm64
 Trusted: yes
 ```
 
+Package upgrades restart `lattice-daemon` automatically when it was already
+active, covering both the common system-service path and active user-service
+instances.
+
 If you want the release workflow to push that snapshot automatically, configure:
 
 - repository variable `APT_REPO_TARGET`

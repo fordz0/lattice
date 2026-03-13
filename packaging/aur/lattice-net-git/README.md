@@ -12,6 +12,7 @@ cd lattice-net-git
 cp /path/to/lattice/packaging/aur/lattice-net-git/PKGBUILD .
 cp /path/to/lattice/packaging/aur/lattice-net-git/.SRCINFO .
 cp /path/to/lattice/packaging/aur/lattice-net-git/lattice-daemon.service .
+cp /path/to/lattice/packaging/aur/lattice-net-git/lattice-net-git.install .
 ```
 
 Then test locally:
@@ -30,3 +31,7 @@ Suggested release flow:
 2. Add stable `lattice-net` later once release tarballs are published.
 3. Let the OS package manager update `lattice` and `lattice-daemon`.
 4. Let `lattice update` handle Lattice apps installed from the registry.
+
+The package install hook now reloads unit definitions and restarts
+`lattice-daemon` automatically if it was already active, covering both the
+system-service path and active user services.

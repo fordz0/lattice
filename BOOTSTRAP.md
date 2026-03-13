@@ -101,6 +101,10 @@ sudo lattice up --server
 That gives you the same system-service behavior without the bootstrap-specific
 guidance.
 
+When you upgrade the Linux package later, active `lattice-daemon` services are
+restarted automatically so the node picks up the new binaries without manual
+service restarts.
+
 ## Safe migration from a source-built node to the APT package
 
 Yes, you can safely move an existing source-built server to the APT package.

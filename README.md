@@ -97,6 +97,9 @@ sudo lattice up --bootstrap
 For scripts or CI, `lattice doctor --json --strict` will emit a machine-readable
 report and exit nonzero if the local setup is unhealthy.
 
+On Linux package installs, active `lattice-daemon` services are restarted
+automatically during package upgrades so the daemon picks up the new binaries.
+
 ### Basic commands
 ```bash
 # check your node status
