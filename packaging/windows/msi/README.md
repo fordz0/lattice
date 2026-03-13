@@ -22,6 +22,7 @@ Current behavior:
   - `lattice up`
   - `lattice down`
   - `lattice service ...`
+- supports `lattice service uninstall --purge-data` if you want the CLI to remove the daemon data directory as part of service removal
 - stops and removes the Windows service on uninstall
 - preserves `%ProgramData%\Lattice` on uninstall for now
 - includes a `Remove Lattice Data` maintenance shortcut for wiping daemon data explicitly

@@ -44,6 +44,9 @@ jobs:
       - name: Check CLI help
         run: cargo run -p lattice -- --help
 
+      - name: Check service status command
+        run: cargo run -p lattice -- service status
+
       - name: Start daemon and check status (Unix)
         if: runner.os != 'Windows'
         shell: bash

@@ -132,7 +132,10 @@ enum NameCommand {
 #[derive(Subcommand)]
 enum ServiceCommand {
     Install,
-    Uninstall,
+    Uninstall {
+        #[arg(long)]
+        purge_data: bool,
+    },
     Start,
     Stop,
     Restart,
@@ -1177,11 +1180,20 @@ fn uninstall_linux_daemon_service() -> Result<()> {
 }
 
 #[cfg(windows)]
+fn windows_service_data_dir() -> PathBuf {
+    let base = std::env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    base.join("Lattice")
+}
+
+#[cfg(windows)]
 fn windows_service_bin_path(daemon_path: &Path, rpc_port: u16) -> String {
     format!(
-        "\"{}\" --service --rpc-port {}",
+        "\"{}\" --service --rpc-port {} --data-dir \"{}\"",
         daemon_path.display(),
-        rpc_port
+        rpc_port,
+        windows_service_data_dir().display()
     )
 }
 
@@ -1336,6 +1348,14 @@ fn daemon_binary_path() -> Result<PathBuf> {
 
     find_executable_in_path("lattice-daemon")
         .ok_or_else(|| anyhow!("lattice-daemon not found in PATH or next to lattice"))
+}
+
+fn purge_data_dir(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(true)
 }
 
 async fn wait_for_daemon(rpc_port: u16, timeout: Duration) -> Result<Value> {
@@ -1530,9 +1550,17 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
                 install_or_update_windows_daemon_service(&daemon_path, rpc_port)?;
                 println!("lattice-daemon service installed");
             }
-            ServiceCommand::Uninstall => {
+            ServiceCommand::Uninstall { purge_data } => {
                 delete_windows_daemon_service()?;
                 clear_daemon_pid()?;
+                if purge_data {
+                    let data_dir = windows_service_data_dir();
+                    if purge_data_dir(&data_dir)? {
+                        println!("removed {}", data_dir.display());
+                    } else {
+                        println!("no data found at {}", data_dir.display());
+                    }
+                }
                 println!("lattice-daemon service removed");
             }
             ServiceCommand::Start => {
@@ -1573,9 +1601,17 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
                 install_linux_daemon_service_definition(rpc_port)?;
                 println!("lattice-daemon service installed");
             }
-            ServiceCommand::Uninstall => {
+            ServiceCommand::Uninstall { purge_data } => {
                 uninstall_linux_daemon_service()?;
                 clear_daemon_pid()?;
+                if purge_data {
+                    let data_dir = lattice_data_dir()?;
+                    if purge_data_dir(&data_dir)? {
+                        println!("removed {}", data_dir.display());
+                    } else {
+                        println!("no data found at {}", data_dir.display());
+                    }
+                }
                 println!("lattice-daemon service removed");
             }
             ServiceCommand::Start => {
@@ -1619,7 +1655,7 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
                     .with_context(|| format!("failed to write {}", plist_path.display()))?;
                 println!("lattice-daemon service installed");
             }
-            ServiceCommand::Uninstall => {
+            ServiceCommand::Uninstall { purge_data } => {
                 if let Some(existing) = detect_existing_macos_daemon_launch_agent()? {
                     let domain = macos_launchctl_domain()?;
                     let plist_arg = existing.to_string_lossy().to_string();
@@ -1628,6 +1664,14 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
                         .with_context(|| format!("failed to remove {}", existing.display()))?;
                 }
                 clear_daemon_pid()?;
+                if purge_data {
+                    let data_dir = lattice_data_dir()?;
+                    if purge_data_dir(&data_dir)? {
+                        println!("removed {}", data_dir.display());
+                    } else {
+                        println!("no data found at {}", data_dir.display());
+                    }
+                }
                 println!("lattice-daemon service removed");
             }
             ServiceCommand::Start => {
@@ -2355,5 +2399,14 @@ mod tests {
         let base = Path::new("/tmp/out");
         let joined = safe_join(base, "assets/app.js").expect("join path");
         assert_eq!(joined, base.join("assets/app.js"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_service_bin_path_uses_programdata_lattice() {
+        let daemon = Path::new(r"C:\Program Files\Lattice\lattice-daemon.exe");
+        let bin_path = windows_service_bin_path(daemon, 7780);
+        assert!(bin_path.contains(r#"--data-dir "C:\ProgramData\Lattice""#));
+        assert!(bin_path.contains(r#"--rpc-port 7780"#));
     }
 }
