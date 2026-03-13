@@ -178,15 +178,6 @@ jobs:
         with:
           path: release-assets
 
-      - name: Generate Homebrew formula
-        run: |
-          version="${GITHUB_REF_NAME#lattice-v}"
-          python3 packaging/homebrew/lattice-net/render_formula.py \
-            --version "$version" \
-            --macos-x86-sha256 release-assets/lattice-macos-x86_64/lattice-macos-x86_64.tar.gz.sha256 \
-            --macos-arm64-sha256 release-assets/lattice-macos-aarch64/lattice-macos-aarch64.tar.gz.sha256 \
-            --output release-assets/homebrew/lattice-net.rb
-
       - name: Generate Debian packages and APT repo snapshot
         run: |
           version="${GITHUB_REF_NAME#lattice-v}"
@@ -218,10 +209,9 @@ jobs:
             - Linux x86_64: `lattice-linux-x86_64.tar.gz`
             - Linux aarch64: `lattice-linux-aarch64.tar.gz`
 
-            Additional packaging assets are attached too:
-            - `lattice-net.rb` for a Homebrew tap
-            - `.deb` packages for `amd64` and `arm64`
-            - `lattice-apt-repo.tar.gz` as an APT repo snapshot
+            Package-manager distribution is also updated automatically:
+            - Homebrew tap: `fordz0/lattice`
+            - APT repo: `https://fordz0.github.io/lattice-packages/apt`
 
             After installing, bring the node online with:
 
@@ -243,8 +233,6 @@ jobs:
             release-assets/lattice-windows-x86_64/lattice-windows-x86_64.zip
             release-assets/lattice-windows-x86_64/lattice-windows-x86_64.msi
             release-assets/apt/lattice_*.deb
-            release-assets/apt/lattice-apt-repo.tar.gz
-            release-assets/homebrew/lattice-net.rb
 
   publish-homebrew-tap:
     needs: release
