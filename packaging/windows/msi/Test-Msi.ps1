@@ -48,7 +48,7 @@ function Test-MsiTableHasRows {
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.GetType().InvokeMember(
     "OpenDatabase",
-    "InvokeMethod",
+    [System.Reflection.BindingFlags]::InvokeMethod,
     $null,
     $installer,
     @((Resolve-Path $Path).Path, 0)
