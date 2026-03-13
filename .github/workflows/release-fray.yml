@@ -102,6 +102,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
+          body: |
+            Fray release binaries are attached below for Linux and macOS.
+
+            Fray expects a local Lattice node:
+
+            ```bash
+            lattice up
+            fray
+            ```
+
+            Checksums are attached alongside each binary.
+
           generate_release_notes: true
           files: |
             release-assets/**/fray-linux-x86_64

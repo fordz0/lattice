@@ -176,6 +176,25 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
+          body: |
+            ## Quick install
+
+            - Arch Linux: `yay -S lattice-net-git`
+            - Windows: download and run `lattice-windows-x86_64.msi`
+            - macOS Apple Silicon: `lattice-macos-aarch64.tar.gz`
+            - macOS Intel: `lattice-macos-x86_64.tar.gz`
+            - Linux x86_64: `lattice-linux-x86_64.tar.gz`
+            - Linux aarch64: `lattice-linux-aarch64.tar.gz`
+
+            After installing, bring the node online with:
+
+            ```bash
+            lattice up
+            lattice doctor
+            ```
+
+            Checksums for every artifact are attached alongside the release assets.
+
           generate_release_notes: true
           files: |
             release-assets/**/*.tar.gz
