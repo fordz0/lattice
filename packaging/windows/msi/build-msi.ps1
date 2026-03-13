@@ -36,9 +36,17 @@ if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
     & wix extension add --global "WixToolset.UI.wixext/$wixVersion"
 }
 
+$uiExtensionDir = Join-Path $env:USERPROFILE ".wix\extensions\WixToolset.UI.wixext"
+$uiExtensionDll = Get-ChildItem -Path $uiExtensionDir -Filter "WixToolset.UI.wixext.dll" -Recurse -File |
+    Sort-Object FullName -Descending |
+    Select-Object -First 1
+if ($null -eq $uiExtensionDll) {
+    throw "Failed to locate WixToolset.UI.wixext.dll under $uiExtensionDir"
+}
+
 & wix build `
     -arch x64 `
-    -ext WixToolset.UI.wixext `
+    -ext $uiExtensionDll.FullName `
     -d SourceDir="$resolvedSource" `
     -d Version="$Version" `
     $wxsPath `
