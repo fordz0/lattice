@@ -15,6 +15,9 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+      AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
 
     steps:
       - name: Check out
@@ -61,11 +64,9 @@ jobs:
           mv "release-assets/build/lattice-extension-${version}.zip" "release-assets/"
 
       - name: Sign extension with AMO
-        if: ${{ secrets.AMO_JWT_ISSUER != '' && secrets.AMO_JWT_SECRET != '' }}
+        if: ${{ env.AMO_JWT_ISSUER != '' && env.AMO_JWT_SECRET != '' }}
         shell: bash
         env:
-          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
-          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
           AMO_CHANNEL: ${{ vars.AMO_CHANNEL }}
         run: |
           set -euo pipefail
