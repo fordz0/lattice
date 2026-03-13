@@ -55,6 +55,8 @@ enum Command {
     Doctor {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        strict: bool,
     },
     Service {
         #[command(subcommand)]
@@ -221,8 +223,8 @@ async fn run() -> Result<()> {
         Command::Down => {
             down()?;
         }
-        Command::Doctor { json } => {
-            doctor(cli.rpc_port, json).await?;
+        Command::Doctor { json, strict } => {
+            doctor(cli.rpc_port, json, strict).await?;
         }
         Command::Service { command } => {
             service_command(command, cli.rpc_port).await?;
@@ -1935,7 +1937,7 @@ fn down() -> Result<()> {
     Ok(())
 }
 
-async fn doctor(rpc_port: u16, json: bool) -> Result<()> {
+async fn doctor(rpc_port: u16, json: bool, strict: bool) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_port);
     let rpc_url = rpc_client.base_url.clone();
     let data_dir = lattice_data_dir()?;
@@ -2023,6 +2025,9 @@ async fn doctor(rpc_port: u16, json: bool) -> Result<()> {
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
+        if strict && !report.healthy {
+            bail!("lattice doctor found an unhealthy local setup");
+        }
         return Ok(());
     }
 
@@ -2053,6 +2058,10 @@ async fn doctor(rpc_port: u16, json: bool) -> Result<()> {
     println!("Next steps:");
     for step in &report.next_steps {
         println!("  - {step}");
+    }
+
+    if strict && !report.healthy {
+        bail!("lattice doctor found an unhealthy local setup");
     }
 
     Ok(())

@@ -56,6 +56,9 @@ useful for advanced testing/operator workflows.
 If something feels off, run `lattice doctor` for a quick health check and
 actionable next steps.
 
+For scripts or CI, `lattice doctor --json --strict` will emit a machine-readable
+report and exit nonzero if the local setup is unhealthy.
+
 ### Basic commands
 ```bash
 # check your node status
