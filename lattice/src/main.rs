@@ -1911,13 +1911,6 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
 }
 
 async fn up(rpc_port: u16, server: bool, bootstrap: bool) -> Result<()> {
-    if let Ok(info) = RpcClient::new(rpc_port).node_info().await {
-        println!("lattice-daemon is already running");
-        print_status(&info);
-        print_up_next_steps();
-        return Ok(());
-    }
-
     if std::env::consts::OS == "linux" {
         let server = server || bootstrap;
         if server {
@@ -1975,6 +1968,13 @@ async fn up(rpc_port: u16, server: bool, bootstrap: bool) -> Result<()> {
                 return Ok(());
             }
         }
+    }
+
+    if let Ok(info) = RpcClient::new(rpc_port).node_info().await {
+        println!("lattice-daemon is already running");
+        print_status(&info);
+        print_up_next_steps();
+        return Ok(());
     }
 
     if std::env::consts::OS == "macos" {
