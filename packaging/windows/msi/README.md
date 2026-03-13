@@ -1,27 +1,38 @@
-# Windows Installer Plan
+# Windows Installer
 
-Current state:
+This directory contains the first real MSI implementation for Lattice.
 
-- GitHub Releases publish `lattice.exe` and `lattice-daemon.exe` in a zip archive
-- `lattice up` can manage the daemon directly after extraction
-- This is enough for early Windows users, but it is not a polished installer experience
+Current behavior:
 
-Planned MSI work:
+- installs `lattice.exe` and `lattice-daemon.exe` into `Program Files\Lattice`
+- adds the install directory to the system `PATH`
+- includes `LICENSE` and `README.md`
+- leaves runtime daemon management to the CLI:
+  - `lattice up`
+  - `lattice down`
+  - `lattice service ...`
 
-1. Install `lattice.exe` and `lattice-daemon.exe` into `Program Files`
-2. Add an Add/Remove Programs entry
-3. Register an optional per-user startup or service path for `lattice-daemon`
-4. Preserve user data in `%LOCALAPPDATA%\Lattice`
-5. Optionally add an uninstall action that keeps user data unless explicitly removed
+What it does not do yet:
 
-Suggested implementation path:
+- auto-install or auto-start the daemon service during MSI install
+- install Start Menu shortcuts
+- bundle the Firefox extension
+- offer a “remove user data” checkbox
 
-- Start with WiX Toolset because it produces a conventional MSI
-- Reuse the GitHub release zip artifacts as installer inputs
-- Keep `lattice up/down` working even after MSI install so CLI behavior stays consistent across platforms
+Build locally with WiX v4:
 
-Open design questions:
+```powershell
+dotnet tool install --global wix --version 4.*
+pwsh ./packaging/windows/msi/build-msi.ps1 `
+  -SourceDir ./dist/lattice-windows-x86_64 `
+  -Version 0.1.1 `
+  -OutputPath ./dist/lattice-windows-x86_64.msi
+```
 
-- Per-user background process vs Windows Service for `lattice-daemon`
-- Whether to install a Start Menu shortcut for setup/docs
-- Whether the MSI should install the Firefox extension helper assets or only the core binaries
+The GitHub release workflow uses the same script on `windows-latest`.
+
+Next likely improvements:
+
+1. offer an optional “install and start daemon service” step
+2. add Start Menu shortcuts for CLI/setup docs
+3. keep `%LOCALAPPDATA%\Lattice` on uninstall by default, with an opt-in purge path

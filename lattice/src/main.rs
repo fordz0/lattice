@@ -33,6 +33,7 @@ const WINDOWS_DAEMON_CREATION_FLAGS: u32 = 0x00000008 | 0x00000200 | 0x08000000;
 #[cfg(windows)]
 const WINDOWS_DAEMON_SERVICE_NAME: &str = "lattice-daemon";
 const MACOS_DAEMON_LABEL: &str = "dev.benjf.lattice-daemon";
+const MACOS_APP_LABEL_PREFIX: &str = "dev.benjf.lattice.app";
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -807,6 +808,33 @@ fn detect_existing_macos_daemon_launch_agent() -> Result<Option<PathBuf>> {
     }
 }
 
+fn macos_app_label(app_id: &str) -> String {
+    let suffix: String = app_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("{MACOS_APP_LABEL_PREFIX}.{suffix}")
+}
+
+fn macos_app_launch_agent_path(app_id: &str) -> Result<PathBuf> {
+    Ok(macos_launch_agents_dir()?.join(format!("{}.plist", macos_app_label(app_id))))
+}
+
+fn detect_existing_macos_app_launch_agent(app_id: &str) -> Result<Option<PathBuf>> {
+    let path = macos_app_launch_agent_path(app_id)?;
+    if path.exists() {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
 fn detect_service_mode(app_id: &str) -> Result<Option<ServiceMode>> {
     let system_path = system_service_file_path(app_id);
     let daemon_system_service = Path::new("/etc/systemd/system/lattice-daemon.service");
@@ -893,6 +921,39 @@ fn installed_manual_instructions(install_path: &Path, rpc_port: u16) {
     );
 }
 
+fn install_macos_app_launch_agent(app_id: &str, install_path: &Path, rpc_port: u16) -> Result<()> {
+    let plist_path = macos_app_launch_agent_path(app_id)?;
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let plist = render_app_launchd_plist(app_id, install_path, rpc_port)?;
+    fs::write(&plist_path, plist)
+        .with_context(|| format!("failed to write {}", plist_path.display()))?;
+
+    let domain = macos_launchctl_domain()?;
+    let plist_arg = plist_path.to_string_lossy().to_string();
+    let _ = run_launchctl(["bootout", &domain, &plist_arg].as_slice());
+    run_launchctl(["bootstrap", &domain, &plist_arg].as_slice())?;
+    let service_target = macos_app_launchctl_service_target(app_id)?;
+    let _ = run_launchctl(["kickstart", "-k", &service_target].as_slice());
+    Ok(())
+}
+
+fn uninstall_macos_app_launch_agent(app_id: &str) -> Result<()> {
+    let Some(plist_path) = detect_existing_macos_app_launch_agent(app_id)? else {
+        return Ok(());
+    };
+
+    let domain = macos_launchctl_domain()?;
+    let plist_arg = plist_path.to_string_lossy().to_string();
+    let _ = run_launchctl(["bootout", &domain, &plist_arg].as_slice());
+    fs::remove_file(&plist_path)
+        .with_context(|| format!("failed to remove {}", plist_path.display()))?;
+    Ok(())
+}
+
 fn render_daemon_systemd_service(mode: &ServiceMode, daemon_path: &Path, rpc_port: u16) -> String {
     match mode {
         ServiceMode::System { .. } => {
@@ -929,6 +990,39 @@ fn render_daemon_launchd_plist(daemon_path: &Path, rpc_port: u16) -> Result<Stri
       <string>--rpc-port</string>\n\
       <string>{rpc_port}</string>\n\
     </array>\n\
+    <key>RunAtLoad</key>\n\
+    <true/>\n\
+    <key>KeepAlive</key>\n\
+    <true/>\n\
+    <key>WorkingDirectory</key>\n\
+    <string>{data_dir}</string>\n\
+  </dict>\n\
+</plist>\n"
+    ))
+}
+
+fn render_app_launchd_plist(app_id: &str, install_path: &Path, rpc_port: u16) -> Result<String> {
+    let data_dir = lattice_data_dir()?;
+    let app_label = macos_app_label(app_id);
+    let install_path = xml_escape_path(install_path);
+    let data_dir = xml_escape_path(&data_dir);
+
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n\
+  <dict>\n\
+    <key>Label</key>\n\
+    <string>{app_label}</string>\n\
+    <key>ProgramArguments</key>\n\
+    <array>\n\
+      <string>{install_path}</string>\n\
+    </array>\n\
+    <key>EnvironmentVariables</key>\n\
+    <dict>\n\
+      <key>LATTICE_RPC_PORT</key>\n\
+      <string>{rpc_port}</string>\n\
+    </dict>\n\
     <key>RunAtLoad</key>\n\
     <true/>\n\
     <key>KeepAlive</key>\n\
@@ -981,6 +1075,14 @@ fn macos_launchctl_service_target() -> Result<String> {
         "{}/{}",
         macos_launchctl_domain()?,
         MACOS_DAEMON_LABEL
+    ))
+}
+
+fn macos_app_launchctl_service_target(app_id: &str) -> Result<String> {
+    Ok(format!(
+        "{}/{}",
+        macos_launchctl_domain()?,
+        macos_app_label(app_id)
     ))
 }
 
@@ -1653,12 +1755,13 @@ async fn install_or_update_app(rpc_port: u16, app_id: &str, update_only: bool) -
             None => installed_manual_instructions(&install_path, rpc_port),
         }
     } else if std::env::consts::OS == "macos" {
-        println!("installed at {}", install_path.display());
-        println!(
-            "run it manually: LATTICE_RPC_PORT={} {}",
-            rpc_port,
-            install_path.display()
-        );
+        match install_macos_app_launch_agent(app_id, &install_path, rpc_port) {
+            Ok(()) => println!("{app_id} installed and started"),
+            Err(err) => {
+                eprintln!("warning: {err}");
+                installed_manual_instructions(&install_path, rpc_port);
+            }
+        }
     } else {
         println!("installed at {}", install_path.display());
         println!(
@@ -1718,6 +1821,8 @@ fn uninstall_app(app_id: &str) -> Result<()> {
             }
             let _ = run_systemctl(&reload_args);
         }
+    } else if std::env::consts::OS == "macos" {
+        let _ = uninstall_macos_app_launch_agent(app_id);
     }
 
     let install_path = installed_app_path(app_id)?;
@@ -1911,6 +2016,14 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
 }
 
 fn service_status(app_id: &str) -> String {
+    if std::env::consts::OS == "macos" {
+        return match detect_existing_macos_app_launch_agent(app_id) {
+            Ok(Some(_)) => "launchd".to_string(),
+            Ok(None) => "manual".to_string(),
+            Err(_) => "unknown".to_string(),
+        };
+    }
+
     if std::env::consts::OS != "linux" {
         return "manual".to_string();
     }

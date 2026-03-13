@@ -50,6 +50,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact_stem: lattice-windows-x86_64
             archive_name: lattice-windows-x86_64.zip
+            msi_name: lattice-windows-x86_64.msi
             build_cmd: cargo build --release --locked -p lattice -p lattice-daemon --target x86_64-pc-windows-msvc
             install_cross: false
             is_windows: true
@@ -114,13 +115,43 @@ jobs:
           $hash = (Get-FileHash "${{ matrix.archive_name }}" -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path "${{ matrix.archive_name }}.sha256" -Value $hash -NoNewline
 
-      - name: Upload artifacts
+      - name: Install WiX
+        if: ${{ matrix.is_windows }}
+        shell: pwsh
+        run: dotnet tool install --global wix --version 4.*
+
+      - name: Build Windows MSI
+        if: ${{ matrix.is_windows }}
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^lattice-v', ''
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          pwsh ./packaging/windows/msi/build-msi.ps1 `
+            -SourceDir "dist/${{ matrix.artifact_stem }}" `
+            -Version $version `
+            -OutputPath "${{ matrix.msi_name }}"
+          $hash = (Get-FileHash "${{ matrix.msi_name }}" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "${{ matrix.msi_name }}.sha256" -Value $hash -NoNewline
+
+      - name: Upload Unix artifacts
+        if: ${{ !matrix.is_windows }}
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_stem }}
           path: |
             ${{ matrix.archive_name }}
             ${{ matrix.archive_name }}.sha256
+
+      - name: Upload Windows artifacts
+        if: ${{ matrix.is_windows }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_stem }}
+          path: |
+            ${{ matrix.archive_name }}
+            ${{ matrix.archive_name }}.sha256
+            ${{ matrix.msi_name }}
+            ${{ matrix.msi_name }}.sha256
 
   release:
     needs: build
@@ -142,3 +173,5 @@ jobs:
             release-assets/**/*.tar.gz.sha256
             release-assets/**/*.zip
             release-assets/**/*.zip.sha256
+            release-assets/**/*.msi
+            release-assets/**/*.msi.sha256
