@@ -1146,6 +1146,7 @@ fn macos_app_launchctl_service_target(app_id: &str) -> Result<String> {
     ))
 }
 
+#[cfg(target_os = "linux")]
 fn install_linux_daemon_service_definition(rpc_port: u16) -> Result<()> {
     let daemon_path = daemon_binary_path()?;
     let Some(mode) = detect_daemon_service_mode()? else {
@@ -1165,6 +1166,7 @@ fn install_linux_daemon_service_definition(rpc_port: u16) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn start_linux_daemon_service() -> Result<()> {
     let Some(mode) = detect_daemon_service_mode()? else {
         bail!("lattice-daemon service is not available");
@@ -1178,6 +1180,7 @@ fn start_linux_daemon_service() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn stop_linux_daemon_service() -> Result<()> {
     let Some(mode) = detect_existing_daemon_service_mode()? else {
         bail!("lattice-daemon service is not installed");
@@ -1187,6 +1190,7 @@ fn stop_linux_daemon_service() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn restart_linux_daemon_service() -> Result<()> {
     let Some(mode) = detect_existing_daemon_service_mode()? else {
         bail!("lattice-daemon service is not installed");
@@ -1196,6 +1200,7 @@ fn restart_linux_daemon_service() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn linux_daemon_service_status() -> Result<Option<String>> {
     let Some(mode) = detect_existing_daemon_service_mode()? else {
         return Ok(None);
@@ -1210,6 +1215,7 @@ fn linux_daemon_service_status() -> Result<Option<String>> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn uninstall_linux_daemon_service() -> Result<()> {
     let Some(mode) = detect_existing_daemon_service_mode()? else {
         return Ok(());
