@@ -280,6 +280,7 @@ jobs:
           workdir="$(mktemp -d)"
           repo_url="https://x-access-token:${PACKAGING_PUSH_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git"
           git clone "$repo_url" "$workdir/tap"
+          mkdir -p "$workdir/tap/Formula"
           cp release-assets/homebrew/lattice-net.rb "$workdir/tap/Formula/lattice-net.rb"
 
           cd "$workdir/tap"

@@ -35,6 +35,12 @@ If you want the release workflow to push that snapshot automatically, configure:
 - repository secret `PACKAGING_PUSH_TOKEN`
   A GitHub token with contents write access to the target repo
 
+To scaffold the target repo locally before creating it on GitHub:
+
+```sh
+./scripts/bootstrap-apt-repo.sh /path/to/lattice-packages
+```
+
 ## Release assets generated
 
 - `.deb` packages install:

@@ -20,6 +20,12 @@ If you want the release workflow to update the tap repo automatically, configure
 - repository secret `PACKAGING_PUSH_TOKEN`
   A GitHub token with contents write access to the tap repo
 
+To scaffold the target repo locally before creating it on GitHub:
+
+```sh
+./scripts/bootstrap-homebrew-tap.sh /path/to/homebrew-lattice
+```
+
 Suggested tap layout:
 
 ```text
