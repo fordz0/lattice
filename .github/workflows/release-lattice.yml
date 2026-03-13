@@ -170,10 +170,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
+
+      - name: Generate Homebrew formula
+        run: |
+          version="${GITHUB_REF_NAME#lattice-v}"
+          python3 packaging/homebrew/lattice-net/render_formula.py \
+            --version "$version" \
+            --macos-x86-sha256 release-assets/lattice-macos-x86_64/lattice-macos-x86_64.tar.gz.sha256 \
+            --macos-arm64-sha256 release-assets/lattice-macos-aarch64/lattice-macos-aarch64.tar.gz.sha256 \
+            --output release-assets/homebrew/lattice-net.rb
+
+      - name: Generate Debian packages and APT repo snapshot
+        run: |
+          version="${GITHUB_REF_NAME#lattice-v}"
+          python3 packaging/apt/build_repo.py \
+            --version "$version" \
+            --amd64-tarball release-assets/lattice-linux-x86_64/lattice-linux-x86_64.tar.gz \
+            --arm64-tarball release-assets/lattice-linux-aarch64/lattice-linux-aarch64.tar.gz \
+            --output-dir release-assets/apt
+
+      - name: Write package checksums
+        run: |
+          sha256sum release-assets/apt/*.deb release-assets/apt/lattice-apt-repo.tar.gz \
+            | while read -r hash path; do
+                printf '%s' "$hash" > "${path}.sha256"
+              done
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -184,10 +212,16 @@ jobs:
 
             - Arch Linux: `yay -S lattice-net-git`
             - Windows: download and run `lattice-windows-x86_64.msi`
+            - Debian/Ubuntu: download the matching `.deb` package from this release
             - macOS Apple Silicon: `lattice-macos-aarch64.tar.gz`
             - macOS Intel: `lattice-macos-x86_64.tar.gz`
             - Linux x86_64: `lattice-linux-x86_64.tar.gz`
             - Linux aarch64: `lattice-linux-aarch64.tar.gz`
+
+            Additional packaging assets are attached too:
+            - `lattice-net.rb` for a Homebrew tap
+            - `.deb` packages for `amd64` and `arm64`
+            - `lattice-apt-repo.tar.gz` as an APT repo snapshot
 
             After installing, bring the node online with:
 
@@ -206,3 +240,6 @@ jobs:
             release-assets/**/*.zip.sha256
             release-assets/**/*.msi
             release-assets/**/*.msi.sha256
+            release-assets/**/*.deb
+            release-assets/**/*.deb.sha256
+            release-assets/**/lattice-net.rb

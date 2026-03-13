@@ -1,15 +1,17 @@
 # lattice-net Homebrew staging
 
-This directory is a staging copy of the files you would publish in a personal
-Homebrew tap for `lattice-net`.
+This directory is the upstream staging area for a personal Homebrew tap for
+`lattice-net`.
 
-It is not the tap repo itself. The intended flow is:
+It is not the tap repo itself. The release workflow now generates a ready-to-use
+`lattice-net.rb` formula asset from the macOS release tarballs and checksums.
+
+The intended flow is:
 
 1. Push a `lattice-v*` tag.
-2. Let the GitHub release workflow publish macOS release tarballs and `.sha256`
-   files.
-3. Copy the formula template into your tap repo and fill in the version and
-   checksums from that release.
+2. Let the GitHub release workflow publish macOS tarballs, checksum files, and
+   a rendered `lattice-net.rb`.
+3. Copy that generated formula into your tap repo.
 
 Suggested tap layout:
 
@@ -25,15 +27,21 @@ Suggested tap flow:
 git clone git@github.com:fordz0/homebrew-lattice.git
 cd homebrew-lattice
 mkdir -p Formula
-cp /path/to/lattice/packaging/homebrew/lattice-net/Formula/lattice-net.rb.template \
-  Formula/lattice-net.rb
+curl -LO https://github.com/fordz0/lattice/releases/download/lattice-vX.Y.Z/lattice-net.rb
+mv lattice-net.rb Formula/lattice-net.rb
 ```
 
-Then replace the placeholder version and sha256 values with the actual release
-values from the `lattice-v*` GitHub release.
+If you need to render the formula locally instead of using the release asset:
+
+```sh
+python3 packaging/homebrew/lattice-net/render_formula.py \
+  --version X.Y.Z \
+  --macos-x86-sha256 lattice-macos-x86_64.tar.gz.sha256 \
+  --macos-arm64-sha256 lattice-macos-aarch64.tar.gz.sha256 \
+  --output Formula/lattice-net.rb
+```
 
 Later improvements:
 
-1. Add `launchd` integration for `lattice up/down` on macOS.
-2. Publish a stable `lattice-net` formula from release tarballs.
-3. Add a `-head` formula only if you actually need a bleeding-edge tap.
+1. Publish a dedicated `homebrew-lattice` tap repo.
+2. Add a `-head` formula only if you actually need a bleeding-edge tap.

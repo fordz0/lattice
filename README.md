@@ -26,11 +26,19 @@ Arch Linux:
 yay -S lattice-net-git
 ```
 
+Debian and Ubuntu:
+- download the matching `.deb` package from:
+  `https://github.com/fordz0/lattice/releases/latest`
+- `amd64` and `arm64` packages are attached to each release
+
 macOS and Windows:
 - download the latest release artifacts from:
   `https://github.com/fordz0/lattice/releases/latest`
 - Windows users should prefer the `.msi`
 - macOS users should prefer the matching `.tar.gz` for their CPU
+- release attachments also include:
+  - `lattice-net.rb` for a Homebrew tap
+  - `lattice-apt-repo.tar.gz` as an APT repo snapshot for Debian-style hosting
 
 Build from source on any platform:
 
