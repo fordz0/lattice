@@ -58,7 +58,7 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         shell: bash
@@ -111,7 +111,7 @@ jobs:
           Set-Content -Path "${{ matrix.archive_name }}.sha256" -Value $hash -NoNewline
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_stem }}
           path: |
