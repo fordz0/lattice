@@ -6,7 +6,12 @@ Current behavior:
 
 - installs `lattice.exe` and `lattice-daemon.exe` into `Program Files\Lattice`
 - adds the install directory to the system `PATH`
-- adds `Lattice` and `Lattice README` Start Menu shortcuts
+- adds Start Menu entries for:
+  - `Lattice`
+  - `Lattice README`
+  - `Lattice Getting Started`
+  - `Lattice Firefox Extension`
+  - `Remove Lattice Data`
 - includes `LICENSE` and `README.md`
 - installs and starts the `lattice-daemon` Windows service automatically
 - configures the service to run with:
@@ -19,11 +24,12 @@ Current behavior:
   - `lattice service ...`
 - stops and removes the Windows service on uninstall
 - preserves `%ProgramData%\Lattice` on uninstall for now
+- includes a `Remove Lattice Data` maintenance shortcut for wiping daemon data explicitly
 
 What it does not do yet:
 
 - bundle the Firefox extension
-- offer a “remove user data” checkbox
+- offer a “remove user data” checkbox inside the MSI UI
 
 Build locally with WiX v4:
 
@@ -39,6 +45,6 @@ The GitHub release workflow uses the same script on `windows-latest`.
 
 Next likely improvements:
 
-1. make daemon service installation optional in the MSI UI
-2. add richer Start Menu shortcuts for docs/setup flows
-3. offer an opt-in purge path for `%ProgramData%\Lattice` on uninstall
+1. add a proper MSI UI for advanced install/uninstall options
+2. make the `Remove Lattice Data` flow smarter about prompting if the service is still in use
+3. offer an opt-in purge path for `%ProgramData%\Lattice` directly inside the MSI UI

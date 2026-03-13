@@ -55,6 +55,27 @@
               WorkingDirectory="INSTALLFOLDER" />
           </File>
         </Component>
+        <Component Id="RemoveLatticeDataScriptComponent" Guid="*">
+          <File
+            Id="RemoveLatticeDataScript"
+            Name="Remove-LatticeData.ps1"
+            Source="$(sys.SOURCEFILEDIR)assets\Remove-LatticeData.ps1"
+            KeyPath="yes" />
+        </Component>
+        <Component Id="RemoveLatticeDataLauncherComponent" Guid="*">
+          <File
+            Id="RemoveLatticeDataLauncher"
+            Name="Remove-LatticeData.cmd"
+            Source="$(sys.SOURCEFILEDIR)assets\Remove-LatticeData.cmd"
+            KeyPath="yes">
+            <Shortcut
+              Id="RemoveLatticeDataShortcut"
+              Directory="ProgramMenuLatticeFolder"
+              Name="Remove Lattice Data"
+              Description="Stop the daemon service and remove local Lattice data"
+              WorkingDirectory="INSTALLFOLDER" />
+          </File>
+        </Component>
         <Component Id="PathComponent" Guid="*">
           <Environment
             Id="LatticeInstallPath"
@@ -86,6 +107,20 @@
             Value="1"
             KeyPath="yes" />
         </Component>
+        <Component Id="GettingStartedShortcutComponent" Guid="*">
+          <File
+            Id="GettingStartedShortcutFile"
+            Name="Lattice Getting Started.url"
+            Source="$(sys.SOURCEFILEDIR)assets\Lattice Getting Started.url"
+            KeyPath="yes" />
+        </Component>
+        <Component Id="FirefoxExtensionShortcutComponent" Guid="*">
+          <File
+            Id="FirefoxExtensionShortcutFile"
+            Name="Lattice Firefox Extension.url"
+            Source="$(sys.SOURCEFILEDIR)assets\Lattice Firefox Extension.url"
+            KeyPath="yes" />
+        </Component>
       </Directory>
     </StandardDirectory>
 
@@ -94,8 +129,12 @@
       <ComponentRef Id="LatticeDaemonExeComponent" />
       <ComponentRef Id="LicenseComponent" />
       <ComponentRef Id="ReadmeComponent" />
+      <ComponentRef Id="RemoveLatticeDataScriptComponent" />
+      <ComponentRef Id="RemoveLatticeDataLauncherComponent" />
       <ComponentRef Id="PathComponent" />
       <ComponentRef Id="ProgramMenuFolderComponent" />
+      <ComponentRef Id="GettingStartedShortcutComponent" />
+      <ComponentRef Id="FirefoxExtensionShortcutComponent" />
     </Feature>
   </Package>
 </Wix>
