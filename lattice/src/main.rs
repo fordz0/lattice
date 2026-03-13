@@ -49,6 +49,10 @@ struct Cli {
 enum Command {
     Up,
     Down,
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     Status,
     Peers,
     Put {
@@ -124,6 +128,16 @@ enum NameCommand {
     List,
 }
 
+#[derive(Subcommand)]
+enum ServiceCommand {
+    Install,
+    Uninstall,
+    Start,
+    Stop,
+    Restart,
+    Status,
+}
+
 #[derive(Debug)]
 struct NameClaimedByOther {
     name: String,
@@ -181,6 +195,9 @@ async fn run() -> Result<()> {
         }
         Command::Down => {
             down()?;
+        }
+        Command::Service { command } => {
+            service_command(command, cli.rpc_port).await?;
         }
         Command::Status => {
             let client = RpcClient::new(cli.rpc_port);
@@ -1046,6 +1063,51 @@ fn install_or_update_windows_daemon_service(daemon_path: &Path, rpc_port: u16) -
     Ok(())
 }
 
+#[cfg(windows)]
+fn windows_daemon_service_status() -> Result<Option<String>> {
+    let output = ProcessCommand::new("sc.exe")
+        .args(["query", WINDOWS_DAEMON_SERVICE_NAME])
+        .output()
+        .context("failed to run sc.exe query lattice-daemon")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        if stdout.contains("1060") || stderr.contains("1060") {
+            return Ok(None);
+        }
+        bail!(
+            "failed to query Windows service {}: {}{}",
+            WINDOWS_DAEMON_SERVICE_NAME,
+            stdout,
+            stderr
+        );
+    }
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("STATE") {
+            return Ok(Some(trimmed.to_string()));
+        }
+    }
+
+    Ok(Some("STATE: unknown".to_string()))
+}
+
+#[cfg(windows)]
+fn delete_windows_daemon_service() -> Result<()> {
+    if !detect_existing_windows_daemon_service()? {
+        return Ok(());
+    }
+
+    let _ = run_sc(&["stop".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()]);
+    run_sc(&[
+        "delete".to_string(),
+        WINDOWS_DAEMON_SERVICE_NAME.to_string(),
+    ])?;
+    Ok(())
+}
+
 fn find_executable_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -1265,6 +1327,59 @@ async fn restart_daemon_if_managed(rpc_port: u16) -> Result<()> {
         "warning: lattice-daemon is running but not managed by `lattice up`; restart it manually to pick up app changes"
     );
     Ok(())
+}
+
+async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let daemon_path = daemon_binary_path()?;
+        match command {
+            ServiceCommand::Install => {
+                install_or_update_windows_daemon_service(&daemon_path, rpc_port)?;
+                println!("lattice-daemon service installed");
+            }
+            ServiceCommand::Uninstall => {
+                delete_windows_daemon_service()?;
+                clear_daemon_pid()?;
+                println!("lattice-daemon service removed");
+            }
+            ServiceCommand::Start => {
+                install_or_update_windows_daemon_service(&daemon_path, rpc_port)?;
+                run_sc(&["start".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()])?;
+                let _ = wait_for_daemon(rpc_port, Duration::from_secs(15)).await?;
+                println!("lattice-daemon service started");
+            }
+            ServiceCommand::Stop => {
+                if !detect_existing_windows_daemon_service()? {
+                    bail!("lattice-daemon service is not installed");
+                }
+                run_sc(&["stop".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()])?;
+                clear_daemon_pid()?;
+                println!("lattice-daemon service stopped");
+            }
+            ServiceCommand::Restart => {
+                if !detect_existing_windows_daemon_service()? {
+                    bail!("lattice-daemon service is not installed");
+                }
+                let _ = run_sc(&["stop".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()]);
+                run_sc(&["start".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()])?;
+                let _ = wait_for_daemon(rpc_port, Duration::from_secs(15)).await?;
+                println!("lattice-daemon service restarted");
+            }
+            ServiceCommand::Status => match windows_daemon_service_status()? {
+                Some(status) => println!("{status}"),
+                None => println!("lattice-daemon service is not installed"),
+            },
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+        let _ = rpc_port;
+        bail!("`lattice service` is currently only available on Windows");
+    }
 }
 
 async fn up(rpc_port: u16) -> Result<()> {
