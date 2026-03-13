@@ -296,7 +296,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- Formula/lattice-net.rb; then
+          if [ -z "$(git status --porcelain -- Formula/lattice-net.rb)" ]; then
             echo "Homebrew formula already up to date."
             exit 0
           fi
@@ -364,7 +364,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet -- "$subdir"; then
+          if [ -z "$(git status --porcelain -- "$subdir")" ]; then
             echo "APT repo snapshot already up to date."
             exit 0
           fi
