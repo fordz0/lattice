@@ -25,12 +25,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
+use std::{os::windows::process::CommandExt, ptr};
+
+#[cfg(windows)]
+const WINDOWS_DAEMON_CREATION_FLAGS: u32 = 0x00000008 | 0x00000200 | 0x08000000;
+const MACOS_DAEMON_LABEL: &str = "dev.benjf.lattice-daemon";
 
 #[derive(Parser)]
 #[command(name = "lattice")]
 #[command(about = "CLI client for lattice-daemon JSON-RPC")]
 struct Cli {
-    #[arg(long, global = true, default_value_t = 7780)]
+    #[arg(long, global = true, default_value_t = rpc::DEFAULT_RPC_PORT)]
     rpc_port: u16,
 
     #[command(subcommand)]
@@ -662,6 +668,16 @@ fn daemon_pid_path() -> Result<PathBuf> {
     Ok(lattice_data_dir()?.join("daemon.pid"))
 }
 
+fn macos_launch_agents_dir() -> Result<PathBuf> {
+    let base_dirs =
+        BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
+    Ok(base_dirs.home_dir().join("Library").join("LaunchAgents"))
+}
+
+fn macos_daemon_launch_agent_path() -> Result<PathBuf> {
+    Ok(macos_launch_agents_dir()?.join(format!("{MACOS_DAEMON_LABEL}.plist")))
+}
+
 fn installed_app_path(app_id: &str) -> Result<PathBuf> {
     Ok(lattice_apps_dir()?.join(app_id))
 }
@@ -763,6 +779,15 @@ fn daemon_user_service_file_path() -> Result<PathBuf> {
     user_service_file_path("daemon")
 }
 
+fn detect_existing_macos_daemon_launch_agent() -> Result<Option<PathBuf>> {
+    let path = macos_daemon_launch_agent_path()?;
+    if path.exists() {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
 fn detect_service_mode(app_id: &str) -> Result<Option<ServiceMode>> {
     let system_path = system_service_file_path(app_id);
     let daemon_system_service = Path::new("/etc/systemd/system/lattice-daemon.service");
@@ -836,9 +861,13 @@ fn detect_existing_daemon_service_mode() -> Result<Option<ServiceMode>> {
     Ok(None)
 }
 
-fn installed_manual_instructions(install_path: &Path) {
+fn installed_manual_instructions(install_path: &Path, rpc_port: u16) {
     println!("binary installed at {}", install_path.display());
-    println!("to start manually: {}", install_path.display());
+    println!(
+        "to start manually: LATTICE_RPC_PORT={} {}",
+        rpc_port,
+        install_path.display()
+    );
     println!(
         "to start on login: add {} to your shell profile",
         install_path.display()
@@ -863,6 +892,75 @@ fn render_daemon_systemd_service(mode: &ServiceMode, daemon_path: &Path, rpc_por
     }
 }
 
+fn render_daemon_launchd_plist(daemon_path: &Path, rpc_port: u16) -> Result<String> {
+    let data_dir = lattice_data_dir()?;
+    let daemon_path = xml_escape_path(daemon_path);
+    let data_dir = xml_escape_path(&data_dir);
+
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n\
+  <dict>\n\
+    <key>Label</key>\n\
+    <string>{MACOS_DAEMON_LABEL}</string>\n\
+    <key>ProgramArguments</key>\n\
+    <array>\n\
+      <string>{daemon_path}</string>\n\
+      <string>--rpc-port</string>\n\
+      <string>{rpc_port}</string>\n\
+    </array>\n\
+    <key>RunAtLoad</key>\n\
+    <true/>\n\
+    <key>KeepAlive</key>\n\
+    <true/>\n\
+    <key>WorkingDirectory</key>\n\
+    <string>{data_dir}</string>\n\
+  </dict>\n\
+</plist>\n"
+    ))
+}
+
+fn xml_escape_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn macos_launchctl_domain() -> Result<String> {
+    let output = ProcessCommand::new("id")
+        .arg("-u")
+        .output()
+        .context("failed to run id -u")?;
+    if !output.status.success() {
+        bail!("id -u failed");
+    }
+    let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if uid.is_empty() {
+        bail!("failed to determine user id for launchctl");
+    }
+    Ok(format!("gui/{uid}"))
+}
+
+fn run_launchctl(args: &[&str]) -> Result<()> {
+    let status = ProcessCommand::new("launchctl")
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run launchctl {}", args.join(" ")))?;
+    if !status.success() {
+        bail!("launchctl {} failed", args.join(" "));
+    }
+    Ok(())
+}
+
+fn macos_launchctl_service_target() -> Result<String> {
+    Ok(format!("{}/{}", macos_launchctl_domain()?, MACOS_DAEMON_LABEL))
+}
+
 fn find_executable_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -877,11 +975,24 @@ fn find_executable_in_path(name: &str) -> Option<PathBuf> {
 fn daemon_binary_path() -> Result<PathBuf> {
     if let Ok(current) = std::env::current_exe() {
         if let Some(parent) = current.parent() {
+            #[cfg(windows)]
+            {
+                let sibling = parent.join("lattice-daemon.exe");
+                if sibling.is_file() {
+                    return Ok(sibling);
+                }
+            }
+
             let sibling = parent.join("lattice-daemon");
             if sibling.is_file() {
                 return Ok(sibling);
             }
         }
+    }
+
+    #[cfg(windows)]
+    if let Some(path) = find_executable_in_path("lattice-daemon.exe") {
+        return Ok(path);
     }
 
     find_executable_in_path("lattice-daemon")
@@ -917,7 +1028,7 @@ fn write_daemon_pid(pid: u32) -> Result<()> {
 }
 
 fn pid_looks_like_lattice_daemon(pid: &str) -> bool {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let _ = pid;
 
     #[cfg(unix)]
@@ -929,6 +1040,19 @@ fn pid_looks_like_lattice_daemon(pid: &str) -> bool {
             if output.status.success() {
                 let command = String::from_utf8_lossy(&output.stdout);
                 return command.contains("lattice-daemon");
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Ok(output) = ProcessCommand::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+        {
+            if output.status.success() {
+                let listing = String::from_utf8_lossy(&output.stdout);
+                return listing.contains("lattice-daemon.exe");
             }
         }
     }
@@ -964,10 +1088,18 @@ fn stop_manual_daemon() -> Result<bool> {
         return Ok(false);
     }
 
+    #[cfg(windows)]
+    let status = ProcessCommand::new("taskkill")
+        .args(["/PID", &pid, "/T", "/F"])
+        .status()
+        .with_context(|| format!("failed to run taskkill /PID {pid}"))?;
+
+    #[cfg(not(windows))]
     let status = ProcessCommand::new("kill")
         .arg(&pid)
         .status()
         .with_context(|| format!("failed to run kill {pid}"))?;
+
     clear_daemon_pid()?;
     if !status.success() {
         bail!("failed to stop daemon process {pid}");
@@ -981,12 +1113,20 @@ fn has_manual_daemon_pid() -> Result<bool> {
 
 fn start_manual_daemon(rpc_port: u16) -> Result<()> {
     let daemon_path = daemon_binary_path()?;
-    let child = ProcessCommand::new(&daemon_path)
+    let mut command = ProcessCommand::new(&daemon_path);
+    command
         .arg("--rpc-port")
         .arg(rpc_port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        command.creation_flags(WINDOWS_DAEMON_CREATION_FLAGS);
+    }
+
+    let child = command
         .spawn()
         .with_context(|| format!("failed to start {}", daemon_path.display()))?;
     write_daemon_pid(child.id())
@@ -1001,6 +1141,16 @@ async fn restart_daemon_if_managed(rpc_port: u16) -> Result<()> {
         if let Some(mode) = detect_existing_daemon_service_mode()? {
             let args = mode.systemctl_args(["restart", "lattice-daemon.service"].as_slice());
             run_systemctl(&args)?;
+            let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+            println!("lattice-daemon restarted");
+            return Ok(());
+        }
+    }
+
+    if std::env::consts::OS == "macos" {
+        if detect_existing_macos_daemon_launch_agent()?.is_some() {
+            let service_target = macos_launchctl_service_target()?;
+            run_launchctl(["kickstart", "-k", &service_target].as_slice())?;
             let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
             println!("lattice-daemon restarted");
             return Ok(());
@@ -1063,6 +1213,32 @@ async fn up(rpc_port: u16) -> Result<()> {
         }
     }
 
+    if std::env::consts::OS == "macos" {
+        let daemon_path = daemon_binary_path()?;
+        let plist_path = macos_daemon_launch_agent_path()?;
+        if let Some(parent) = plist_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let plist = render_daemon_launchd_plist(&daemon_path, rpc_port)?;
+        fs::write(&plist_path, plist)
+            .with_context(|| format!("failed to write {}", plist_path.display()))?;
+
+        let domain = macos_launchctl_domain()?;
+        let plist_arg = plist_path.to_string_lossy().to_string();
+        let _ = run_launchctl(["bootout", &domain, &plist_arg].as_slice());
+        run_launchctl(["bootstrap", &domain, &plist_arg].as_slice())?;
+        let _ = run_launchctl(
+            ["kickstart", "-k", &format!("{domain}/{MACOS_DAEMON_LABEL}")].as_slice(),
+        );
+
+        clear_daemon_pid()?;
+        let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+        println!("lattice-daemon enabled and started");
+        print_status(&info);
+        return Ok(());
+    }
+
     start_manual_daemon(rpc_port)?;
     let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
     println!("lattice-daemon started");
@@ -1075,6 +1251,17 @@ fn down() -> Result<()> {
         if let Some(mode) = detect_existing_daemon_service_mode()? {
             let args = mode.systemctl_args(["stop", "lattice-daemon.service"].as_slice());
             run_systemctl(&args)?;
+            clear_daemon_pid()?;
+            println!("lattice-daemon stopped");
+            return Ok(());
+        }
+    }
+
+    if std::env::consts::OS == "macos" {
+        if let Some(plist_path) = detect_existing_macos_daemon_launch_agent()? {
+            let domain = macos_launchctl_domain()?;
+            let plist_arg = plist_path.to_string_lossy().to_string();
+            run_launchctl(["bootout", &domain, &plist_arg].as_slice())?;
             clear_daemon_pid()?;
             println!("lattice-daemon stopped");
             return Ok(());
@@ -1187,7 +1374,7 @@ async fn install_or_update_app(rpc_port: u16, app_id: &str, update_only: bool) -
         match detect_service_mode(app_id)? {
             Some(mode) => {
                 let service_path = mode.service_path().to_path_buf();
-                let service_contents = render_systemd_service(&mode, app_id, &install_path);
+                let service_contents = render_systemd_service(&mode, app_id, &install_path, rpc_port);
                 match fs::write(&service_path, service_contents) {
                     Ok(()) => {
                         let mut setup_ok = true;
@@ -1207,7 +1394,7 @@ async fn install_or_update_app(rpc_port: u16, app_id: &str, update_only: bool) -
                         if setup_ok {
                             println!("{app_id} installed and started");
                         } else {
-                            installed_manual_instructions(&install_path);
+                            installed_manual_instructions(&install_path, rpc_port);
                         }
                     }
                     Err(err) => {
@@ -1215,17 +1402,26 @@ async fn install_or_update_app(rpc_port: u16, app_id: &str, update_only: bool) -
                             "warning: failed to write service file {}: {err}",
                             service_path.display()
                         );
-                        installed_manual_instructions(&install_path);
+                        installed_manual_instructions(&install_path, rpc_port);
                     }
                 }
             }
-            None => installed_manual_instructions(&install_path),
+            None => installed_manual_instructions(&install_path, rpc_port),
         }
     } else if std::env::consts::OS == "macos" {
         println!("installed at {}", install_path.display());
-        println!("run it manually for now");
+        println!(
+            "run it manually: LATTICE_RPC_PORT={} {}",
+            rpc_port,
+            install_path.display()
+        );
     } else {
         println!("installed at {}", install_path.display());
+        println!(
+            "run it manually: set LATTICE_RPC_PORT={} and start {}",
+            rpc_port,
+            install_path.display()
+        );
     }
 
     restart_daemon_if_managed(rpc_port).await?;
@@ -1438,18 +1634,23 @@ fn detect_existing_service_mode(app_id: &str) -> Result<Option<ServiceMode>> {
     Ok(None)
 }
 
-fn render_systemd_service(mode: &ServiceMode, app_id: &str, install_path: &Path) -> String {
+fn render_systemd_service(
+    mode: &ServiceMode,
+    app_id: &str,
+    install_path: &Path,
+    rpc_port: u16,
+) -> String {
     match mode {
         ServiceMode::System { .. } => {
             let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
             format!(
-                "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target lattice-daemon.service\nRequires=lattice-daemon.service\n\n[Service]\nType=simple\nUser={user}\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT=7780\n\n[Install]\nWantedBy=multi-user.target\n",
-                install_path.display()
+                "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target lattice-daemon.service\nRequires=lattice-daemon.service\n\n[Service]\nType=simple\nUser={user}\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT={rpc_port}\n\n[Install]\nWantedBy=multi-user.target\n",
+                install_path.display(),
             )
         }
         ServiceMode::User { .. } => format!(
-            "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT=7780\n\n[Install]\nWantedBy=default.target\n",
-            install_path.display()
+            "[Unit]\nDescription=Lattice App: {app_id}\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=5\nEnvironment=LATTICE_RPC_PORT={rpc_port}\n\n[Install]\nWantedBy=default.target\n",
+            install_path.display(),
         ),
     }
 }

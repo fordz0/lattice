@@ -6,9 +6,26 @@ browser.runtime.onInstalled.addListener(function(details) {
   }
 });
 
-var LOCAL_PROXY_HOST = '127.0.0.1';
-var LOCAL_PROXY_PORT = 7782;
-var DAEMON_RPC_URL = 'http://127.0.0.1:7780';
+var latticeConfigApi = typeof LatticeConfig !== 'undefined' && LatticeConfig.defaults
+  ? LatticeConfig
+  : {
+      defaults: function() {
+        return {
+          localHost: '127.0.0.1',
+          rpcPort: 7780,
+          httpPort: 7781,
+          proxyPort: 7782
+        };
+      },
+      daemonRpcUrl: function(config) {
+        return 'http://' + config.localHost + ':' + config.rpcPort;
+      },
+      caCertUrl: function(config) {
+        return 'http://' + config.localHost + ':' + config.httpPort + '/__lattice_ca.pem';
+      }
+    };
+
+var latticeConfig = latticeConfigApi.defaults();
 var hiddenOverlayByTab = {};
 
 function isLoomHost(hostname) {
@@ -41,7 +58,7 @@ function siteNameFromUrl(urlString) {
 }
 
 function rpcRequest(method, params) {
-  return fetch(DAEMON_RPC_URL, {
+  return fetch(latticeConfigApi.daemonRpcUrl(latticeConfig), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -398,8 +415,8 @@ if (typeof browser.proxy !== 'undefined' && browser.proxy.onRequest) {
         if ((url.protocol === 'http:' || url.protocol === 'https:') && isLoomHost(url.hostname)) {
           return {
             type: 'http',
-            host: LOCAL_PROXY_HOST,
-            port: LOCAL_PROXY_PORT
+            host: latticeConfig.localHost,
+            port: latticeConfig.proxyPort
           };
         }
       } catch (_e) {

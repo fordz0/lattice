@@ -2,7 +2,11 @@ use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::error::Error;
+use std::env;
 use std::fmt;
+
+pub const DEFAULT_RPC_PORT: u16 = 7780;
+pub const DEFAULT_RPC_HOST: &str = "127.0.0.1";
 
 #[derive(Debug)]
 pub struct DaemonNotRunning;
@@ -23,7 +27,7 @@ pub struct RpcClient {
 impl RpcClient {
     pub fn new(port: u16) -> Self {
         Self {
-            base_url: format!("http://127.0.0.1:{port}"),
+            base_url: rpc_base_url(port),
             http: Client::new(),
         }
     }
@@ -132,4 +136,13 @@ impl RpcClient {
             })
             .collect()
     }
+}
+
+fn rpc_base_url(port: u16) -> String {
+    if let Ok(url) = env::var("LATTICE_RPC_URL") {
+        return url;
+    }
+
+    let host = env::var("LATTICE_RPC_HOST").unwrap_or_else(|_| DEFAULT_RPC_HOST.to_string());
+    format!("http://{host}:{port}")
 }
