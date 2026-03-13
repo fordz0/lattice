@@ -233,16 +233,25 @@ jobs:
             Checksums for every artifact are attached alongside the release assets.
 
           generate_release_notes: true
+          overwrite_files: true
           files: |
-            release-assets/**/*.tar.gz
-            release-assets/**/*.tar.gz.sha256
-            release-assets/**/*.zip
-            release-assets/**/*.zip.sha256
-            release-assets/**/*.msi
-            release-assets/**/*.msi.sha256
-            release-assets/**/*.deb
-            release-assets/**/*.deb.sha256
-            release-assets/**/lattice-net.rb
+            release-assets/lattice-linux-x86_64/lattice-linux-x86_64.tar.gz
+            release-assets/lattice-linux-x86_64/lattice-linux-x86_64.tar.gz.sha256
+            release-assets/lattice-linux-aarch64/lattice-linux-aarch64.tar.gz
+            release-assets/lattice-linux-aarch64/lattice-linux-aarch64.tar.gz.sha256
+            release-assets/lattice-macos-x86_64/lattice-macos-x86_64.tar.gz
+            release-assets/lattice-macos-x86_64/lattice-macos-x86_64.tar.gz.sha256
+            release-assets/lattice-macos-aarch64/lattice-macos-aarch64.tar.gz
+            release-assets/lattice-macos-aarch64/lattice-macos-aarch64.tar.gz.sha256
+            release-assets/lattice-windows-x86_64/lattice-windows-x86_64.zip
+            release-assets/lattice-windows-x86_64/lattice-windows-x86_64.zip.sha256
+            release-assets/lattice-windows-x86_64/lattice-windows-x86_64.msi
+            release-assets/lattice-windows-x86_64/lattice-windows-x86_64.msi.sha256
+            release-assets/apt/lattice_*.deb
+            release-assets/apt/lattice_*.deb.sha256
+            release-assets/apt/lattice-apt-repo.tar.gz
+            release-assets/apt/lattice-apt-repo.tar.gz.sha256
+            release-assets/homebrew/lattice-net.rb
 
   publish-homebrew-tap:
     needs: release
