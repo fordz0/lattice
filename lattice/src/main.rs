@@ -1070,6 +1070,14 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn launchctl_output(args: &[&str]) -> Result<std::process::Output> {
+    ProcessCommand::new("launchctl")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run launchctl {}", args.join(" ")))
+}
+
 fn macos_launchctl_service_target() -> Result<String> {
     Ok(format!(
         "{}/{}",
@@ -1084,6 +1092,88 @@ fn macos_app_launchctl_service_target(app_id: &str) -> Result<String> {
         macos_launchctl_domain()?,
         macos_app_label(app_id)
     ))
+}
+
+fn install_linux_daemon_service_definition(rpc_port: u16) -> Result<()> {
+    let daemon_path = daemon_binary_path()?;
+    let Some(mode) = detect_daemon_service_mode()? else {
+        bail!("systemd service mode is unavailable");
+    };
+    let service_path = mode.service_path().to_path_buf();
+    if matches!(mode, ServiceMode::User { .. })
+        && service_path == packaged_daemon_user_service_file_path()
+    {
+        return Ok(());
+    }
+    let service = render_daemon_systemd_service(&mode, &daemon_path, rpc_port);
+    fs::write(&service_path, service)
+        .with_context(|| format!("failed to write {}", service_path.display()))?;
+    let args = mode.systemctl_args(["daemon-reload"].as_slice());
+    run_systemctl(&args)?;
+    Ok(())
+}
+
+fn start_linux_daemon_service() -> Result<()> {
+    let Some(mode) = detect_daemon_service_mode()? else {
+        bail!("lattice-daemon service is not available");
+    };
+    for args in [
+        mode.systemctl_args(["enable", "lattice-daemon.service"].as_slice()),
+        mode.systemctl_args(["start", "lattice-daemon.service"].as_slice()),
+    ] {
+        run_systemctl(&args)?;
+    }
+    Ok(())
+}
+
+fn stop_linux_daemon_service() -> Result<()> {
+    let Some(mode) = detect_existing_daemon_service_mode()? else {
+        bail!("lattice-daemon service is not installed");
+    };
+    let args = mode.systemctl_args(["stop", "lattice-daemon.service"].as_slice());
+    run_systemctl(&args)?;
+    Ok(())
+}
+
+fn restart_linux_daemon_service() -> Result<()> {
+    let Some(mode) = detect_existing_daemon_service_mode()? else {
+        bail!("lattice-daemon service is not installed");
+    };
+    let args = mode.systemctl_args(["restart", "lattice-daemon.service"].as_slice());
+    run_systemctl(&args)?;
+    Ok(())
+}
+
+fn linux_daemon_service_status() -> Result<Option<String>> {
+    let Some(mode) = detect_existing_daemon_service_mode()? else {
+        return Ok(None);
+    };
+    let args = mode.systemctl_args(["is-active", "lattice-daemon.service"].as_slice());
+    let output = ProcessCommand::new("systemctl").args(&args).output()?;
+    let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if status.is_empty() {
+        Ok(Some("inactive".to_string()))
+    } else {
+        Ok(Some(status))
+    }
+}
+
+fn uninstall_linux_daemon_service() -> Result<()> {
+    let Some(mode) = detect_existing_daemon_service_mode()? else {
+        return Ok(());
+    };
+
+    let _ = run_systemctl(&mode.systemctl_args(["stop", "lattice-daemon.service"].as_slice()));
+    let _ = run_systemctl(&mode.systemctl_args(["disable", "lattice-daemon.service"].as_slice()));
+
+    if mode.service_path() != packaged_daemon_user_service_file_path().as_path()
+        && mode.service_path().exists()
+    {
+        let _ = fs::remove_file(mode.service_path());
+        let _ = run_systemctl(&mode.systemctl_args(["daemon-reload"].as_slice()));
+    }
+
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1476,11 +1566,130 @@ async fn service_command(command: ServiceCommand, rpc_port: u16) -> Result<()> {
         return Ok(());
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        match command {
+            ServiceCommand::Install => {
+                install_linux_daemon_service_definition(rpc_port)?;
+                println!("lattice-daemon service installed");
+            }
+            ServiceCommand::Uninstall => {
+                uninstall_linux_daemon_service()?;
+                clear_daemon_pid()?;
+                println!("lattice-daemon service removed");
+            }
+            ServiceCommand::Start => {
+                install_linux_daemon_service_definition(rpc_port)?;
+                start_linux_daemon_service()?;
+                clear_daemon_pid()?;
+                let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+                println!("lattice-daemon service started");
+            }
+            ServiceCommand::Stop => {
+                stop_linux_daemon_service()?;
+                clear_daemon_pid()?;
+                println!("lattice-daemon service stopped");
+            }
+            ServiceCommand::Restart => {
+                restart_linux_daemon_service()?;
+                clear_daemon_pid()?;
+                let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+                println!("lattice-daemon service restarted");
+            }
+            ServiceCommand::Status => match linux_daemon_service_status()? {
+                Some(status) => println!("{status}"),
+                None => println!("lattice-daemon service is not installed"),
+            },
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let daemon_path = daemon_binary_path()?;
+        let plist_path = macos_daemon_launch_agent_path()?;
+        match command {
+            ServiceCommand::Install => {
+                if let Some(parent) = plist_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                let plist = render_daemon_launchd_plist(&daemon_path, rpc_port)?;
+                fs::write(&plist_path, plist)
+                    .with_context(|| format!("failed to write {}", plist_path.display()))?;
+                println!("lattice-daemon service installed");
+            }
+            ServiceCommand::Uninstall => {
+                if let Some(existing) = detect_existing_macos_daemon_launch_agent()? {
+                    let domain = macos_launchctl_domain()?;
+                    let plist_arg = existing.to_string_lossy().to_string();
+                    let _ = run_launchctl(["bootout", &domain, &plist_arg].as_slice());
+                    fs::remove_file(&existing)
+                        .with_context(|| format!("failed to remove {}", existing.display()))?;
+                }
+                clear_daemon_pid()?;
+                println!("lattice-daemon service removed");
+            }
+            ServiceCommand::Start => {
+                if let Some(parent) = plist_path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                let plist = render_daemon_launchd_plist(&daemon_path, rpc_port)?;
+                fs::write(&plist_path, plist)
+                    .with_context(|| format!("failed to write {}", plist_path.display()))?;
+                let domain = macos_launchctl_domain()?;
+                let plist_arg = plist_path.to_string_lossy().to_string();
+                let _ = run_launchctl(["bootout", &domain, &plist_arg].as_slice());
+                run_launchctl(["bootstrap", &domain, &plist_arg].as_slice())?;
+                let service_target = macos_launchctl_service_target()?;
+                let _ = run_launchctl(["kickstart", "-k", &service_target].as_slice());
+                clear_daemon_pid()?;
+                let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+                println!("lattice-daemon service started");
+            }
+            ServiceCommand::Stop => {
+                let Some(existing) = detect_existing_macos_daemon_launch_agent()? else {
+                    bail!("lattice-daemon service is not installed");
+                };
+                let domain = macos_launchctl_domain()?;
+                let plist_arg = existing.to_string_lossy().to_string();
+                run_launchctl(["bootout", &domain, &plist_arg].as_slice())?;
+                clear_daemon_pid()?;
+                println!("lattice-daemon service stopped");
+            }
+            ServiceCommand::Restart => {
+                if detect_existing_macos_daemon_launch_agent()?.is_none() {
+                    bail!("lattice-daemon service is not installed");
+                }
+                let service_target = macos_launchctl_service_target()?;
+                run_launchctl(["kickstart", "-k", &service_target].as_slice())?;
+                clear_daemon_pid()?;
+                let _ = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
+                println!("lattice-daemon service restarted");
+            }
+            ServiceCommand::Status => {
+                if detect_existing_macos_daemon_launch_agent()?.is_none() {
+                    println!("lattice-daemon service is not installed");
+                } else {
+                    let service_target = macos_launchctl_service_target()?;
+                    let output = launchctl_output(["print", &service_target].as_slice())?;
+                    if output.status.success() {
+                        println!("loaded");
+                    } else {
+                        println!("installed");
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = command;
         let _ = rpc_port;
-        bail!("`lattice service` is currently only available on Windows");
+        bail!("`lattice service` is not supported on this platform yet");
     }
 }
 
