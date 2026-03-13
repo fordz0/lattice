@@ -133,6 +133,15 @@ jobs:
           $hash = (Get-FileHash "${{ matrix.msi_name }}" -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path "${{ matrix.msi_name }}.sha256" -Value $hash -NoNewline
 
+      - name: Validate Windows MSI
+        if: ${{ matrix.is_windows }}
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^lattice-v', ''
+          pwsh ./packaging/windows/msi/Test-Msi.ps1 `
+            -Path "${{ matrix.msi_name }}" `
+            -ExpectedVersion $version
+
       - name: Upload Unix artifacts
         if: ${{ !matrix.is_windows }}
         uses: actions/upload-artifact@v6

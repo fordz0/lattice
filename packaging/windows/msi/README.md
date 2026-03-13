@@ -45,6 +45,7 @@ pwsh ./packaging/windows/msi/build-msi.ps1 `
 ```
 
 The GitHub release workflow uses the same script on `windows-latest`.
+The normal platform smoke workflow also builds and validates a Windows MSI on `windows-latest`.
 
 Next likely improvements:
 

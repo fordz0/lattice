@@ -96,3 +96,27 @@ jobs:
           finally {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           }
+
+      - name: Install WiX (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: dotnet tool install --global wix --version 4.*
+
+      - name: Build and validate MSI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          $stageDir = "dist/lattice-windows-smoke"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item "target/debug/lattice.exe" "$stageDir/lattice.exe"
+          Copy-Item "target/debug/lattice-daemon.exe" "$stageDir/lattice-daemon.exe"
+          Copy-Item "LICENSE" "$stageDir/LICENSE"
+          Copy-Item "README.md" "$stageDir/README.md"
+          pwsh ./packaging/windows/msi/build-msi.ps1 `
+            -SourceDir $stageDir `
+            -Version "0.1.99" `
+            -OutputPath "lattice-windows-smoke.msi"
+          pwsh ./packaging/windows/msi/Test-Msi.ps1 `
+            -Path "lattice-windows-smoke.msi" `
+            -ExpectedVersion "0.1.99"
