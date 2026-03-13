@@ -21,6 +21,20 @@ class LatticeNet < Formula
     prefix.install "README.md"
   end
 
+  def post_install
+    return unless OS.mac?
+
+    restart_service_if_active("gui/#{Process.uid}/#{plist_name}")
+    restart_service_if_active("system/#{plist_name}")
+  end
+
+  def restart_service_if_active(target)
+    return unless quiet_system "/bin/launchctl", "print", target
+
+    ohai "Restarting active lattice-daemon service at #{target}"
+    system "/bin/launchctl", "kickstart", "-k", target
+  end
+
   service do
     run [opt_bin/"lattice-daemon"]
     keep_alive true

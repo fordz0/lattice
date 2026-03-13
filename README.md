@@ -99,6 +99,9 @@ report and exit nonzero if the local setup is unhealthy.
 
 On Linux package installs, active `lattice-daemon` services are restarted
 automatically during package upgrades so the daemon picks up the new binaries.
+On macOS, `brew upgrade lattice-net` does the same for an active
+`brew services` daemon. On Windows, MSI upgrades restart the installed daemon
+service as part of the major-upgrade flow.
 
 ### Basic commands
 ```bash

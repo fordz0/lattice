@@ -23,6 +23,11 @@ brew tap fordz0/lattice
 brew install lattice-net
 ```
 
+If `lattice-daemon` is already running via `brew services`, upgrades restart the
+active service automatically after the new binaries are installed. The formula
+checks both the usual per-user `launchctl` service and a system-level service if
+you chose to run it that way.
+
 If you want the release workflow to update the tap repo automatically, configure:
 
 - repository variable `HOMEBREW_TAP_REPO`

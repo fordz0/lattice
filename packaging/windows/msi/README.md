@@ -19,6 +19,8 @@ Current behavior:
   - `--service`
   - `--data-dir "%ProgramData%\Lattice"`
 - configures the daemon service to start automatically on boot
+- upgrades restart the daemon service automatically as part of the MSI major
+  upgrade flow
 - keeps runtime daemon management available in the CLI too:
   - `lattice up`
   - `lattice down`
