@@ -1257,6 +1257,11 @@ fn start_linux_bootstrap_daemon_service(rpc_port: u16) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+fn start_linux_bootstrap_daemon_service(_rpc_port: u16) -> Result<()> {
+    bail!("bootstrap mode is only supported on Linux")
+}
+
 #[cfg(target_os = "linux")]
 fn install_linux_daemon_service_definition(rpc_port: u16) -> Result<()> {
     let daemon_path = daemon_binary_path()?;
