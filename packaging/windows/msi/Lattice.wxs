@@ -18,6 +18,23 @@
         </Component>
         <Component Id="LatticeDaemonExeComponent" Guid="*">
           <File Id="LatticeDaemonExe" Name="lattice-daemon.exe" Source="$(var.SourceDir)\lattice-daemon.exe" KeyPath="yes" />
+          <ServiceInstall
+            Id="LatticeDaemonServiceInstall"
+            Name="lattice-daemon"
+            DisplayName="Lattice Daemon"
+            Description="Runs the local Lattice daemon for .loom browsing and app support."
+            Type="ownProcess"
+            Start="auto"
+            ErrorControl="normal"
+            Vital="yes"
+            Arguments='--service --data-dir "[CommonAppDataFolder]Lattice"' />
+          <ServiceControl
+            Id="LatticeDaemonServiceControl"
+            Name="lattice-daemon"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
         </Component>
         <Component Id="LicenseComponent" Guid="*">
           <File Id="LicenseFile" Name="LICENSE" Source="$(var.SourceDir)\LICENSE" KeyPath="yes" />
