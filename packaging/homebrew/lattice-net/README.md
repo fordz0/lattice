@@ -13,6 +13,13 @@ The intended flow is:
    a rendered `lattice-net.rb`.
 3. Copy that generated formula into your tap repo.
 
+If you want the release workflow to update the tap repo automatically, configure:
+
+- repository variable `HOMEBREW_TAP_REPO`
+  Example: `fordz0/homebrew-lattice`
+- repository secret `PACKAGING_PUSH_TOKEN`
+  A GitHub token with contents write access to the tap repo
+
 Suggested tap layout:
 
 ```text

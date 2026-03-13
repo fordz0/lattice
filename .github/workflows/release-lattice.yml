@@ -243,3 +243,122 @@ jobs:
             release-assets/**/*.deb
             release-assets/**/*.deb.sha256
             release-assets/**/lattice-net.rb
+
+  publish-homebrew-tap:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Generate Homebrew formula
+        run: |
+          version="${GITHUB_REF_NAME#lattice-v}"
+          python3 packaging/homebrew/lattice-net/render_formula.py \
+            --version "$version" \
+            --macos-x86-sha256 release-assets/lattice-macos-x86_64/lattice-macos-x86_64.tar.gz.sha256 \
+            --macos-arm64-sha256 release-assets/lattice-macos-aarch64/lattice-macos-aarch64.tar.gz.sha256 \
+            --output release-assets/homebrew/lattice-net.rb
+
+      - name: Publish formula to Homebrew tap
+        env:
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          PACKAGING_PUSH_TOKEN: ${{ secrets.PACKAGING_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_REPO:-}" ] || [ -z "${PACKAGING_PUSH_TOKEN:-}" ]; then
+            echo "Skipping Homebrew tap publish; HOMEBREW_TAP_REPO or PACKAGING_PUSH_TOKEN is not configured."
+            exit 0
+          fi
+
+          workdir="$(mktemp -d)"
+          repo_url="https://x-access-token:${PACKAGING_PUSH_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git"
+          git clone "$repo_url" "$workdir/tap"
+          cp release-assets/homebrew/lattice-net.rb "$workdir/tap/Formula/lattice-net.rb"
+
+          cd "$workdir/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- Formula/lattice-net.rb; then
+            echo "Homebrew formula already up to date."
+            exit 0
+          fi
+
+          git add Formula/lattice-net.rb
+          git commit -m "Update lattice-net formula for ${GITHUB_REF_NAME}"
+          git push
+
+  publish-apt-repo:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Generate Debian packages and APT repo snapshot
+        run: |
+          version="${GITHUB_REF_NAME#lattice-v}"
+          python3 packaging/apt/build_repo.py \
+            --version "$version" \
+            --amd64-tarball release-assets/lattice-linux-x86_64/lattice-linux-x86_64.tar.gz \
+            --arm64-tarball release-assets/lattice-linux-aarch64/lattice-linux-aarch64.tar.gz \
+            --output-dir release-assets/apt
+
+      - name: Publish APT repo snapshot
+        env:
+          APT_REPO_TARGET: ${{ vars.APT_REPO_TARGET }}
+          APT_REPO_BRANCH: ${{ vars.APT_REPO_BRANCH }}
+          APT_REPO_SUBDIR: ${{ vars.APT_REPO_SUBDIR }}
+          PACKAGING_PUSH_TOKEN: ${{ secrets.PACKAGING_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APT_REPO_TARGET:-}" ] || [ -z "${PACKAGING_PUSH_TOKEN:-}" ]; then
+            echo "Skipping APT publish; APT_REPO_TARGET or PACKAGING_PUSH_TOKEN is not configured."
+            exit 0
+          fi
+
+          branch="${APT_REPO_BRANCH:-gh-pages}"
+          subdir="${APT_REPO_SUBDIR:-apt}"
+          workdir="$(mktemp -d)"
+          repo_url="https://x-access-token:${PACKAGING_PUSH_TOKEN}@github.com/${APT_REPO_TARGET}.git"
+
+          if git ls-remote --exit-code --heads "$repo_url" "$branch" >/dev/null 2>&1; then
+            git clone --branch "$branch" --single-branch "$repo_url" "$workdir/repo"
+          else
+            git clone "$repo_url" "$workdir/repo"
+            cd "$workdir/repo"
+            git checkout --orphan "$branch"
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          fi
+
+          mkdir -p "$workdir/repo/$subdir"
+          find "$workdir/repo/$subdir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          tar -xzf release-assets/apt/lattice-apt-repo.tar.gz \
+            -C "$workdir/repo/$subdir" \
+            --strip-components=1
+
+          cd "$workdir/repo"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- "$subdir"; then
+            echo "APT repo snapshot already up to date."
+            exit 0
+          fi
+
+          git add "$subdir"
+          git commit -m "Publish APT repo for ${GITHUB_REF_NAME}"
+          git push origin "$branch"

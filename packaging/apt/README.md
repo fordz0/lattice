@@ -24,6 +24,17 @@ For a real public APT repo, you still want a dedicated host or repo, plus GPG
 signing for `Release` metadata. The generated `lattice-apt-repo.tar.gz` is the
 snapshot you would publish there.
 
+If you want the release workflow to push that snapshot automatically, configure:
+
+- repository variable `APT_REPO_TARGET`
+  Example: `fordz0/lattice-packages`
+- optional repository variable `APT_REPO_BRANCH`
+  Default: `gh-pages`
+- optional repository variable `APT_REPO_SUBDIR`
+  Default: `apt`
+- repository secret `PACKAGING_PUSH_TOKEN`
+  A GitHub token with contents write access to the target repo
+
 ## Release assets generated
 
 - `.deb` packages install:
