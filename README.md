@@ -143,6 +143,9 @@ Entries are matched against the site-relative publish path. Lattice still skips
 ### Visit .loom sites in Firefox
 
 - Firefox extension install steps: [lattice-ext/INSTALL.md](lattice-ext/INSTALL.md)
+- The extension can also be distributed from GitHub releases under tags like
+  `lattice-ext-v*`; when AMO signing credentials are configured, those releases
+  attach a signed `.xpi` for direct download
 - For secure lock icons, import the local Lattice CA (`/__lattice_ca.pem`) as documented.
 - The extension keeps `https://*.loom` in the URL bar while routing traffic through your local daemon proxy.
 - You can also use `lattice fetch` to retrieve site content locally.

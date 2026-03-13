@@ -1,0 +1,129 @@
+name: Release Extension
+
+on:
+  push:
+    tags:
+      - "lattice-ext-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Verify tag matches manifest version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#lattice-ext-v}"
+          manifest_version="$(python3 - <<'PY'
+          import json
+          with open('lattice-ext/manifest.json', 'r', encoding='utf-8') as handle:
+              print(json.load(handle)['version'])
+          PY
+          )"
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "tag version ($tag_version) does not match lattice-ext/manifest.json ($manifest_version)" >&2
+            exit 1
+          fi
+
+      - name: Run extension tests
+        run: ./scripts/test_extension.sh
+
+      - name: Lint extension
+        run: npx --yes web-ext@8 lint --source-dir lattice-ext
+
+      - name: Build extension package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#lattice-ext-v}"
+          mkdir -p release-assets/build
+          npx --yes web-ext@8 build \
+            --source-dir lattice-ext \
+            --artifacts-dir release-assets/build \
+            --filename "lattice-extension-${version}.zip" \
+            --overwrite-dest
+          mv "release-assets/build/lattice-extension-${version}.zip" "release-assets/"
+
+      - name: Sign extension with AMO
+        if: ${{ secrets.AMO_JWT_ISSUER != '' && secrets.AMO_JWT_SECRET != '' }}
+        shell: bash
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          AMO_CHANNEL: ${{ vars.AMO_CHANNEL }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#lattice-ext-v}"
+          channel="${AMO_CHANNEL:-unlisted}"
+          mkdir -p release-assets/signed
+          npx --yes web-ext@8 sign \
+            --source-dir lattice-ext \
+            --artifacts-dir release-assets/signed \
+            --channel "$channel" \
+            --api-key "$AMO_JWT_ISSUER" \
+            --api-secret "$AMO_JWT_SECRET"
+          signed_xpi="$(find release-assets/signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+          if [ -z "$signed_xpi" ]; then
+            echo "web-ext sign did not produce a signed .xpi" >&2
+            exit 1
+          fi
+          mv "$signed_xpi" "release-assets/lattice-extension-${version}.xpi"
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#lattice-ext-v}"
+          cat > release-notes.md <<'EOF'
+          Firefox extension release for Lattice.
+
+          Preferred install path:
+          - public AMO listing: https://addons.mozilla.org/en-US/firefox/addon/lattice/
+
+          GitHub release assets:
+          - `lattice-extension-<version>.xpi` is a signed self-distribution build when AMO signing credentials are configured
+          - `lattice-extension-<version>.zip` is the packaged source artifact for inspection or AMO submission workflows
+
+          Before browsing `.loom` sites:
+
+          ```bash
+          lattice up
+          lattice doctor
+          ```
+          EOF
+
+          assets=(
+            "release-assets/lattice-extension-${version}.zip"
+          )
+
+          if [ -f "release-assets/lattice-extension-${version}.xpi" ]; then
+            assets+=("release-assets/lattice-extension-${version}.xpi")
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --generate-notes \
+              --notes-file release-notes.md
+          fi

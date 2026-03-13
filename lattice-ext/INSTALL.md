@@ -7,6 +7,15 @@ Preferred:
 1. Open the AMO listing: https://addons.mozilla.org/en-US/firefox/addon/lattice/
 2. Install the add-on normally
 
+Alternative:
+
+1. Open the GitHub releases page: https://github.com/fordz0/lattice/releases
+2. Find the latest `lattice-ext-v*` release
+3. Download the signed `lattice-extension-<version>.xpi` asset when it is attached
+
+The GitHub `.xpi` path is meant for direct self-distribution. AMO is still the
+default recommended install path.
+
 Development / temporary install:
 
 1. Open Firefox and go to about:debugging
