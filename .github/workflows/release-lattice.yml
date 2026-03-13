@@ -127,10 +127,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = "${{ github.ref_name }}" -replace '^lattice-v', ''
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
-          pwsh ./packaging/windows/msi/build-msi.ps1 `
+          & ./packaging/windows/msi/build-msi.ps1 `
             -SourceDir "dist/${{ matrix.artifact_stem }}" `
             -Version $version `
             -OutputPath "${{ matrix.msi_name }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash "${{ matrix.msi_name }}" -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path "${{ matrix.msi_name }}.sha256" -Value $hash -NoNewline
 
@@ -142,6 +143,7 @@ jobs:
           cscript.exe //NoLogo ./packaging/windows/msi/Test-Msi.vbs `
             "${{ matrix.msi_name }}" `
             $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Unix artifacts
         if: ${{ !matrix.is_windows }}

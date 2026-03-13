@@ -120,10 +120,12 @@ jobs:
           Copy-Item "target/debug/lattice-daemon.exe" "$stageDir/lattice-daemon.exe"
           Copy-Item "LICENSE" "$stageDir/LICENSE"
           Copy-Item "README.md" "$stageDir/README.md"
-          pwsh ./packaging/windows/msi/build-msi.ps1 `
+          & ./packaging/windows/msi/build-msi.ps1 `
             -SourceDir $stageDir `
             -Version "0.1.99" `
             -OutputPath "lattice-windows-smoke.msi"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cscript.exe //NoLogo ./packaging/windows/msi/Test-Msi.vbs `
             "lattice-windows-smoke.msi" `
             "0.1.99"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
