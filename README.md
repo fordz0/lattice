@@ -101,6 +101,16 @@ lattice fetch website --out ./website
 lattice update --all
 ```
 
+To keep local-only files out of a published site, add a `.latticeignore`
+file in the site directory. It supports simple glob-style patterns such as:
+
+```text
+secret.txt
+build/
+*.bak
+private/**
+```
+
 ### Visit .loom sites in Firefox
 
 - Firefox extension install steps: [lattice-ext/INSTALL.md](lattice-ext/INSTALL.md)
