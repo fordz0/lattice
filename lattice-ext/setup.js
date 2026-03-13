@@ -54,6 +54,38 @@ function setReleaseNotice(copy, htmlUrl) {
   };
 }
 
+function setSetupNotice(title, copy) {
+  const notice = document.getElementById('setup-notice');
+  document.getElementById('setup-notice-title').textContent = title;
+  document.getElementById('setup-notice-copy').textContent = copy;
+  notice.hidden = false;
+}
+
+async function copyText(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch (_err) {
+    const area = document.createElement('textarea');
+    area.value = value;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    document.body.removeChild(area);
+  }
+}
+
+async function openFirefoxInternalPage(url, title, fallbackCopy) {
+  try {
+    await browser.tabs.create({ url: url });
+  } catch (_err) {
+    await copyText(url);
+    setSetupNotice(
+      title,
+      fallbackCopy + ' We copied ' + url + ' to your clipboard so you can paste it into the Firefox address bar.'
+    );
+  }
+}
+
 async function checkForLatestRelease(showUpToDateMessage) {
   try {
     const response = await fetch(latestReleaseApi, {
@@ -89,20 +121,15 @@ async function checkForLatestRelease(showUpToDateMessage) {
 }
 
 document.getElementById('copy-pref').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(prefKey);
-  } catch (_err) {
-    const area = document.createElement('textarea');
-    area.value = prefKey;
-    document.body.appendChild(area);
-    area.select();
-    document.execCommand('copy');
-    document.body.removeChild(area);
-  }
+  await copyText(prefKey);
 });
 
 document.getElementById('open-config').addEventListener('click', () => {
-  browser.tabs.create({ url: 'about:config' });
+  openFirefoxInternalPage(
+    'about:config',
+    'Open about:config manually',
+    'Firefox blocked direct navigation to about:config from the extension setup page.'
+  );
 });
 
 document.getElementById('download-ca').addEventListener('click', () => {
@@ -110,7 +137,11 @@ document.getElementById('download-ca').addEventListener('click', () => {
 });
 
 document.getElementById('open-certs').addEventListener('click', () => {
-  browser.tabs.create({ url: 'about:preferences#privacy' });
+  openFirefoxInternalPage(
+    'about:preferences#privacy',
+    'Open certificate settings manually',
+    'Firefox blocked direct navigation to the certificate settings page from the extension setup page.'
+  );
 });
 
 document.getElementById('open-amo').addEventListener('click', () => {
