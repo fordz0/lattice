@@ -112,6 +112,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
           $stageDir = "dist/lattice-windows-smoke"
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
@@ -123,6 +124,6 @@ jobs:
             -SourceDir $stageDir `
             -Version "0.1.99" `
             -OutputPath "lattice-windows-smoke.msi"
-          pwsh ./packaging/windows/msi/Test-Msi.ps1 `
-            -Path "lattice-windows-smoke.msi" `
-            -ExpectedVersion "0.1.99"
+          cscript.exe //NoLogo ./packaging/windows/msi/Test-Msi.vbs `
+            "lattice-windows-smoke.msi" `
+            "0.1.99"

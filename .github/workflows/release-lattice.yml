@@ -124,6 +124,7 @@ jobs:
         if: ${{ matrix.is_windows }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $version = "${{ github.ref_name }}" -replace '^lattice-v', ''
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
           pwsh ./packaging/windows/msi/build-msi.ps1 `
@@ -138,9 +139,9 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^lattice-v', ''
-          pwsh ./packaging/windows/msi/Test-Msi.ps1 `
-            -Path "${{ matrix.msi_name }}" `
-            -ExpectedVersion $version
+          cscript.exe //NoLogo ./packaging/windows/msi/Test-Msi.vbs `
+            "${{ matrix.msi_name }}" `
+            $version
 
       - name: Upload Unix artifacts
         if: ${{ !matrix.is_windows }}
