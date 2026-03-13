@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const siteDetectPath = path.resolve(__dirname, '../site-detect.js');
-const sitePagePath = path.resolve(__dirname, '../../lattice-site-docs/assets/site.js');
+const sitePagePath = path.resolve(__dirname, './fixtures/site-page-badge.js');
 
 class FakeEventTarget {
   constructor() {
