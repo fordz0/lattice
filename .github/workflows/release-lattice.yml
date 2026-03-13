@@ -174,7 +174,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
 
@@ -195,37 +195,39 @@ jobs:
               done
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          body: |
-            ## Quick install
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          ## Quick install
 
-            - Arch Linux: `yay -S lattice-net-git`
-            - Windows: download and run `lattice-windows-x86_64.msi`
-            - Debian/Ubuntu: download the matching `.deb` package from this release
-            - macOS Apple Silicon: `lattice-macos-aarch64.tar.gz`
-            - macOS Intel: `lattice-macos-x86_64.tar.gz`
-            - Linux x86_64: `lattice-linux-x86_64.tar.gz`
-            - Linux aarch64: `lattice-linux-aarch64.tar.gz`
+          - Arch Linux: `yay -S lattice-net-git`
+          - Windows: download and run `lattice-windows-x86_64.msi`
+          - Debian/Ubuntu: download the matching `.deb` package from this release
+          - macOS Apple Silicon: `lattice-macos-aarch64.tar.gz`
+          - macOS Intel: `lattice-macos-x86_64.tar.gz`
+          - Linux x86_64: `lattice-linux-x86_64.tar.gz`
+          - Linux aarch64: `lattice-linux-aarch64.tar.gz`
 
-            Package-manager distribution is also updated automatically:
-            - Homebrew tap: `fordz0/lattice`
-            - APT repo: `https://fordz0.github.io/lattice-packages/apt`
+          Package-manager distribution is also updated automatically:
+          - Homebrew tap: `fordz0/lattice`
+          - APT repo: `https://fordz0.github.io/lattice-packages/apt`
 
-            After installing, bring the node online with:
+          After installing, bring the node online with:
 
-            ```bash
-            lattice up
-            lattice doctor
-            ```
+          ```bash
+          lattice up
+          lattice doctor
+          ```
 
-            GitHub Releases now exposes SHA256 digests for uploaded assets directly in
-            the release UI and API.
+          GitHub Releases now exposes SHA256 digests for uploaded assets directly in
+          the release UI and API.
+          EOF
 
-          generate_release_notes: true
-          overwrite_files: true
-          files: |
+          shopt -s nullglob
+          assets=(
             release-assets/lattice-linux-x86_64/lattice-linux-x86_64.tar.gz
             release-assets/lattice-linux-aarch64/lattice-linux-aarch64.tar.gz
             release-assets/lattice-macos-x86_64/lattice-macos-x86_64.tar.gz
@@ -233,6 +235,17 @@ jobs:
             release-assets/lattice-windows-x86_64/lattice-windows-x86_64.zip
             release-assets/lattice-windows-x86_64/lattice-windows-x86_64.msi
             release-assets/apt/lattice_*.deb
+          )
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --generate-notes \
+              --notes-file release-notes.md
+          fi
 
   publish-homebrew-tap:
     needs: release
@@ -243,7 +256,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
 
@@ -295,7 +308,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
 
