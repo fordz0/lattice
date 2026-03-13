@@ -52,6 +52,7 @@ struct Cli {
 enum Command {
     Up,
     Down,
+    Doctor,
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -201,6 +202,9 @@ async fn run() -> Result<()> {
         }
         Command::Down => {
             down()?;
+        }
+        Command::Doctor => {
+            doctor(cli.rpc_port).await?;
         }
         Command::Service { command } => {
             service_command(command, cli.rpc_port).await?;
@@ -1898,6 +1902,117 @@ fn down() -> Result<()> {
 
     println!("lattice-daemon is not running");
     Ok(())
+}
+
+async fn doctor(rpc_port: u16) -> Result<()> {
+    let rpc_client = RpcClient::new(rpc_port);
+    let rpc_url = rpc_client.base_url.clone();
+    let data_dir = lattice_data_dir()?;
+
+    println!("Lattice doctor");
+    println!("Platform: {}", std::env::consts::OS);
+    println!("RPC endpoint: {rpc_url}");
+    println!("Data directory: {}", data_dir.display());
+
+    let daemon_path = daemon_binary_path().ok();
+    match &daemon_path {
+        Some(path) => println!("Daemon binary: {}", path.display()),
+        None => println!("Daemon binary: not found"),
+    }
+
+    let service_status = doctor_service_status()?;
+    println!("Managed service: {service_status}");
+
+    let manual_status = if has_manual_daemon_pid()? {
+        "present".to_string()
+    } else {
+        "not detected".to_string()
+    };
+    println!("Manual daemon PID: {manual_status}");
+
+    match rpc_client.node_info().await {
+        Ok(info) => {
+            println!("RPC status: reachable");
+            if let Some(peer_id) = info.get("peer_id").and_then(Value::as_str) {
+                println!("Peer ID: {peer_id}");
+            }
+            if let Some(count) = info.get("connected_peers").and_then(Value::as_u64) {
+                println!("Connected peers: {count}");
+            }
+            println!();
+            println!("Everything looks healthy.");
+            println!("Next steps:");
+            println!("  - publish a site: lattice publish --dir ./site --name mysite");
+            println!(
+                "  - browse .loom sites in Firefox: https://addons.mozilla.org/en-US/firefox/addon/lattice/"
+            );
+            return Ok(());
+        }
+        Err(err) if err.downcast_ref::<DaemonNotRunning>().is_some() => {
+            println!("RPC status: not reachable");
+        }
+        Err(err) => return Err(err),
+    }
+
+    println!();
+    println!("Next steps:");
+    if daemon_path.is_none() {
+        println!("  - install Lattice from a release, package manager, or build it from source");
+    }
+    match service_status.as_str() {
+        "not installed" => {
+            println!("  - start the daemon with: lattice up");
+        }
+        "installed" | "inactive" | "stopped" => {
+            println!("  - start the service with: lattice service start");
+            println!("  - or use: lattice up");
+        }
+        status if status.contains("STOPPED") => {
+            println!("  - start the service with: lattice service start");
+            println!("  - or use: lattice up");
+        }
+        _ => {
+            println!("  - if the daemon should be running, try: lattice service restart");
+            println!("  - otherwise start it with: lattice up");
+        }
+    }
+    println!("  - once it is running, verify with: lattice status");
+    println!(
+        "  - for browser setup, follow: https://addons.mozilla.org/en-US/firefox/addon/lattice/"
+    );
+
+    Ok(())
+}
+
+fn doctor_service_status() -> Result<String> {
+    #[cfg(windows)]
+    {
+        return Ok(windows_daemon_service_status()?.unwrap_or_else(|| "not installed".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return Ok(linux_daemon_service_status()?.unwrap_or_else(|| "not installed".to_string()));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if detect_existing_macos_daemon_launch_agent()?.is_none() {
+            return Ok("not installed".to_string());
+        }
+        let service_target = macos_launchctl_service_target()?;
+        let output = launchctl_output(["print", &service_target].as_slice())?;
+        if output.status.success() {
+            Ok("loaded".to_string())
+        } else {
+            Ok("installed".to_string())
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        Ok("unsupported".to_string())
+    }
 }
 
 async fn install_app(rpc_port: u16, app_id: &str) -> Result<()> {
