@@ -26,8 +26,14 @@ if ($outputDir) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 }
 
+$uiExtensionList = wix extension list
+if ($uiExtensionList -notmatch 'WixToolset\.UI\.wixext') {
+    wix extension add -g WixToolset.UI.wixext
+}
+
 wix build `
     -arch x64 `
+    -ext WixToolset.UI.wixext `
     -d SourceDir="$resolvedSource" `
     -d Version="$Version" `
     $wxsPath `

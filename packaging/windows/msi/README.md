@@ -4,6 +4,7 @@ This directory contains the first real MSI implementation for Lattice.
 
 Current behavior:
 
+- uses a standard Windows installer UI with an install-directory picker
 - installs `lattice.exe` and `lattice-daemon.exe` into `Program Files\Lattice`
 - adds the install directory to the system `PATH`
 - adds Start Menu entries for:
@@ -26,6 +27,7 @@ Current behavior:
 - stops and removes the Windows service on uninstall
 - preserves `%ProgramData%\Lattice` on uninstall for now
 - includes a `Remove Lattice Data` maintenance shortcut for wiping daemon data explicitly
+- sets Windows Add/Remove Programs metadata and support links
 
 What it does not do yet:
 
@@ -46,6 +48,6 @@ The GitHub release workflow uses the same script on `windows-latest`.
 
 Next likely improvements:
 
-1. add a proper MSI UI for advanced install/uninstall options
-2. make the `Remove Lattice Data` flow smarter about prompting if the service is still in use
-3. offer an opt-in purge path for `%ProgramData%\Lattice` directly inside the MSI UI
+1. make the `Remove Lattice Data` flow smarter about prompting if the service is still in use
+2. offer an opt-in purge path for `%ProgramData%\Lattice` directly inside the MSI UI
+3. add richer post-install guidance from the installer itself
