@@ -66,22 +66,22 @@ impl Config {
 }
 
 pub fn load_or_create_config() -> Result<Config> {
-    let overrides = EnvOverrides::from_env()?;
+    let overrides = ConfigOverrides::from_env()?;
     load_or_create_config_with_overrides(overrides)
 }
 
 #[derive(Debug, Clone, Default)]
-struct EnvOverrides {
-    listen_port: Option<u16>,
-    rpc_port: Option<u16>,
-    http_port: Option<u16>,
-    https_port: Option<u16>,
-    proxy_port: Option<u16>,
-    data_dir: Option<PathBuf>,
+pub struct ConfigOverrides {
+    pub listen_port: Option<u16>,
+    pub rpc_port: Option<u16>,
+    pub http_port: Option<u16>,
+    pub https_port: Option<u16>,
+    pub proxy_port: Option<u16>,
+    pub data_dir: Option<PathBuf>,
 }
 
-impl EnvOverrides {
-    fn from_env() -> Result<Self> {
+impl ConfigOverrides {
+    pub fn from_env() -> Result<Self> {
         Ok(Self {
             listen_port: parse_env_port("LATTICE_PORT")?,
             rpc_port: parse_env_port("LATTICE_RPC_PORT")?,
@@ -90,6 +90,17 @@ impl EnvOverrides {
             proxy_port: parse_env_port("LATTICE_PROXY_PORT")?,
             data_dir: env::var("LATTICE_DATA_DIR").ok().map(PathBuf::from),
         })
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            listen_port: other.listen_port.or(self.listen_port),
+            rpc_port: other.rpc_port.or(self.rpc_port),
+            http_port: other.http_port.or(self.http_port),
+            https_port: other.https_port.or(self.https_port),
+            proxy_port: other.proxy_port.or(self.proxy_port),
+            data_dir: other.data_dir.or(self.data_dir),
+        }
     }
 }
 
@@ -106,7 +117,7 @@ fn parse_env_port(var_name: &str) -> Result<Option<u16>> {
     }
 }
 
-fn load_or_create_config_with_overrides(overrides: EnvOverrides) -> Result<Config> {
+pub fn load_or_create_config_with_overrides(overrides: ConfigOverrides) -> Result<Config> {
     let mut default_cfg = Config::default();
     if let Some(dir) = overrides.data_dir.as_ref() {
         default_cfg.data_dir = dir.clone();
@@ -262,9 +273,9 @@ mod tests {
         )
         .expect("write override cfg");
 
-        let config = load_or_create_config_with_overrides(EnvOverrides {
+        let config = load_or_create_config_with_overrides(ConfigOverrides {
             data_dir: Some(override_dir.clone()),
-            ..EnvOverrides::default()
+            ..ConfigOverrides::default()
         })
         .expect("load config");
 
@@ -289,9 +300,9 @@ mod tests {
     fn creates_config_file_in_overridden_data_dir() {
         let override_dir = temp_path("create");
 
-        let config = load_or_create_config_with_overrides(EnvOverrides {
+        let config = load_or_create_config_with_overrides(ConfigOverrides {
             data_dir: Some(override_dir.clone()),
-            ..EnvOverrides::default()
+            ..ConfigOverrides::default()
         })
         .expect("load config");
 
@@ -300,5 +311,22 @@ mod tests {
         assert_eq!(config.session_cache_max_bytes, 104_857_600);
 
         let _ = fs::remove_dir_all(&config.data_dir);
+    }
+
+    #[test]
+    fn explicit_overrides_beat_env_overrides() {
+        let env = ConfigOverrides {
+            rpc_port: Some(7780),
+            http_port: Some(7781),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            rpc_port: Some(8780),
+            ..Default::default()
+        };
+
+        let merged = env.merge(cli);
+        assert_eq!(merged.rpc_port, Some(8780));
+        assert_eq!(merged.http_port, Some(7781));
     }
 }

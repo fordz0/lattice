@@ -2,11 +2,12 @@ mod event_loop;
 mod fetch;
 
 use anyhow::Result;
+use clap::Parser;
 use lattice_core::moderation::ModerationEngine;
 use lattice_daemon::app_registry::AppRegistry;
 use lattice_daemon::block_fetch;
 use lattice_daemon::cache::SessionBlockCache;
-use lattice_daemon::config::load_or_create_config;
+use lattice_daemon::config::{load_or_create_config_with_overrides, Config, ConfigOverrides};
 use lattice_daemon::dht;
 use lattice_daemon::http_server;
 use lattice_daemon::node::{
@@ -33,12 +34,29 @@ use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::Multiaddr;
 use std::collections::{HashMap, HashSet};
+use std::future::pending;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
+
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(windows)]
+use std::sync::OnceLock;
+#[cfg(windows)]
+use windows_service::service::{
+    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+};
+#[cfg(windows)]
+use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+#[cfg(windows)]
+use windows_service::service_dispatcher;
+#[cfg(windows)]
+windows_service::define_windows_service!(ffi_service_main, windows_service_entry);
 
 use crate::event_loop::{
     handle_rpc_command, handle_swarm_event, PendingClaimPut, PendingManifestQuery,
@@ -60,6 +78,44 @@ const LOCAL_RECORDS_DB_DIR: &str = "records_db";
 const LOCAL_RECORD_GC_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60;
 const LOCAL_RECORD_GC_MAX_BYTES: usize = 512 * 1024 * 1024;
 const BLOCK_CACHE_MAX_AGE_SECS: u64 = 48 * 60 * 60;
+#[cfg(windows)]
+const WINDOWS_SERVICE_NAME: &str = "lattice-daemon";
+#[cfg(windows)]
+static WINDOWS_SERVICE_OVERRIDES: OnceLock<ConfigOverrides> = OnceLock::new();
+
+#[derive(Parser, Debug, Clone)]
+#[command(name = "lattice-daemon")]
+#[command(about = "Lattice daemon")]
+struct Cli {
+    #[arg(long)]
+    listen_port: Option<u16>,
+    #[arg(long)]
+    rpc_port: Option<u16>,
+    #[arg(long)]
+    http_port: Option<u16>,
+    #[arg(long)]
+    https_port: Option<u16>,
+    #[arg(long)]
+    proxy_port: Option<u16>,
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    #[arg(long, hide = true)]
+    service: bool,
+}
+
+impl Cli {
+    fn config_overrides(&self) -> ConfigOverrides {
+        ConfigOverrides {
+            listen_port: self.listen_port,
+            rpc_port: self.rpc_port,
+            http_port: self.http_port,
+            https_port: self.https_port,
+            proxy_port: self.proxy_port,
+            data_dir: self.data_dir.clone(),
+        }
+    }
+}
 
 #[derive(NetworkBehaviour)]
 pub struct LatticeBehaviour {
@@ -81,7 +137,23 @@ async fn main() -> Result<()> {
         .init();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let config = load_or_create_config()?;
+    let cli = Cli::parse();
+
+    #[cfg(windows)]
+    if cli.service {
+        return run_windows_service(cli.config_overrides());
+    }
+
+    let config = load_or_create_config_with_overrides(
+        ConfigOverrides::from_env()?.merge(cli.config_overrides()),
+    )?;
+    run_daemon(config, None).await
+}
+
+async fn run_daemon(
+    config: Config,
+    mut shutdown_signal: Option<watch::Receiver<bool>>,
+) -> Result<()> {
     let had_separate_site_key = config.data_dir.join("site_signing.key").exists();
     // site_signing.key signs published names/sites/app records; block_cache.key only encrypts
     // cached site blocks at rest. They are separate node-local keys with different purposes.
@@ -376,6 +448,10 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
+            () = wait_for_shutdown(&mut shutdown_signal) => {
+                info!("shutdown requested");
+                break;
+            }
             maybe_cmd = rpc_rx.recv() => {
                 if let Some(cmd) = maybe_cmd {
                     handle_rpc_command(
@@ -441,4 +517,87 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+async fn wait_for_shutdown(shutdown_signal: &mut Option<watch::Receiver<bool>>) {
+    match shutdown_signal.as_mut() {
+        Some(receiver) => {
+            let _ = receiver.changed().await;
+        }
+        None => pending::<()>().await,
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_service(overrides: ConfigOverrides) -> Result<()> {
+    let _ = WINDOWS_SERVICE_OVERRIDES.set(overrides);
+    service_dispatcher::start(WINDOWS_SERVICE_NAME, ffi_service_main)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_service_entry(_args: Vec<OsString>) {
+    if let Err(err) = windows_service_main() {
+        eprintln!("windows service failed: {err:#}");
+    }
+}
+
+#[cfg(windows)]
+fn windows_service_main() -> Result<()> {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let status_handle =
+        service_control_handler::register(WINDOWS_SERVICE_NAME, move |control_event| {
+            match control_event {
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    let _ = shutdown_tx.send(true);
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        })?;
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::StartPending,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::from_secs(10),
+        process_id: None,
+    })?;
+
+    let overrides = ConfigOverrides::from_env()?
+        .merge(WINDOWS_SERVICE_OVERRIDES.get().cloned().unwrap_or_default());
+    let config = load_or_create_config_with_overrides(overrides)?;
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run_daemon(config, Some(shutdown_rx)));
+    let exit_code = if result.is_ok() { 0 } else { 1 };
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(exit_code),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    result
 }

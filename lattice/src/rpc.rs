@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::error::Error;
 use std::env;
+use std::error::Error;
 use std::fmt;
 
 pub const DEFAULT_RPC_PORT: u16 = 7780;

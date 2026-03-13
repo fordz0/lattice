@@ -16,6 +16,7 @@ use lattice_core::identity::{canonical_json_bytes, SignedRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::env;
 use std::time::Duration;
 
 const FRAY_FEED_VERSION: u8 = 1;
@@ -25,6 +26,24 @@ const MAX_FEED_COMMENTS: usize = 256;
 const TRUST_RECORD_KEY_PREFIX: &str = "app:fray:trust:";
 const HANDLE_RECORD_KEY_PREFIX: &str = "app:fray:identity:";
 const DIRECTORY_RECORD_KEY: &str = "app:fray:directory";
+
+pub fn lattice_rpc_host() -> String {
+    env::var("FRAY_LATTICE_RPC_HOST")
+        .or_else(|_| env::var("LATTICE_RPC_HOST"))
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+pub fn lattice_rpc_port() -> u16 {
+    env::var("FRAY_LATTICE_RPC_PORT")
+        .or_else(|_| env::var("LATTICE_RPC_PORT"))
+        .ok()
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .unwrap_or(7780)
+}
+
+pub fn lattice_rpc_url(rpc_port: u16) -> String {
+    format!("http://{}:{rpc_port}", lattice_rpc_host())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrayFeedRecord {
@@ -440,7 +459,7 @@ pub async fn rpc_call(rpc_port: u16, method: &str, params: Value) -> Result<Valu
         "params": params,
     });
     let response = client
-        .post(format!("http://127.0.0.1:{rpc_port}"))
+        .post(lattice_rpc_url(rpc_port))
         .json(&body)
         .send()
         .await

@@ -43,3 +43,53 @@ jobs:
 
       - name: Check CLI help
         run: cargo run -p lattice -- --help
+
+      - name: Start daemon and check status (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p lattice-daemon -- \
+            --rpc-port 17880 \
+            --http-port 17881 \
+            --https-port 17443 \
+            --proxy-port 17882 \
+            >daemon.log 2>&1 &
+          daemon_pid=$!
+          trap 'kill "$daemon_pid" || true' EXIT
+          for _ in $(seq 1 30); do
+            if cargo run -p lattice -- --rpc-port 17880 status >/tmp/lattice-status.txt 2>&1; then
+              cat /tmp/lattice-status.txt
+              exit 0
+            fi
+            sleep 1
+          done
+          cat daemon.log
+          exit 1
+
+      - name: Start daemon and check status (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $proc = Start-Process cargo -ArgumentList @(
+            'run','-p','lattice-daemon','--',
+            '--rpc-port','17880',
+            '--http-port','17881',
+            '--https-port','17443',
+            '--proxy-port','17882'
+          ) -RedirectStandardOutput daemon.log -RedirectStandardError daemon.log -PassThru
+          try {
+            for ($i = 0; $i -lt 30; $i++) {
+              cargo run -p lattice -- --rpc-port 17880 status *> status.log
+              if ($LASTEXITCODE -eq 0) {
+                Get-Content status.log
+                exit 0
+              }
+              Start-Sleep -Seconds 1
+            }
+            Get-Content daemon.log
+            exit 1
+          }
+          finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }

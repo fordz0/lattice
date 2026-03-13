@@ -9,6 +9,7 @@ anyhow = "1"
 axum = "0.7"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
 directories = "5"
 ed25519-dalek = "2"
 hex = "0.4"
@@ -39,6 +40,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-service = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

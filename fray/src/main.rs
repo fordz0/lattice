@@ -3,6 +3,7 @@ use directories::BaseDirs;
 use ed25519_dalek::SigningKey;
 use fray::api::{app, AppState};
 use fray::blocklist::ContentBlocklist;
+use fray::network;
 use fray::store::FrayStore;
 use serde_json::json;
 use std::net::SocketAddr;
@@ -22,10 +23,7 @@ async fn main() -> Result<()> {
         .and_then(|raw| raw.parse::<u16>().ok())
         .unwrap_or(8890);
     let data_dir = fray_data_dir()?;
-    let lattice_rpc_port = std::env::var("FRAY_LATTICE_RPC_PORT")
-        .ok()
-        .and_then(|raw| raw.parse::<u16>().ok())
-        .unwrap_or(7780);
+    let lattice_rpc_port = network::lattice_rpc_port();
     let signing_key = Arc::new(load_signing_key()?);
     let pid = std::process::id();
     std::fs::create_dir_all(&data_dir)
@@ -176,7 +174,7 @@ async fn daemon_rpc_call(
         .build()
         .context("failed to build daemon RPC client")?;
     let response = client
-        .post(format!("http://127.0.0.1:{lattice_rpc_port}"))
+        .post(network::lattice_rpc_url(lattice_rpc_port))
         .json(&json!({
             "jsonrpc": "2.0",
             "id": format!("fray-main:{method}"),

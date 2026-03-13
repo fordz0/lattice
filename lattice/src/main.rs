@@ -22,14 +22,16 @@ use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-#[cfg(windows)]
-use std::{os::windows::process::CommandExt, ptr};
 
 #[cfg(windows)]
 const WINDOWS_DAEMON_CREATION_FLAGS: u32 = 0x00000008 | 0x00000200 | 0x08000000;
+#[cfg(windows)]
+const WINDOWS_DAEMON_SERVICE_NAME: &str = "lattice-daemon";
 const MACOS_DAEMON_LABEL: &str = "dev.benjf.lattice-daemon";
 
 #[derive(Parser)]
@@ -958,7 +960,90 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
 }
 
 fn macos_launchctl_service_target() -> Result<String> {
-    Ok(format!("{}/{}", macos_launchctl_domain()?, MACOS_DAEMON_LABEL))
+    Ok(format!(
+        "{}/{}",
+        macos_launchctl_domain()?,
+        MACOS_DAEMON_LABEL
+    ))
+}
+
+#[cfg(windows)]
+fn windows_service_bin_path(daemon_path: &Path, rpc_port: u16) -> String {
+    format!(
+        "\"{}\" --service --rpc-port {}",
+        daemon_path.display(),
+        rpc_port
+    )
+}
+
+#[cfg(windows)]
+fn detect_existing_windows_daemon_service() -> Result<bool> {
+    let output = ProcessCommand::new("sc.exe")
+        .args(["query", WINDOWS_DAEMON_SERVICE_NAME])
+        .output()
+        .context("failed to run sc.exe query lattice-daemon")?;
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stderr.contains("1060") || stdout.contains("1060") {
+        return Ok(false);
+    }
+
+    bail!(
+        "failed to query Windows service {}: {}{}",
+        WINDOWS_DAEMON_SERVICE_NAME,
+        stdout,
+        stderr
+    );
+}
+
+#[cfg(windows)]
+fn run_sc(args: &[String]) -> Result<()> {
+    let output = ProcessCommand::new("sc.exe")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run sc.exe {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "sc.exe {} failed: {}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn install_or_update_windows_daemon_service(daemon_path: &Path, rpc_port: u16) -> Result<()> {
+    let bin_path = windows_service_bin_path(daemon_path, rpc_port);
+    if detect_existing_windows_daemon_service()? {
+        run_sc(&[
+            "config".to_string(),
+            WINDOWS_DAEMON_SERVICE_NAME.to_string(),
+            "binPath=".to_string(),
+            bin_path,
+            "start=".to_string(),
+            "auto".to_string(),
+            "DisplayName=".to_string(),
+            "Lattice Daemon".to_string(),
+        ])?;
+    } else {
+        run_sc(&[
+            "create".to_string(),
+            WINDOWS_DAEMON_SERVICE_NAME.to_string(),
+            "binPath=".to_string(),
+            bin_path,
+            "start=".to_string(),
+            "auto".to_string(),
+            "DisplayName=".to_string(),
+            "Lattice Daemon".to_string(),
+        ])?;
+    }
+    Ok(())
 }
 
 fn find_executable_in_path(name: &str) -> Option<PathBuf> {
@@ -1137,6 +1222,17 @@ async fn restart_daemon_if_managed(rpc_port: u16) -> Result<()> {
         return Ok(());
     }
 
+    #[cfg(windows)]
+    {
+        if detect_existing_windows_daemon_service()? {
+            run_sc(&["stop".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()])?;
+            run_sc(&["start".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()])?;
+            let _ = wait_for_daemon(rpc_port, Duration::from_secs(15)).await?;
+            println!("lattice-daemon restarted");
+            return Ok(());
+        }
+    }
+
     if std::env::consts::OS == "linux" {
         if let Some(mode) = detect_existing_daemon_service_mode()? {
             let args = mode.systemctl_args(["restart", "lattice-daemon.service"].as_slice());
@@ -1239,6 +1335,28 @@ async fn up(rpc_port: u16) -> Result<()> {
         return Ok(());
     }
 
+    #[cfg(windows)]
+    {
+        let daemon_path = daemon_binary_path()?;
+        match install_or_update_windows_daemon_service(&daemon_path, rpc_port)
+            .and_then(|_| run_sc(&["start".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()]))
+        {
+            Ok(()) => {
+                clear_daemon_pid()?;
+                let info = wait_for_daemon(rpc_port, Duration::from_secs(15)).await?;
+                println!("lattice-daemon enabled and started");
+                print_status(&info);
+                return Ok(());
+            }
+            Err(err) => {
+                eprintln!("warning: {err}");
+                eprintln!(
+                    "warning: falling back to manual daemon startup because Windows service management is unavailable"
+                );
+            }
+        }
+    }
+
     start_manual_daemon(rpc_port)?;
     let info = wait_for_daemon(rpc_port, Duration::from_secs(10)).await?;
     println!("lattice-daemon started");
@@ -1247,6 +1365,16 @@ async fn up(rpc_port: u16) -> Result<()> {
 }
 
 fn down() -> Result<()> {
+    #[cfg(windows)]
+    {
+        if detect_existing_windows_daemon_service()? {
+            run_sc(&["stop".to_string(), WINDOWS_DAEMON_SERVICE_NAME.to_string()])?;
+            clear_daemon_pid()?;
+            println!("lattice-daemon stopped");
+            return Ok(());
+        }
+    }
+
     if std::env::consts::OS == "linux" {
         if let Some(mode) = detect_existing_daemon_service_mode()? {
             let args = mode.systemctl_args(["stop", "lattice-daemon.service"].as_slice());
@@ -1374,7 +1502,8 @@ async fn install_or_update_app(rpc_port: u16, app_id: &str, update_only: bool) -
         match detect_service_mode(app_id)? {
             Some(mode) => {
                 let service_path = mode.service_path().to_path_buf();
-                let service_contents = render_systemd_service(&mode, app_id, &install_path, rpc_port);
+                let service_contents =
+                    render_systemd_service(&mode, app_id, &install_path, rpc_port);
                 match fs::write(&service_path, service_contents) {
                     Ok(()) => {
                         let mut setup_ok = true;
