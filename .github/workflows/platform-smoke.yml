@@ -84,7 +84,7 @@ jobs:
             '--http-port','17881',
             '--https-port','17443',
             '--proxy-port','17882'
-          ) -RedirectStandardOutput daemon.log -RedirectStandardError daemon.log -PassThru
+          ) -RedirectStandardOutput daemon.stdout.log -RedirectStandardError daemon.stderr.log -PassThru
           try {
             for ($i = 0; $i -lt 30; $i++) {
               cargo run -p lattice -- --rpc-port 17880 status *> status.log
@@ -95,7 +95,8 @@ jobs:
               }
               Start-Sleep -Seconds 1
             }
-            Get-Content daemon.log
+            if (Test-Path daemon.stdout.log) { Get-Content daemon.stdout.log }
+            if (Test-Path daemon.stderr.log) { Get-Content daemon.stderr.log }
             exit 1
           }
           finally {
