@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use directories::BaseDirs;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use directories::ProjectDirs;
 use ed25519_dalek::SigningKey;
 use fray::api::{app, AppState};
 use fray::blocklist::ContentBlocklist;
@@ -90,21 +92,14 @@ fn fray_data_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("FRAY_DATA_DIR") {
         return Ok(PathBuf::from(dir));
     }
-    let base_dirs =
-        BaseDirs::new().ok_or_else(|| anyhow::anyhow!("failed to resolve user home directory"))?;
-    Ok(base_dirs.home_dir().join(".lattice").join("fray"))
+    Ok(default_lattice_data_dir()?.join("fray"))
 }
 
 fn load_signing_key() -> Result<SigningKey> {
     let key_path = if let Ok(path) = std::env::var("FRAY_SIGNING_KEY_PATH") {
         PathBuf::from(path)
     } else {
-        let base_dirs = BaseDirs::new()
-            .ok_or_else(|| anyhow::anyhow!("failed to resolve user home directory"))?;
-        base_dirs
-            .home_dir()
-            .join(".lattice")
-            .join("site_signing.key")
+        default_lattice_data_dir()?.join("site_signing.key")
     };
     let bytes = std::fs::read(&key_path)
         .with_context(|| format!("failed to read signing key {}", key_path.display()))?;
@@ -112,6 +107,26 @@ fn load_signing_key() -> Result<SigningKey> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("invalid signing key length in {}", key_path.display()))?;
     Ok(SigningKey::from_bytes(&key_bytes))
+}
+
+fn default_lattice_data_dir() -> Result<PathBuf> {
+    if let Some(legacy) = legacy_lattice_data_dir() {
+        if legacy.exists() {
+            return Ok(legacy);
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if let Some(project_dirs) = ProjectDirs::from("", "", "Lattice") {
+        return Ok(project_dirs.data_local_dir().to_path_buf());
+    }
+
+    legacy_lattice_data_dir()
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve user home directory"))
+}
+
+fn legacy_lattice_data_dir() -> Option<PathBuf> {
+    BaseDirs::new().map(|base_dirs| base_dirs.home_dir().join(".lattice"))
 }
 
 async fn register_local_app(lattice_rpc_port: u16, proxy_port: u16, pid: u32) -> Result<()> {

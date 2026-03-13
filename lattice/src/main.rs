@@ -3,6 +3,8 @@ mod rpc;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use directories::BaseDirs;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use directories::ProjectDirs;
 use ed25519_dalek::SigningKey;
 use lattice_core::app_namespace::APP_REGISTRY_PREFIX;
 use lattice_core::app_registry_record::{validate_app_registry_record, AppRegistryRecord};
@@ -678,9 +680,32 @@ fn lattice_data_dir() -> Result<PathBuf> {
         return Ok(PathBuf::from(dir));
     }
 
-    let base_dirs =
-        BaseDirs::new().ok_or_else(|| anyhow!("failed to locate user home directory"))?;
-    Ok(base_dirs.home_dir().join(".lattice"))
+    if let Some(legacy) = legacy_lattice_data_dir() {
+        if legacy.exists() {
+            return Ok(legacy);
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if let Some(project_dirs) = ProjectDirs::from("", "", "Lattice") {
+        return Ok(project_dirs.data_local_dir().to_path_buf());
+    }
+
+    if let Some(legacy) = legacy_lattice_data_dir() {
+        return Ok(legacy);
+    }
+
+    Ok(PathBuf::from(".lattice"))
+}
+
+fn legacy_lattice_data_dir() -> Option<PathBuf> {
+    BaseDirs::new()
+        .map(|base_dirs| base_dirs.home_dir().join(".lattice"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".lattice"))
+        })
 }
 
 fn lattice_apps_dir() -> Result<PathBuf> {

@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use directories::BaseDirs;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -32,14 +34,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let data_dir = BaseDirs::new()
-            .map(|base_dirs| base_dirs.home_dir().join(".lattice"))
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .map(|h| h.join(".lattice"))
-            })
-            .unwrap_or_else(|| PathBuf::from(".lattice"));
+        let data_dir = default_lattice_data_dir();
 
         Self {
             listen_port: 7779,
@@ -55,6 +50,31 @@ impl Default for Config {
             session_cache_max_bytes: default_session_cache_max_bytes(),
         }
     }
+}
+
+fn default_lattice_data_dir() -> PathBuf {
+    if let Some(legacy) = legacy_lattice_data_dir() {
+        if legacy.exists() {
+            return legacy;
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if let Some(project_dirs) = ProjectDirs::from("", "", "Lattice") {
+        return project_dirs.data_local_dir().to_path_buf();
+    }
+
+    legacy_lattice_data_dir().unwrap_or_else(|| PathBuf::from(".lattice"))
+}
+
+fn legacy_lattice_data_dir() -> Option<PathBuf> {
+    BaseDirs::new()
+        .map(|base_dirs| base_dirs.home_dir().join(".lattice"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".lattice"))
+        })
 }
 
 impl Config {

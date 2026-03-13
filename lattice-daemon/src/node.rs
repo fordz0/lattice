@@ -1,5 +1,5 @@
 // NOTE: breaking data-dir change:
-// Site publishing now uses a separate key file at ~/.lattice/site_signing.key.
+// Site publishing now uses a separate key file in the active Lattice data dir.
 // Existing installs using identity.key for publishing must re-claim names with:
 // `lattice name claim <name>`.
 use anyhow::{anyhow, Context, Result};
