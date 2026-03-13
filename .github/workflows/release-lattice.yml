@@ -55,6 +55,8 @@ jobs:
             is_windows: true
 
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_DIR: target/${{ matrix.artifact_stem }}
 
     steps:
       - name: Check out
@@ -69,10 +71,12 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> ${{ env.CARGO_TARGET_DIR }}
 
       - name: Install cross
         if: matrix.install_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --locked
 
       - name: Build Lattice binaries
         run: ${{ matrix.build_cmd }}
@@ -84,8 +88,8 @@ jobs:
           set -euo pipefail
           stage_dir="dist/${{ matrix.artifact_stem }}"
           mkdir -p "$stage_dir"
-          cp "target/${{ matrix.target }}/release/lattice" "$stage_dir/lattice"
-          cp "target/${{ matrix.target }}/release/lattice-daemon" "$stage_dir/lattice-daemon"
+          cp "$CARGO_TARGET_DIR/${{ matrix.target }}/release/lattice" "$stage_dir/lattice"
+          cp "$CARGO_TARGET_DIR/${{ matrix.target }}/release/lattice-daemon" "$stage_dir/lattice-daemon"
           cp LICENSE "$stage_dir/LICENSE"
           cp README.md "$stage_dir/README.md"
           chmod +x "$stage_dir/lattice" "$stage_dir/lattice-daemon"
@@ -102,8 +106,8 @@ jobs:
         run: |
           $stageDir = "dist/${{ matrix.artifact_stem }}"
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/lattice.exe" "$stageDir/lattice.exe"
-          Copy-Item "target/${{ matrix.target }}/release/lattice-daemon.exe" "$stageDir/lattice-daemon.exe"
+          Copy-Item "$env:CARGO_TARGET_DIR/${{ matrix.target }}/release/lattice.exe" "$stageDir/lattice.exe"
+          Copy-Item "$env:CARGO_TARGET_DIR/${{ matrix.target }}/release/lattice-daemon.exe" "$stageDir/lattice-daemon.exe"
           Copy-Item "LICENSE" "$stageDir/LICENSE"
           Copy-Item "README.md" "$stageDir/README.md"
           Compress-Archive -Path "$stageDir/*" -DestinationPath "${{ matrix.archive_name }}" -Force

@@ -91,6 +91,7 @@ pub fn pid_is_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub fn pid_is_alive(pid: u32) -> bool {
+    use std::ptr;
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -98,7 +99,7 @@ pub fn pid_is_alive(pid: u32) -> bool {
 
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle == 0 {
+        if handle == ptr::null_mut() {
             return false;
         }
 
