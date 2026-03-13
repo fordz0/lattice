@@ -17,9 +17,23 @@ No single point anyone can lean on to take something down.
 ### Requirements
 
 - Rust installed ([rustup.rs](https://rustup.rs))
-- Linux or macOS — Windows untested but may work
+- Linux, macOS, or Windows
 
-### Install
+### Install options
+
+Arch Linux:
+```bash
+yay -S lattice-net-git
+```
+
+macOS and Windows:
+- download the latest release artifacts from:
+  `https://github.com/fordz0/lattice/releases/latest`
+- Windows users should prefer the `.msi`
+- macOS users should prefer the matching `.tar.gz` for their CPU
+
+Build from source on any platform:
+
 ```bash
 git clone https://github.com/fordz0/lattice.git
 cd lattice
@@ -30,7 +44,7 @@ cargo build --release -p lattice-daemon -p lattice
 
 Bring the local daemon online:
 ```bash
-./target/release/lattice up
+lattice up
 ```
 
 This starts or enables `lattice-daemon`, connects you to the default
@@ -41,24 +55,24 @@ useful for advanced testing/operator workflows.
 ### Basic commands
 ```bash
 # check your node status
-./target/release/lattice status
+lattice status
 
 # optionally claim a .loom name up front
 # (publish auto-claims if the name is currently unclaimed)
-./target/release/lattice name claim yourname
+lattice name claim yourname
 
 # create a new site in the current directory
 mkdir mysite && cd mysite
-./target/release/lattice init --name yourname
+lattice init --name yourname
 
 # publish your site to the network
-./target/release/lattice publish
+lattice publish
 
 # fetch someone else's site
-./target/release/lattice fetch website --out ./website
+lattice fetch website --out ./website
 
 # update installed lattice apps from the registry
-./target/release/lattice update --all
+lattice update --all
 ```
 
 ### Visit .loom sites in Firefox
