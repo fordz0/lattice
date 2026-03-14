@@ -16,6 +16,14 @@ Alternative:
 The GitHub `.xpi` path is meant for direct self-distribution. AMO is still the
 default recommended install path.
 
+Chromium preview build:
+
+1. Run the extension release workflow with `browser=chrome` or `browser=both`
+2. Download the `lattice-extension-chrome-<version>.zip` release asset
+
+This is only a packaging target today. It is not a full Chrome Web Store-ready
+Manifest V3 port yet.
+
 Development / temporary install:
 
 1. Open Firefox and go to about:debugging

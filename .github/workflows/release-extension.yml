@@ -5,6 +5,21 @@ on:
     tags:
       - "lattice-ext-v*"
   workflow_dispatch:
+    inputs:
+      browser:
+        description: Browser build target
+        required: false
+        default: firefox
+        type: choice
+        options:
+          - firefox
+          - chrome
+          - both
+      sign_firefox:
+        description: Sign Firefox builds with AMO when credentials are available
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -28,17 +43,38 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify tag matches manifest version
+      - name: Resolve extension version
+        id: version
         shell: bash
         run: |
           set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#lattice-ext-v}"
           manifest_version="$(python3 - <<'PY'
           import json
           with open('lattice-ext/manifest.json', 'r', encoding='utf-8') as handle:
               print(json.load(handle)['version'])
           PY
           )"
+          release_mode=false
+          version="$manifest_version"
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            release_mode=true
+            version="${GITHUB_REF_NAME#lattice-ext-v}"
+          fi
+
+          {
+            echo "manifest=$manifest_version"
+            echo "release_mode=$release_mode"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches manifest version
+        if: ${{ steps.version.outputs.release_mode == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${{ steps.version.outputs.version }}"
+          manifest_version="${{ steps.version.outputs.manifest }}"
           if [ "$tag_version" != "$manifest_version" ]; then
             echo "tag version ($tag_version) does not match lattice-ext/manifest.json ($manifest_version)" >&2
             exit 1
@@ -50,27 +86,78 @@ jobs:
       - name: Lint extension
         run: npx --yes web-ext@8 lint --source-dir lattice-ext
 
-      - name: Build extension package
+      - name: Resolve browser targets
+        id: targets
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#lattice-ext-v}"
-          mkdir -p release-assets/build
-          npx --yes web-ext@8 build \
-            --source-dir lattice-ext \
-            --artifacts-dir release-assets/build \
-            --filename "lattice-extension-${version}.zip" \
-            --overwrite-dest
-          mv "release-assets/build/lattice-extension-${version}.zip" "release-assets/"
+          selected="firefox"
+          sign_firefox=false
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            selected="${{ github.event.inputs.browser }}"
+            if [ "${{ github.event.inputs.sign_firefox }}" = "true" ]; then
+              sign_firefox=true
+            fi
+          else
+            sign_firefox=true
+          fi
+
+          firefox=false
+          chrome=false
+
+          case "$selected" in
+            firefox)
+              firefox=true
+              ;;
+            chrome)
+              chrome=true
+              ;;
+            both)
+              firefox=true
+              chrome=true
+              ;;
+            *)
+              echo "unsupported browser target: $selected" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "selected=$selected"
+            echo "firefox=$firefox"
+            echo "chrome=$chrome"
+            echo "sign_firefox=$sign_firefox"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build extension package(s)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p release-assets
+
+          if [ "${{ steps.targets.outputs.firefox }}" = "true" ]; then
+            python3 scripts/build_extension.py \
+              --browser firefox \
+              --version "$version" \
+              --out-dir release-assets
+          fi
+
+          if [ "${{ steps.targets.outputs.chrome }}" = "true" ]; then
+            python3 scripts/build_extension.py \
+              --browser chrome \
+              --version "$version" \
+              --out-dir release-assets
+          fi
 
       - name: Sign extension with AMO
-        if: ${{ env.AMO_JWT_ISSUER != '' && env.AMO_JWT_SECRET != '' }}
+        if: ${{ steps.targets.outputs.firefox == 'true' && steps.targets.outputs.sign_firefox == 'true' && env.AMO_JWT_ISSUER != '' && env.AMO_JWT_SECRET != '' }}
         shell: bash
         env:
           AMO_CHANNEL: ${{ vars.AMO_CHANNEL }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#lattice-ext-v}"
+          version="${{ steps.version.outputs.version }}"
           channel="${AMO_CHANNEL:-unlisted}"
           mkdir -p release-assets/signed
           sign_log="$(mktemp)"
@@ -99,22 +186,32 @@ jobs:
           fi
           mv "$signed_xpi" "release-assets/lattice-extension-${version}.xpi"
 
+      - name: Upload workflow artifacts
+        if: ${{ steps.version.outputs.release_mode != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lattice-extension-${{ steps.targets.outputs.selected }}-${{ steps.version.outputs.version }}
+          path: release-assets/*
+          if-no-files-found: error
+
       - name: Publish release
+        if: ${{ steps.version.outputs.release_mode == 'true' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#lattice-ext-v}"
+          version="${{ steps.version.outputs.version }}"
           cat > release-notes.md <<'EOF'
-          Firefox extension release for Lattice.
+          Browser extension release for Lattice.
 
-          Preferred install path:
+          Preferred Firefox install path:
           - public AMO listing: https://addons.mozilla.org/en-US/firefox/addon/lattice/
 
           GitHub release assets:
           - `lattice-extension-<version>.xpi` is a signed self-distribution build when AMO signing credentials are configured
-          - `lattice-extension-<version>.zip` is the packaged source artifact for inspection or AMO submission workflows
+          - `lattice-extension-firefox-<version>.zip` is the Firefox-targeted packaged source artifact
+          - `lattice-extension-chrome-<version>.zip` is a Chromium-targeted package preview; it is not a Chrome Web Store-ready MV3 port yet
 
           Before browsing `.loom` sites:
 
@@ -125,8 +222,15 @@ jobs:
           EOF
 
           assets=(
-            "release-assets/lattice-extension-${version}.zip"
           )
+
+          if [ -f "release-assets/lattice-extension-firefox-${version}.zip" ]; then
+            assets+=("release-assets/lattice-extension-firefox-${version}.zip")
+          fi
+
+          if [ -f "release-assets/lattice-extension-chrome-${version}.zip" ]; then
+            assets+=("release-assets/lattice-extension-chrome-${version}.zip")
+          fi
 
           if [ -f "release-assets/lattice-extension-${version}.xpi" ]; then
             assets+=("release-assets/lattice-extension-${version}.xpi")
