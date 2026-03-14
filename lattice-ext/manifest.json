@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Lattice",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Access .loom sites over local HTTPS on the Lattice network",
   "permissions": [
     "proxy",
