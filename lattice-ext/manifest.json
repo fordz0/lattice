@@ -34,7 +34,8 @@
   "web_accessible_resources": ["setup.html", "setup.js", "config.js"],
   "icons": {
     "48": "icons/icon48.png",
-    "96": "icons/icon96.png"
+    "96": "icons/icon96.png",
+    "128": "icons/icon128.png"
   },
   "browser_specific_settings": {
     "gecko": {
