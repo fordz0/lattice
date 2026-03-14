@@ -73,12 +73,20 @@ jobs:
           version="${GITHUB_REF_NAME#lattice-ext-v}"
           channel="${AMO_CHANNEL:-unlisted}"
           mkdir -p release-assets/signed
-          npx --yes web-ext@8 sign \
+          sign_log="$(mktemp)"
+          if ! npx --yes web-ext@8 sign \
             --source-dir lattice-ext \
             --artifacts-dir release-assets/signed \
             --channel "$channel" \
             --api-key "$AMO_JWT_ISSUER" \
-            --api-secret "$AMO_JWT_SECRET"
+            --api-secret "$AMO_JWT_SECRET" \
+            2>&1 | tee "$sign_log"; then
+            if grep -Eq 'Version .* already exists|Submission failed .*Conflict' "$sign_log"; then
+              echo "AMO already has extension version ${version}; continuing without a new signed artifact."
+              exit 0
+            fi
+            exit 1
+          fi
           signed_xpi="$(find release-assets/signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
           if [ -z "$signed_xpi" ]; then
             echo "web-ext sign did not produce a signed .xpi" >&2
