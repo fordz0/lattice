@@ -129,6 +129,23 @@ jobs:
             echo "sign_firefox=$sign_firefox"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Resolve AMO channel
+        id: amo
+        shell: bash
+        env:
+          AMO_CHANNEL: ${{ vars.AMO_CHANNEL }}
+        run: |
+          set -euo pipefail
+          channel="${AMO_CHANNEL:-listed}"
+          listed=false
+          if [ "$channel" = "listed" ]; then
+            listed=true
+          fi
+          {
+            echo "channel=$channel"
+            echo "listed=$listed"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build extension package(s)
         shell: bash
         run: |
@@ -153,12 +170,10 @@ jobs:
       - name: Sign extension with AMO
         if: ${{ steps.targets.outputs.firefox == 'true' && steps.targets.outputs.sign_firefox == 'true' && env.AMO_JWT_ISSUER != '' && env.AMO_JWT_SECRET != '' }}
         shell: bash
-        env:
-          AMO_CHANNEL: ${{ vars.AMO_CHANNEL }}
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
-          channel="${AMO_CHANNEL:-unlisted}"
+          channel="${{ steps.amo.outputs.channel }}"
           mkdir -p release-assets/signed
           sign_log="$(mktemp)"
           set +e
@@ -181,6 +196,10 @@ jobs:
           fi
           signed_xpi="$(find release-assets/signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
           if [ -z "$signed_xpi" ]; then
+            if [ "$channel" = "listed" ]; then
+              echo "AMO listed submission completed; no self-distribution .xpi artifact was produced."
+              exit 0
+            fi
             echo "web-ext sign did not produce a signed .xpi" >&2
             exit 1
           fi
@@ -209,7 +228,7 @@ jobs:
           - public AMO listing: https://addons.mozilla.org/en-US/firefox/addon/lattice/
 
           GitHub release assets:
-          - `lattice-extension-<version>.xpi` is a signed self-distribution build when AMO signing credentials are configured
+          - `lattice-extension-<version>.xpi` is attached only for AMO `unlisted` self-distribution builds
           - `lattice-extension-firefox-<version>.zip` is the Firefox-targeted packaged source artifact
           - `lattice-extension-chrome-<version>.zip` is a Chromium-targeted package preview; it is not a Chrome Web Store-ready MV3 port yet
 
