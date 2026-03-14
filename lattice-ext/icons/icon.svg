@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Lattice icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1a14"/>
+      <stop offset="100%" stop-color="#173325"/>
+    </linearGradient>
+    <linearGradient id="grid" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#74c69d"/>
+      <stop offset="100%" stop-color="#2d6a4f"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#bg)"/>
+  <rect x="10" y="10" width="108" height="108" rx="22" fill="none" stroke="#8fd9b6" stroke-opacity="0.18" stroke-width="2"/>
+
+  <g stroke="url(#grid)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <path d="M32 41 L64 23 L96 41"/>
+    <path d="M32 87 L64 105 L96 87"/>
+    <path d="M32 41 L32 87"/>
+    <path d="M64 23 L64 105"/>
+    <path d="M96 41 L96 87"/>
+    <path d="M32 41 L96 87"/>
+    <path d="M96 41 L32 87"/>
+  </g>
+
+  <g fill="#e8fff3">
+    <circle cx="32" cy="41" r="7"/>
+    <circle cx="64" cy="23" r="7"/>
+    <circle cx="96" cy="41" r="7"/>
+    <circle cx="32" cy="87" r="7"/>
+    <circle cx="64" cy="105" r="7"/>
+    <circle cx="96" cy="87" r="7"/>
+    <circle cx="64" cy="64" r="8"/>
+  </g>
+</svg>
