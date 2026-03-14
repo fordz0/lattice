@@ -91,7 +91,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          selected="firefox"
+          selected="both"
           sign_firefox=false
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             selected="${{ github.event.inputs.browser }}"
