@@ -1,6 +1,7 @@
 const prefKey = document.getElementById('pref-key').textContent.trim();
 const amoUrl = 'https://addons.mozilla.org/en-US/firefox/addon/lattice/';
-const latestReleaseApi = 'https://api.github.com/repos/fordz0/lattice/releases/latest';
+const latestExtensionReleaseApi = 'https://api.github.com/repos/fordz0/lattice/releases?per_page=20';
+const latestExtensionReleaseFallback = 'https://github.com/fordz0/lattice/releases?q=lattice-ext-v&expanded=true';
 
 var latticeConfigApi = typeof LatticeConfig !== 'undefined' && LatticeConfig.defaults
   ? LatticeConfig
@@ -22,7 +23,11 @@ var latticeSetupHelpers = typeof LatticeSetupHelpers !== 'undefined'
   ? LatticeSetupHelpers
   : {
       parseGithubReleaseVersion: function(tagName) {
-        return String(tagName || '').replace(/^lattice-v/i, '').replace(/^v/i, '').trim();
+        return String(tagName || '')
+          .replace(/^lattice-ext-v/i, '')
+          .replace(/^lattice-v/i, '')
+          .replace(/^v/i, '')
+          .trim();
       },
       compareVersions: function(left, right) {
         const parse = function(value) {
@@ -88,33 +93,39 @@ async function openFirefoxInternalPage(url, title, fallbackCopy) {
 
 async function checkForLatestRelease(showUpToDateMessage) {
   try {
-    const response = await fetch(latestReleaseApi, {
+    const response = await fetch(latestExtensionReleaseApi, {
       headers: { Accept: 'application/vnd.github+json' }
     });
     if (!response.ok) {
       throw new Error('GitHub returned HTTP ' + response.status);
     }
-    const release = await response.json();
+    const releases = await response.json();
+    const release = releases.find(function(candidate) {
+      return candidate.tag_name && /^lattice-ext-v/i.test(candidate.tag_name);
+    });
+    if (!release) {
+      throw new Error('No lattice-ext release found');
+    }
     const manifestVersion = browser.runtime.getManifest().version;
     const releaseVersion = latticeSetupHelpers.parseGithubReleaseVersion(release.tag_name);
     if (latticeSetupHelpers.compareVersions(releaseVersion, manifestVersion) > 0) {
       setReleaseNotice(
         'Version ' + releaseVersion + ' is available on GitHub. You are running extension version ' + manifestVersion + '.',
-        release.html_url || 'https://github.com/fordz0/lattice/releases/latest'
+        release.html_url || latestExtensionReleaseFallback
       );
       return;
     }
     if (showUpToDateMessage) {
       setReleaseNotice(
         'You are already on the newest release we could find (' + manifestVersion + ').',
-        release.html_url || 'https://github.com/fordz0/lattice/releases/latest'
+        release.html_url || latestExtensionReleaseFallback
       );
     }
   } catch (_err) {
     if (showUpToDateMessage) {
       setReleaseNotice(
         'We could not check GitHub right now, but you can still view the latest releases manually.',
-        'https://github.com/fordz0/lattice/releases/latest'
+        latestExtensionReleaseFallback
       );
     }
   }

@@ -74,18 +74,23 @@ jobs:
           channel="${AMO_CHANNEL:-unlisted}"
           mkdir -p release-assets/signed
           sign_log="$(mktemp)"
-          if ! npx --yes web-ext@8 sign \
+          set +e
+          npx --yes web-ext@8 sign \
             --source-dir lattice-ext \
             --artifacts-dir release-assets/signed \
             --channel "$channel" \
             --api-key "$AMO_JWT_ISSUER" \
             --api-secret "$AMO_JWT_SECRET" \
-            2>&1 | tee "$sign_log"; then
+            >"$sign_log" 2>&1
+          sign_status=$?
+          set -e
+          cat "$sign_log"
+          if [ "$sign_status" -ne 0 ]; then
             if grep -Eq 'Version .* already exists|Submission failed .*Conflict' "$sign_log"; then
               echo "AMO already has extension version ${version}; continuing without a new signed artifact."
               exit 0
             fi
-            exit 1
+            exit "$sign_status"
           fi
           signed_xpi="$(find release-assets/signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
           if [ -z "$signed_xpi" ]; then
