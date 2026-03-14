@@ -209,7 +209,7 @@
       <p>Firefox needs to know <code>.loom</code> is a real address, not a search query and must trust Lattice's local HTTPS certificate authority.</p>
 
       <ol>
-        <li>Click the button below to open <code>about:config</code>.</li>
+        <li>Click the button below to copy <code>about:config</code>, then paste it into the Firefox address bar.</li>
         <li>Search for this preference:</li>
       </ol>
 
@@ -222,14 +222,14 @@
       <ol start="3">
         <li>Click the <strong>+</strong> button on the right to add it (defaults to <code>true</code>).</li>
         <li>Download the local CA certificate while <code>lattice-daemon</code> is running.</li>
-        <li>In Firefox: Settings → Privacy &amp; Security → Certificates → View Certificates → Authorities → Import. Select <code>lattice-local-ca.pem</code> and trust it for websites.</li>
+        <li>In Firefox: paste <code>about:preferences#privacy</code> into the address bar, then go to Certificates → View Certificates → Authorities → Import. Select <code>lattice-local-ca.pem</code> and trust it for websites.</li>
         <li>Come back here and click <strong>Done</strong>.</li>
       </ol>
 
       <div class="actions">
-        <button class="primary" id="open-config">Open about:config</button>
+        <button class="primary" id="open-config">Copy about:config</button>
         <button class="secondary" id="download-ca">Download CA cert</button>
-        <button class="secondary" id="open-certs">Open certificate settings</button>
+        <button class="secondary" id="open-certs">Copy certificate settings URL</button>
         <button class="secondary" id="done-test">Done — take me to benjf.loom</button>
       </div>
     </section>

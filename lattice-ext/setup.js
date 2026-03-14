@@ -79,16 +79,12 @@ async function copyText(value) {
   }
 }
 
-async function openFirefoxInternalPage(url, title, fallbackCopy) {
-  try {
-    await browser.tabs.create({ url: url });
-  } catch (_err) {
-    await copyText(url);
-    setSetupNotice(
-      title,
-      fallbackCopy + ' We copied ' + url + ' to your clipboard so you can paste it into the Firefox address bar.'
-    );
-  }
+async function copyFirefoxInternalPage(url, title, copy) {
+  await copyText(url);
+  setSetupNotice(
+    title,
+    copy + ' We copied ' + url + ' to your clipboard so you can paste it into the Firefox address bar.'
+  );
 }
 
 async function checkForLatestRelease(showUpToDateMessage) {
@@ -136,10 +132,10 @@ document.getElementById('copy-pref').addEventListener('click', async () => {
 });
 
 document.getElementById('open-config').addEventListener('click', () => {
-  openFirefoxInternalPage(
+  copyFirefoxInternalPage(
     'about:config',
-    'Open about:config manually',
-    'Firefox blocked direct navigation to about:config from the extension setup page.'
+    'Paste about:config into Firefox',
+    'Firefox does not allow extensions to open privileged about: pages like about:config directly.'
   );
 });
 
@@ -148,10 +144,10 @@ document.getElementById('download-ca').addEventListener('click', () => {
 });
 
 document.getElementById('open-certs').addEventListener('click', () => {
-  openFirefoxInternalPage(
+  copyFirefoxInternalPage(
     'about:preferences#privacy',
-    'Open certificate settings manually',
-    'Firefox blocked direct navigation to the certificate settings page from the extension setup page.'
+    'Paste certificate settings into Firefox',
+    'Firefox does not allow extensions to open privileged about: pages like the certificate settings page directly.'
   );
 });
 
