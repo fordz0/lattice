@@ -59,34 +59,6 @@ function setReleaseNotice(copy, htmlUrl) {
   };
 }
 
-function setSetupNotice(title, copy) {
-  const notice = document.getElementById('setup-notice');
-  document.getElementById('setup-notice-title').textContent = title;
-  document.getElementById('setup-notice-copy').textContent = copy;
-  notice.hidden = false;
-}
-
-async function copyText(value) {
-  try {
-    await navigator.clipboard.writeText(value);
-  } catch (_err) {
-    const area = document.createElement('textarea');
-    area.value = value;
-    document.body.appendChild(area);
-    area.select();
-    document.execCommand('copy');
-    document.body.removeChild(area);
-  }
-}
-
-async function copyFirefoxInternalPage(url, title, copy) {
-  await copyText(url);
-  setSetupNotice(
-    title,
-    copy + ' We copied ' + url + ' to your clipboard so you can paste it into the Firefox address bar.'
-  );
-}
-
 async function checkForLatestRelease(showUpToDateMessage) {
   try {
     const response = await fetch(latestExtensionReleaseApi, {
@@ -128,27 +100,20 @@ async function checkForLatestRelease(showUpToDateMessage) {
 }
 
 document.getElementById('copy-pref').addEventListener('click', async () => {
-  await copyText(prefKey);
-});
-
-document.getElementById('open-config').addEventListener('click', () => {
-  copyFirefoxInternalPage(
-    'about:config',
-    'Paste about:config into Firefox',
-    'Firefox does not allow extensions to open privileged about: pages like about:config directly.'
-  );
+  try {
+    await navigator.clipboard.writeText(prefKey);
+  } catch (_err) {
+    const area = document.createElement('textarea');
+    area.value = prefKey;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    document.body.removeChild(area);
+  }
 });
 
 document.getElementById('download-ca').addEventListener('click', () => {
   browser.tabs.create({ url: latticeConfigApi.caCertUrl(latticeConfigApi.defaults()) });
-});
-
-document.getElementById('open-certs').addEventListener('click', () => {
-  copyFirefoxInternalPage(
-    'about:preferences#privacy',
-    'Paste certificate settings into Firefox',
-    'Firefox does not allow extensions to open privileged about: pages like the certificate settings page directly.'
-  );
 });
 
 document.getElementById('open-amo').addEventListener('click', () => {
