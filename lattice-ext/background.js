@@ -1,7 +1,20 @@
-browser.runtime.onInstalled.addListener(function(details) {
+if (typeof importScripts === 'function' && typeof LatticeConfig === 'undefined') {
+  try {
+    importScripts('config.js');
+  } catch (_e) {
+    // Firefox background scripts already load config.js directly.
+  }
+}
+
+var browserApi = typeof browser !== 'undefined'
+  ? browser
+  : (typeof chrome !== 'undefined' ? chrome : null);
+var actionApi = browserApi ? (browserApi.action || browserApi.browserAction || null) : null;
+
+browserApi.runtime.onInstalled.addListener(function(details) {
   if (details && details.reason === 'install') {
-    browser.tabs.create({
-      url: browser.runtime.getURL('setup.html')
+    browserApi.tabs.create({
+      url: browserApi.runtime.getURL('setup.html')
     });
   }
 });
@@ -173,10 +186,10 @@ function badgeStyleForState(state) {
 }
 
 function sendMessageToTab(tabId, payload) {
-  if (!browser.tabs || typeof browser.tabs.sendMessage !== 'function') {
+  if (!browserApi.tabs || typeof browserApi.tabs.sendMessage !== 'function') {
     return Promise.resolve();
   }
-  return browser.tabs.sendMessage(tabId, payload).catch(function() {
+  return browserApi.tabs.sendMessage(tabId, payload).catch(function() {
     return null;
   });
 }
@@ -193,10 +206,10 @@ function sendOverlayState(tabId, siteName, state) {
 }
 
 function broadcastSiteState(siteName, state) {
-  if (!browser.tabs || typeof browser.tabs.query !== 'function') {
+  if (!browserApi.tabs || typeof browserApi.tabs.query !== 'function') {
     return Promise.resolve();
   }
-  return browser.tabs.query({}).then(function(tabs) {
+  return browserApi.tabs.query({}).then(function(tabs) {
     return Promise.all((tabs || []).map(function(tab) {
       if (!tab || !tab.id) {
         return null;
@@ -214,42 +227,42 @@ function broadcastSiteState(siteName, state) {
 }
 
 function updateBrowserActionForTab(tab) {
-  if (!browser.browserAction || !tab || !tab.id) {
+  if (!actionApi || !tab || !tab.id) {
     return Promise.resolve();
   }
 
   var siteName = siteNameFromUrl(tab.url);
   if (!siteName) {
     return Promise.all([
-      browser.browserAction.setBadgeText({ tabId: tab.id, text: '' }),
-      browser.browserAction.setTitle({ tabId: tab.id, title: 'Lattice' })
+      actionApi.setBadgeText({ tabId: tab.id, text: '' }),
+      actionApi.setTitle({ tabId: tab.id, title: 'Lattice' })
     ]);
   }
 
   return getSiteState(siteName).then(function(state) {
     var style = badgeStyleForState(state);
     return Promise.all([
-      browser.browserAction.setBadgeText({ tabId: tab.id, text: style.text }),
-      browser.browserAction.setBadgeBackgroundColor({ tabId: tab.id, color: style.color }),
-      browser.browserAction.setTitle({
+      actionApi.setBadgeText({ tabId: tab.id, text: style.text }),
+      actionApi.setBadgeBackgroundColor({ tabId: tab.id, color: style.color }),
+      actionApi.setTitle({
         tabId: tab.id,
         title: siteName + '.loom — ' + style.title
       })
     ]);
   }).catch(function() {
     return Promise.all([
-      browser.browserAction.setBadgeText({ tabId: tab.id, text: '?' }),
-      browser.browserAction.setBadgeBackgroundColor({ tabId: tab.id, color: '#8b1e00' }),
-      browser.browserAction.setTitle({ tabId: tab.id, title: siteName + '.loom — daemon unavailable' })
+      actionApi.setBadgeText({ tabId: tab.id, text: '?' }),
+      actionApi.setBadgeBackgroundColor({ tabId: tab.id, color: '#8b1e00' }),
+      actionApi.setTitle({ tabId: tab.id, title: siteName + '.loom — daemon unavailable' })
     ]);
   });
 }
 
 function refreshActiveTabUI() {
-  if (!browser.tabs || typeof browser.tabs.query !== 'function') {
+  if (!browserApi.tabs || typeof browserApi.tabs.query !== 'function') {
     return Promise.resolve();
   }
-  return browser.tabs.query({ active: true, currentWindow: true }).then(function(tabs) {
+  return browserApi.tabs.query({ active: true, currentWindow: true }).then(function(tabs) {
     if (!tabs || !tabs[0]) {
       return null;
     }
@@ -294,20 +307,20 @@ function applyTrustChange(siteName, trust, pinOrUnpin) {
   });
 }
 
-if (browser.tabs) {
-  if (browser.tabs.onActivated) {
-    browser.tabs.onActivated.addListener(function(activeInfo) {
-      if (!browser.tabs.get) {
+if (browserApi.tabs) {
+  if (browserApi.tabs.onActivated) {
+    browserApi.tabs.onActivated.addListener(function(activeInfo) {
+      if (!browserApi.tabs.get) {
         return;
       }
-      browser.tabs.get(activeInfo.tabId).then(updateBrowserActionForTab).catch(function() {
+      browserApi.tabs.get(activeInfo.tabId).then(updateBrowserActionForTab).catch(function() {
         return null;
       });
     });
   }
 
-  if (browser.tabs.onUpdated) {
-    browser.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
+  if (browserApi.tabs.onUpdated) {
+    browserApi.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
       if (changeInfo.url) {
         delete hiddenOverlayByTab[tabId];
       }
@@ -318,13 +331,13 @@ if (browser.tabs) {
   }
 }
 
-if (browser.browserAction && browser.browserAction.onClicked) {
-  browser.browserAction.onClicked.addListener(function(tab) {
+if (actionApi && actionApi.onClicked) {
+  actionApi.onClicked.addListener(function(tab) {
     showOverlayForTab(tab);
   });
 }
 
-browser.runtime.onMessage.addListener(function(message, sender) {
+browserApi.runtime.onMessage.addListener(function(message, sender) {
   if (!message || !message.type) {
     return undefined;
   }
@@ -383,8 +396,8 @@ browser.runtime.onMessage.addListener(function(message, sender) {
 });
 
 // Upgrade plain HTTP .loom navigation to HTTPS while keeping the .loom hostname in the URL bar.
-if (typeof browser.webRequest !== 'undefined') {
-  browser.webRequest.onBeforeRequest.addListener(
+if (typeof browserApi.webRequest !== 'undefined') {
+  browserApi.webRequest.onBeforeRequest.addListener(
     function(requestInfo) {
       try {
         var url = new URL(requestInfo.url);
@@ -407,8 +420,8 @@ if (typeof browser.webRequest !== 'undefined') {
 }
 
 // Route all .loom HTTP(S) requests through the local Lattice proxy.
-if (typeof browser.proxy !== 'undefined' && browser.proxy.onRequest) {
-  browser.proxy.onRequest.addListener(
+if (typeof browserApi.proxy !== 'undefined' && browserApi.proxy.onRequest) {
+  browserApi.proxy.onRequest.addListener(
     function(requestInfo) {
       try {
         var url = new URL(requestInfo.url);

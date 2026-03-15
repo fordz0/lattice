@@ -1,5 +1,5 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "Lattice",
   "version": "0.1.10",
   "description": "Access .loom sites over local HTTPS on the Lattice network",
@@ -7,14 +7,16 @@
     "proxy",
     "webRequest",
     "webRequestBlocking",
-    "https://api.github.com/*",
-    "<all_urls>",
     "tabs"
+  ],
+  "host_permissions": [
+    "https://api.github.com/*",
+    "<all_urls>"
   ],
   "background": {
     "scripts": ["config.js", "background.js"]
   },
-  "browser_action": {},
+  "action": {},
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -31,7 +33,12 @@
       "run_at": "document_start"
     }
   ],
-  "web_accessible_resources": ["setup.html", "setup.js", "config.js"],
+  "web_accessible_resources": [
+    {
+      "resources": ["setup.html", "setup.js", "config.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "icons": {
     "48": "icons/icon48.png",
     "96": "icons/icon96.png",

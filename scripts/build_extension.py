@@ -24,6 +24,9 @@ def build_manifest(target: str) -> dict:
     manifest = json.loads((EXT_DIR / "manifest.json").read_text(encoding="utf-8"))
     if target == "chrome":
         manifest.pop("browser_specific_settings", None)
+        manifest["background"] = {
+            "service_worker": "background.js",
+        }
     return manifest
 
 

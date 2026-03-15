@@ -18,6 +18,8 @@ class BuildExtensionTests(unittest.TestCase):
             with zipfile.ZipFile(out_path) as archive:
                 manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
                 self.assertNotIn("browser_specific_settings", manifest)
+                self.assertEqual(manifest["manifest_version"], 3)
+                self.assertEqual(manifest["background"], {"service_worker": "background.js"})
 
     def test_firefox_build_keeps_gecko_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -25,6 +27,11 @@ class BuildExtensionTests(unittest.TestCase):
             with zipfile.ZipFile(out_path) as archive:
                 manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
                 self.assertIn("browser_specific_settings", manifest)
+                self.assertEqual(manifest["manifest_version"], 3)
+                self.assertEqual(
+                    manifest["background"],
+                    {"scripts": ["config.js", "background.js"]},
+                )
 
 
 if __name__ == "__main__":
