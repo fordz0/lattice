@@ -33,6 +33,7 @@ jobs:
     env:
       AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
       AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+      CHROME_EXTENSION_KEY: ${{ secrets.CHROME_EXTENSION_KEY }}
 
     steps:
       - name: Check out
@@ -167,6 +168,31 @@ jobs:
               --out-dir release-assets
           fi
 
+      - name: Build Chrome CRX
+        if: ${{ steps.targets.outputs.chrome == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          key_path=""
+          if [ -n "${CHROME_EXTENSION_KEY:-}" ]; then
+            key_path="$(mktemp)"
+            printf '%s\n' "$CHROME_EXTENSION_KEY" > "$key_path"
+          fi
+
+          if [ -n "$key_path" ]; then
+            ./scripts/build_chrome_crx.sh \
+              "release-assets/lattice-extension-chrome-${version}.zip" \
+              "$version" \
+              "release-assets" \
+              "$key_path"
+          else
+            ./scripts/build_chrome_crx.sh \
+              "release-assets/lattice-extension-chrome-${version}.zip" \
+              "$version" \
+              "release-assets"
+          fi
+
       - name: Sign extension with AMO
         if: ${{ steps.targets.outputs.firefox == 'true' && steps.targets.outputs.sign_firefox == 'true' && env.AMO_JWT_ISSUER != '' && env.AMO_JWT_SECRET != '' }}
         shell: bash
@@ -230,7 +256,8 @@ jobs:
           GitHub release assets:
           - `lattice-extension-<version>.xpi` is attached only for AMO `unlisted` self-distribution builds
           - `lattice-extension-firefox-<version>.zip` is the Firefox-targeted packaged source artifact
-          - `lattice-extension-chrome-<version>.zip` is a Chromium-targeted package preview; it is not a Chrome Web Store-ready MV3 port yet
+          - `lattice-extension-chrome-<version>.zip` is a Chromium-targeted package preview
+          - `lattice-extension-chrome-<version>.crx` is a Chromium test install artifact; stable extension identity needs a persistent signing key
 
           Before browsing `.loom` sites:
 
@@ -249,6 +276,10 @@ jobs:
 
           if [ -f "release-assets/lattice-extension-chrome-${version}.zip" ]; then
             assets+=("release-assets/lattice-extension-chrome-${version}.zip")
+          fi
+
+          if [ -f "release-assets/lattice-extension-chrome-${version}.crx" ]; then
+            assets+=("release-assets/lattice-extension-chrome-${version}.crx")
           fi
 
           if [ -f "release-assets/lattice-extension-${version}.xpi" ]; then

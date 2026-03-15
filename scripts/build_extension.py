@@ -13,6 +13,7 @@ SKIP_NAMES = {
 }
 SKIP_DIRS = {
     "tests",
+    "web-ext-artifacts",
     "__pycache__",
 }
 SKIP_SUFFIXES = {

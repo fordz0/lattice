@@ -33,6 +33,13 @@ class BuildExtensionTests(unittest.TestCase):
                     {"scripts": ["config.js", "background.js"]},
                 )
 
+    def test_build_skips_web_ext_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_path = write_zip("chrome", "0.0.0-test", Path(tmp_dir))
+            with zipfile.ZipFile(out_path) as archive:
+                names = set(archive.namelist())
+                self.assertFalse(any(name.startswith("web-ext-artifacts/") for name in names))
+
 
 if __name__ == "__main__":
     unittest.main()
