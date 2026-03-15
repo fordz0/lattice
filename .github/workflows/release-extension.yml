@@ -20,6 +20,20 @@ on:
         required: false
         default: false
         type: boolean
+      amo_channel_override:
+        description: Override the AMO signing channel for this manual run
+        required: false
+        default: default
+        type: choice
+        options:
+          - default
+          - listed
+          - unlisted
+      attach_signed_xpi_to_release:
+        description: When an unlisted Firefox XPI is produced, attach it to lattice-ext-v<version>
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -138,6 +152,12 @@ jobs:
         run: |
           set -euo pipefail
           channel="${AMO_CHANNEL:-listed}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            override="${{ github.event.inputs.amo_channel_override }}"
+            if [ "$override" != "default" ]; then
+              channel="$override"
+            fi
+          fi
           listed=false
           if [ "$channel" = "listed" ]; then
             listed=true
@@ -238,6 +258,25 @@ jobs:
           name: lattice-extension-${{ steps.targets.outputs.selected }}-${{ steps.version.outputs.version }}
           path: release-assets/*
           if-no-files-found: error
+
+      - name: Attach signed XPI to tagged release
+        if: ${{ steps.version.outputs.release_mode != 'true' && github.event.inputs.attach_signed_xpi_to_release == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          tag="lattice-ext-v${version}"
+          xpi="release-assets/lattice-extension-${version}.xpi"
+
+          if [ ! -f "$xpi" ]; then
+            echo "No signed XPI was produced; nothing to attach." >&2
+            exit 1
+          fi
+
+          gh release view "$tag" >/dev/null 2>&1
+          gh release upload "$tag" "$xpi" --clobber
 
       - name: Publish release
         if: ${{ steps.version.outputs.release_mode == 'true' }}

@@ -14,7 +14,8 @@ Alternative:
 3. Download the signed `lattice-extension-<version>.xpi` asset when it is attached for an AMO `unlisted` self-distribution build
 
 The GitHub `.xpi` path is meant for direct self-distribution. AMO is still the
-default recommended install path.
+default recommended install path. Public AMO releases and direct-download
+unlisted `.xpi` builds are now separate release paths.
 
 Chromium preview build:
 

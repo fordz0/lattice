@@ -23,5 +23,6 @@ tools/topology-viewer/topology.json
 
 # Local docs clone
 /lattice-site-docs/
+web-extension.crx
 __pycache__/
 *.pyc
