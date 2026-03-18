@@ -31,7 +31,7 @@ use lattice_daemon::site_helpers::{
     addr_is_loopback_or_private, build_relay_reservation_addr, cached_manifest_json,
     maybe_put_record, normalize_get_record_value, parse_verified_name_record,
     pin_cached_site_blocks, publisher_hex_to_b64, remember_local_record, site_manifest_trust_state,
-    site_name_from_site_key, start_providing_site, validate_name,
+    site_name_from_site_key, start_providing_site, stop_providing_site, validate_name,
 };
 use lattice_daemon::store::{unix_ts, LocalRecordStore};
 
@@ -888,6 +888,7 @@ pub fn handle_rpc_command(
                 let _ = respond_to.send(Err(err));
                 return;
             }
+            stop_providing_site(&mut swarm.behaviour_mut().kademlia, &name);
             let result = local_record_store
                 .set_site_cache_policy(&name, CachePolicy::Ephemeral)
                 .map(|count| {
@@ -956,6 +957,7 @@ pub fn handle_rpc_command(
                     .set_explicitly_trusted(&name, false)
                     .map_err(|err| err.to_string())?;
                 if unpin {
+                    stop_providing_site(&mut swarm.behaviour_mut().kademlia, &name);
                     let count = local_record_store
                         .set_site_cache_policy(&name, CachePolicy::Ephemeral)
                         .map_err(|err| err.to_string())?;

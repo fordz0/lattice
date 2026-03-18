@@ -107,10 +107,12 @@ pub fn pin_cached_site_blocks(
     site_name: &str,
     manifest_json: &str,
 ) -> Result<usize> {
-    let mut pinned_count =
-        local_record_store.set_site_cache_policy(site_name, CachePolicy::Pinned)?;
     let manifest: lattice_site::manifest::SiteManifest = serde_json::from_str(manifest_json)
         .context("failed to decode site manifest for pinning")?;
+    ensure_site_blocks_available(local_record_store, Some(session_block_cache), &manifest)?;
+
+    let mut pinned_count =
+        local_record_store.set_site_cache_policy(site_name, CachePolicy::Pinned)?;
     let mut seen = HashSet::new();
     for file in manifest.files {
         for hash in file_block_hashes(&file) {
@@ -127,6 +129,33 @@ pub fn pin_cached_site_blocks(
         }
     }
     Ok(pinned_count)
+}
+
+pub fn ensure_site_blocks_available(
+    local_record_store: &LocalRecordStore,
+    mut session_block_cache: Option<&mut SessionBlockCache>,
+    manifest: &lattice_site::manifest::SiteManifest,
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for file in &manifest.files {
+        for hash in file_block_hashes(file) {
+            if !seen.insert(hash.clone()) {
+                continue;
+            }
+            if local_record_store.get_block(&hash)?.is_some() {
+                continue;
+            }
+            if session_block_cache
+                .as_deref_mut()
+                .and_then(|cache| cache.get(&hash))
+                .is_some()
+            {
+                continue;
+            }
+            anyhow::bail!("missing cached block {} for {}", hash, file.path);
+        }
+    }
+    Ok(())
 }
 
 pub fn file_block_hashes(file: &lattice_site::manifest::FileEntry) -> Vec<String> {
@@ -188,6 +217,13 @@ pub fn start_providing_site(
     }
     dht::start_providing(kademlia, site_key)?;
     Ok(())
+}
+
+pub fn stop_providing_site(
+    kademlia: &mut kad::Behaviour<kad::store::MemoryStore>,
+    site_name: &str,
+) {
+    kademlia.stop_providing(&kad::RecordKey::new(&site_manifest_key(site_name)));
 }
 
 pub fn reannounce_pinned_sites(
@@ -371,4 +407,92 @@ pub fn build_relay_reservation_addr(peer_addr: &Multiaddr, peer_id: PeerId) -> M
     relay_addr.push(Protocol::P2p(peer_id));
     relay_addr.push(Protocol::P2pCircuit);
     relay_addr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        pin_cached_site_blocks, site_manifest_key, start_providing_site, stop_providing_site,
+    };
+    use crate::cache::SessionBlockCache;
+    use crate::dht;
+    use crate::store::LocalRecordStore;
+    use lattice_core::moderation::ModerationEngine;
+    use libp2p::kad::store::RecordStore as _;
+    use libp2p::{identity, kad};
+    use tempfile::tempdir;
+
+    fn manifest_json(name: &str, path: &str, hash: &str) -> String {
+        serde_json::json!({
+            "name": name,
+            "version": 1,
+            "publisher_key": "00".repeat(32),
+            "rating": "general",
+            "files": [
+                {
+                    "path": path,
+                    "size": 3,
+                    "hash": hash,
+                    "chunks": []
+                }
+            ],
+            "signature": ""
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn pin_cached_site_blocks_rejects_partial_site_cache() {
+        let dir = tempdir().expect("tempdir");
+        let store = LocalRecordStore::open(dir.path(), [7; 32]).expect("open store");
+        let mut session_cache = SessionBlockCache::new(1024);
+        let manifest = manifest_json("fray", "404.html", "deadbeef");
+
+        let err = pin_cached_site_blocks(&store, &mut session_cache, "fray", &manifest)
+            .expect_err("partial cache should fail");
+        assert!(err
+            .to_string()
+            .contains("missing cached block deadbeef for 404.html"));
+        assert_eq!(
+            store.list_pinned_sites().expect("list pinned"),
+            Vec::<String>::new()
+        );
+        assert!(store.get_block("deadbeef").expect("get block").is_none());
+    }
+
+    #[test]
+    fn pin_cached_site_blocks_persists_complete_site() {
+        let dir = tempdir().expect("tempdir");
+        let store = LocalRecordStore::open(dir.path(), [8; 32]).expect("open store");
+        let mut session_cache = SessionBlockCache::new(1024);
+        let bytes = b"hey".to_vec();
+        let hash = lattice_site::manifest::hash_bytes(&bytes);
+        let manifest = manifest_json("fray", "index.html", &hash);
+        session_cache.insert(hash.clone(), bytes.clone());
+
+        let count =
+            pin_cached_site_blocks(&store, &mut session_cache, "fray", &manifest).expect("pin");
+
+        assert_eq!(count, 1);
+        assert_eq!(store.get_block(&hash).expect("get block"), Some(bytes),);
+        assert_eq!(
+            store.list_pinned_sites().expect("list pinned"),
+            vec!["fray".to_string()]
+        );
+    }
+
+    #[test]
+    fn stop_providing_site_removes_local_provider_record() {
+        let keypair = identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let mut kademlia = dht::new_kademlia(peer_id);
+        let moderation_engine = ModerationEngine::load(Vec::new());
+        let key = kad::RecordKey::new(&site_manifest_key("fray"));
+
+        start_providing_site(&mut kademlia, &moderation_engine, "fray").expect("start providing");
+        assert_eq!(kademlia.store_mut().providers(&key).len(), 1);
+
+        stop_providing_site(&mut kademlia, "fray");
+        assert!(kademlia.store_mut().providers(&key).is_empty());
+    }
 }
