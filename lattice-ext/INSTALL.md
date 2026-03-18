@@ -11,11 +11,11 @@ Alternative:
 
 1. Open the GitHub releases page: https://github.com/fordz0/lattice/releases
 2. Find the latest `lattice-ext-v*` release
-3. Download the signed `lattice-extension-<version>.xpi` asset when it is attached for an AMO `unlisted` self-distribution build
+3. Download the signed `lattice-extension-<version>.xpi` asset when it is attached for that AMO-approved version
 
 The GitHub `.xpi` path is meant for direct self-distribution. AMO is still the
-default recommended install path. Public AMO releases and direct-download
-unlisted `.xpi` builds are now separate release paths.
+default recommended install path. GitHub mirrors the signed `.xpi` only when
+AMO exposes a downloadable file for that release version.
 
 Chromium preview build:
 

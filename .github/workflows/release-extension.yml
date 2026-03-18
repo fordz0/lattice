@@ -220,6 +220,14 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           channel="${{ steps.amo.outputs.channel }}"
+          amo_addon_ref="$(python3 - <<'PY'
+          import json
+          with open('lattice-ext/manifest.json', 'r', encoding='utf-8') as handle:
+              manifest = json.load(handle)
+          print(manifest['browser_specific_settings']['gecko']['id'])
+          PY
+          )"
+          output_xpi="release-assets/lattice-extension-${version}.xpi"
           mkdir -p release-assets/signed
           sign_log="$(mktemp)"
           set +e
@@ -234,8 +242,26 @@ jobs:
           set -e
           cat "$sign_log"
           if [ "$sign_status" -ne 0 ]; then
+            if grep -Eq 'Approval: timeout exceeded' "$sign_log"; then
+              echo "AMO approval timed out in web-ext; checking whether version ${version} is already downloadable."
+              if python3 scripts/fetch_amo_signed_xpi.py \
+                --addon-ref "$amo_addon_ref" \
+                --version "$version" \
+                --channel "$channel" \
+                --output "$output_xpi"; then
+                exit 0
+              fi
+            fi
             if grep -Eq 'Version .* already exists|Submission failed .*Conflict' "$sign_log"; then
-              echo "AMO already has extension version ${version}; continuing without a new signed artifact."
+              echo "AMO already has extension version ${version}; checking for an existing downloadable XPI."
+              if python3 scripts/fetch_amo_signed_xpi.py \
+                --addon-ref "$amo_addon_ref" \
+                --version "$version" \
+                --channel "$channel" \
+                --output "$output_xpi"; then
+                exit 0
+              fi
+              echo "AMO has the version already, but no downloadable XPI is exposed yet; continuing."
               exit 0
             fi
             exit "$sign_status"
@@ -243,13 +269,21 @@ jobs:
           signed_xpi="$(find release-assets/signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
           if [ -z "$signed_xpi" ]; then
             if [ "$channel" = "listed" ]; then
-              echo "AMO listed submission completed; no self-distribution .xpi artifact was produced."
+              echo "AMO listed submission completed; checking whether the approved version is downloadable from AMO."
+              if python3 scripts/fetch_amo_signed_xpi.py \
+                --addon-ref "$amo_addon_ref" \
+                --version "$version" \
+                --channel "$channel" \
+                --output "$output_xpi"; then
+                exit 0
+              fi
+              echo "AMO did not expose a downloadable listed XPI yet; continuing without a GitHub XPI asset."
               exit 0
             fi
             echo "web-ext sign did not produce a signed .xpi" >&2
             exit 1
           fi
-          mv "$signed_xpi" "release-assets/lattice-extension-${version}.xpi"
+          mv "$signed_xpi" "$output_xpi"
 
       - name: Upload workflow artifacts
         if: ${{ steps.version.outputs.release_mode != 'true' }}
@@ -293,7 +327,7 @@ jobs:
           - public AMO listing: https://addons.mozilla.org/en-US/firefox/addon/lattice/
 
           GitHub release assets:
-          - `lattice-extension-<version>.xpi` is attached only for AMO `unlisted` self-distribution builds
+          - `lattice-extension-<version>.xpi` is attached when AMO exposes a signed download for that release version
           - `lattice-extension-firefox-<version>.zip` is the Firefox-targeted packaged source artifact
           - `lattice-extension-chrome-<version>.zip` is a Chromium-targeted package preview
           - `lattice-extension-chrome-<version>.crx` is a Chromium test install artifact; stable extension identity needs a persistent signing key
