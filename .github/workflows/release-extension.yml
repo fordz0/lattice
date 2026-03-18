@@ -293,7 +293,7 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
-      - name: Attach signed XPI to tagged release
+      - name: Attach release assets to tagged release
         if: ${{ steps.version.outputs.release_mode != 'true' && github.event.inputs.attach_signed_xpi_to_release == 'true' }}
         shell: bash
         env:
@@ -309,8 +309,49 @@ jobs:
             exit 1
           fi
 
-          gh release view "$tag" >/dev/null 2>&1
-          gh release upload "$tag" "$xpi" --clobber
+          cat > release-notes.md <<'EOF'
+          Browser extension release for Lattice.
+
+          Preferred Firefox install path:
+          - public AMO listing: https://addons.mozilla.org/en-US/firefox/addon/lattice/
+
+          GitHub release assets:
+          - `lattice-extension-<version>.xpi` is attached when AMO exposes a signed download for that release version
+          - `lattice-extension-firefox-<version>.zip` is the Firefox-targeted packaged source artifact
+          - `lattice-extension-chrome-<version>.zip` is a Chromium-targeted package preview
+          - `lattice-extension-chrome-<version>.crx` is a Chromium test install artifact; stable extension identity needs a persistent signing key
+
+          Before browsing `.loom` sites:
+
+          ```bash
+          lattice up
+          lattice doctor
+          ```
+          EOF
+
+          assets=("$xpi")
+
+          if [ -f "release-assets/lattice-extension-firefox-${version}.zip" ]; then
+            assets+=("release-assets/lattice-extension-firefox-${version}.zip")
+          fi
+
+          if [ -f "release-assets/lattice-extension-chrome-${version}.zip" ]; then
+            assets+=("release-assets/lattice-extension-chrome-${version}.zip")
+          fi
+
+          if [ -f "release-assets/lattice-extension-chrome-${version}.crx" ]; then
+            assets+=("release-assets/lattice-extension-chrome-${version}.crx")
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --title "$tag" \
+              --verify-tag \
+              --generate-notes \
+              --notes-file release-notes.md
+          fi
 
       - name: Publish release
         if: ${{ steps.version.outputs.release_mode == 'true' }}
