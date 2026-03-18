@@ -183,16 +183,16 @@
 
     <section class="split">
       <div class="mini-panel">
-        <h2>Firefox extension</h2>
-        <p>Install or update the Firefox add-on from Mozilla if you are setting up a new browser profile.</p>
+        <h2 id="install-panel-title">Firefox extension</h2>
+        <p id="install-panel-copy">Install or update the Firefox add-on from Mozilla if you are setting up a new browser profile.</p>
         <div class="actions">
-          <button class="secondary" id="open-amo" type="button">Open Firefox add-on page</button>
+          <button class="secondary" id="open-install-page" type="button">Open Firefox add-on page</button>
         </div>
       </div>
 
       <div class="mini-panel">
-        <h2>Latest extension release</h2>
-        <p>We can check the latest published Firefox extension release on GitHub and point you at it if this add-on is behind.</p>
+        <h2 id="release-panel-title">Latest extension release</h2>
+        <p id="release-panel-copy">We can check the latest published Firefox extension release on GitHub and point you at it if this add-on is behind.</p>
         <div class="actions">
           <button class="secondary" id="check-release" type="button">Check extension updates</button>
         </div>
@@ -201,40 +201,54 @@
 
     <section>
       <h2>Setup required</h2>
-      <p>Firefox needs to know <code>.loom</code> is a real address, not a search query and must trust Lattice's local HTTPS certificate authority.</p>
+      <p id="setup-copy">Firefox needs to know <code>.loom</code> is a real address, not a search query and must trust Lattice's local HTTPS certificate authority.</p>
 
-      <ol>
-        <li>Paste this into the Firefox address bar:</li>
-      </ol>
+      <div id="firefox-setup">
+        <ol>
+          <li>Paste this into the Firefox address bar:</li>
+        </ol>
 
-      <pre>about:config</pre>
+        <pre>about:config</pre>
 
-      <ol start="2">
-        <li>Search for this preference:</li>
-      </ol>
+        <ol start="2">
+          <li>Search for this preference:</li>
+        </ol>
 
-      <pre id="pref-key">browser.fixup.domainsuffixwhitelist.loom</pre>
+        <pre id="pref-key">browser.fixup.domainsuffixwhitelist.loom</pre>
 
-      <div class="actions">
-        <button class="secondary" id="copy-pref">Copy key</button>
+        <div class="actions">
+          <button class="secondary" id="copy-pref">Copy key</button>
+        </div>
+
+        <ol start="3">
+          <li>Click the <strong>+</strong> button on the right to add it (defaults to <code>true</code>).</li>
+          <li>Download the local CA certificate while <code>lattice-daemon</code> is running.</li>
+          <li>Paste this into the Firefox address bar:</li>
+        </ol>
+
+        <pre>about:preferences#privacy</pre>
+
+        <ol start="6">
+          <li>Go to Certificates → View Certificates → Authorities → Import. Select <code>lattice-local-ca.pem</code> and trust it for websites.</li>
+          <li>Come back here and click <strong>Done</strong>.</li>
+        </ol>
       </div>
 
-      <ol start="3">
-        <li>Click the <strong>+</strong> button on the right to add it (defaults to <code>true</code>).</li>
-        <li>Download the local CA certificate while <code>lattice-daemon</code> is running.</li>
-        <li>Paste this into the Firefox address bar:</li>
-      </ol>
-
-      <pre>about:preferences#privacy</pre>
-
-      <ol start="6">
-        <li>Go to Certificates → View Certificates → Authorities → Import. Select <code>lattice-local-ca.pem</code> and trust it for websites.</li>
-        <li>Come back here and click <strong>Done</strong>.</li>
-      </ol>
+      <div id="chromium-setup" hidden>
+        <ol>
+          <li>Keep the Lattice extension enabled. It configures Chromium to send <code>*.loom</code> traffic through your local Lattice proxy automatically.</li>
+          <li>Keep <code>lattice-daemon</code> running before you browse. The local proxy listens on <code>127.0.0.1:7782</code>.</li>
+          <li>Download the local CA certificate while <code>lattice-daemon</code> is running.</li>
+          <li>Import <code>lattice-local-ca.pem</code> into your system or browser certificate store and trust it for websites.</li>
+          <li>Use the full URL form in Chromium: <code>https://name.loom</code>. Some Chromium builds will search for bare <code>name.loom</code> instead of navigating.</li>
+          <li>If you are installing the Chromium preview build from GitHub, use the unpacked <code>.zip</code> asset in <code>chrome://extensions</code>. Direct website installs of unsigned <code>.crx</code> files are usually blocked.</li>
+          <li>Come back here and click <strong>Done</strong>.</li>
+        </ol>
+      </div>
 
       <div class="actions">
         <button class="secondary" id="download-ca">Download local CA cert</button>
-        <button class="secondary" id="done-test">Done — take me to benjf.loom</button>
+        <button class="secondary" id="done-test">Done — take me to https://benjf.loom</button>
       </div>
     </section>
 

@@ -12,12 +12,19 @@ var browserApi = typeof browser !== 'undefined'
 var actionApi = browserApi ? (browserApi.action || browserApi.browserAction || null) : null;
 
 browserApi.runtime.onInstalled.addListener(function(details) {
+  initializeBrowserRouting();
   if (details && details.reason === 'install') {
     browserApi.tabs.create({
       url: browserApi.runtime.getURL('setup.html')
     });
   }
 });
+
+if (browserApi.runtime && browserApi.runtime.onStartup) {
+  browserApi.runtime.onStartup.addListener(function() {
+    initializeBrowserRouting();
+  });
+}
 
 var latticeConfigApi = typeof LatticeConfig !== 'undefined' && LatticeConfig.defaults
   ? LatticeConfig
@@ -40,6 +47,68 @@ var latticeConfigApi = typeof LatticeConfig !== 'undefined' && LatticeConfig.def
 
 var latticeConfig = latticeConfigApi.defaults();
 var hiddenOverlayByTab = {};
+
+function callMaybePromise(fn, args) {
+  if (typeof fn !== 'function') {
+    return Promise.resolve();
+  }
+
+  try {
+    var result = fn.apply(null, args || []);
+    if (result && typeof result.then === 'function') {
+      return result;
+    }
+    return Promise.resolve(result);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
+function setChromiumProxyConfig() {
+  if (!browserApi.proxy || !browserApi.proxy.settings || typeof browserApi.proxy.settings.set !== 'function') {
+    return Promise.resolve(false);
+  }
+
+  var pacData =
+    "function FindProxyForURL(url, host) {\n" +
+    "  if (!host || host.length <= 5 || host.slice(-5) !== '.loom') {\n" +
+    "    return 'DIRECT';\n" +
+    "  }\n" +
+    "  var site = host.slice(0, -5);\n" +
+    "  if (!site || site.indexOf('.') !== -1 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(site)) {\n" +
+    "    return 'DIRECT';\n" +
+    "  }\n" +
+    "  return 'PROXY " + latticeConfig.localHost + ":" + latticeConfig.proxyPort + "';\n" +
+    "}";
+
+  return callMaybePromise(browserApi.proxy.settings.set.bind(browserApi.proxy.settings), [
+    {
+      value: {
+        mode: 'pac_script',
+        pacScript: {
+          data: pacData,
+          mandatory: true
+        }
+      },
+      scope: 'regular'
+    }
+  ]).then(function() {
+    return true;
+  }).catch(function(error) {
+    console.warn('Failed to configure Chromium proxy settings', error);
+    return false;
+  });
+}
+
+function initializeBrowserRouting() {
+  var hasFirefoxProxyRouting = !!(browserApi.proxy && browserApi.proxy.onRequest);
+  if (hasFirefoxProxyRouting) {
+    return Promise.resolve('firefox');
+  }
+  return setChromiumProxyConfig().then(function(configured) {
+    return configured ? 'chromium' : 'unknown';
+  });
+}
 
 function isLoomHost(hostname) {
   if (!hostname || !hostname.endsWith('.loom')) {
@@ -442,3 +511,4 @@ if (typeof browserApi.proxy !== 'undefined' && browserApi.proxy.onRequest) {
 }
 
 refreshActiveTabUI();
+initializeBrowserRouting();

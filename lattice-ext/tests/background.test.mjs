@@ -11,6 +11,7 @@ const backgroundPath = path.resolve(__dirname, '../background.js');
 function loadBackgroundWithFetch(fetchImpl) {
   const listeners = {
     installed: null,
+    startup: null,
     message: null,
     redirect: null,
     redirectFilter: null,
@@ -28,6 +29,11 @@ function loadBackgroundWithFetch(fetchImpl) {
       onInstalled: {
         addListener(fn) {
           listeners.installed = fn;
+        },
+      },
+      onStartup: {
+        addListener(fn) {
+          listeners.startup = fn;
         },
       },
       onMessage: {
@@ -67,6 +73,11 @@ function loadBackgroundWithFetch(fetchImpl) {
       },
     },
     proxy: {
+      settings: {
+        set() {
+          return Promise.resolve();
+        },
+      },
       onRequest: {
         addListener(fn) {
           listeners.proxy = fn;
@@ -125,6 +136,7 @@ function plain(value) {
 test('background registers loom request listeners', () => {
   const { listeners } = loadBackground();
   assert.equal(typeof listeners.installed, 'function');
+  assert.equal(typeof listeners.startup, 'function');
   assert.equal(typeof listeners.message, 'function');
   assert.equal(typeof listeners.redirect, 'function');
   assert.deepEqual(plain(listeners.redirectFilter), {
@@ -163,6 +175,116 @@ test('background routes loom hosts through the local proxy only', () => {
   });
   assert.deepEqual(plain(proxy({ url: 'https://bad.name.loom/' })), { type: 'direct' });
   assert.deepEqual(plain(proxy({ url: 'https://example.com/' })), { type: 'direct' });
+});
+
+test('background configures a Chromium PAC proxy when proxy.settings is available', async () => {
+  const proxyConfigs = [];
+  const listeners = {
+    installed: null,
+    startup: null,
+    message: null,
+    redirect: null,
+    redirectFilter: null,
+    browserActionClicked: null,
+    tabActivated: null,
+    tabUpdated: null,
+  };
+
+  const browser = {
+    runtime: {
+      getURL(value) {
+        return 'chrome-extension://test/' + value;
+      },
+      onInstalled: {
+        addListener(fn) {
+          listeners.installed = fn;
+        },
+      },
+      onStartup: {
+        addListener(fn) {
+          listeners.startup = fn;
+        },
+      },
+      onMessage: {
+        addListener(fn) {
+          listeners.message = fn;
+        },
+      },
+    },
+    tabs: {
+      create() {},
+      query() {
+        return Promise.resolve([]);
+      },
+      sendMessage() {
+        return Promise.resolve();
+      },
+      get() {
+        return Promise.resolve({ id: 1, url: 'https://lattice.loom/' });
+      },
+      onActivated: {
+        addListener(fn) {
+          listeners.tabActivated = fn;
+        },
+      },
+      onUpdated: {
+        addListener(fn) {
+          listeners.tabUpdated = fn;
+        },
+      },
+    },
+    webRequest: {
+      onBeforeRequest: {
+        addListener(fn, filter) {
+          listeners.redirect = fn;
+          listeners.redirectFilter = filter;
+        },
+      },
+    },
+    proxy: {
+      settings: {
+        set(config) {
+          proxyConfigs.push(config);
+          return Promise.resolve();
+        },
+      },
+    },
+    browserAction: {
+      setBadgeText() {
+        return Promise.resolve();
+      },
+      setBadgeBackgroundColor() {
+        return Promise.resolve();
+      },
+      setTitle() {
+        return Promise.resolve();
+      },
+      onClicked: {
+        addListener(fn) {
+          listeners.browserActionClicked = fn;
+        },
+      },
+    },
+  };
+
+  const context = vm.createContext({
+    URL,
+    browser,
+    console,
+    fetch() {
+      throw new Error('unexpected fetch in chromium pac smoke test');
+    },
+  });
+
+  const source = fs.readFileSync(backgroundPath, 'utf8');
+  vm.runInContext(source, context, { filename: backgroundPath });
+
+  await listeners.installed({ reason: 'update' });
+  await listeners.startup();
+
+  assert.equal(proxyConfigs.length >= 2, true);
+  assert.equal(proxyConfigs[0].value.mode, 'pac_script');
+  assert.match(proxyConfigs[0].value.pacScript.data, /PROXY 127\.0\.0\.1:7782/);
 });
 
 test('background talks to the daemon on the RPC port', async () => {

@@ -2,6 +2,19 @@ const prefKey = document.getElementById('pref-key').textContent.trim();
 const amoUrl = 'https://addons.mozilla.org/en-US/firefox/addon/lattice/';
 const latestExtensionReleaseApi = 'https://api.github.com/repos/fordz0/lattice/releases?per_page=20';
 const latestExtensionReleaseFallback = 'https://github.com/fordz0/lattice/releases?q=lattice-ext-v&expanded=true';
+const latestExtensionReleaseDownloads = 'https://github.com/fordz0/lattice/releases/latest';
+const browserApi = typeof browser !== 'undefined'
+  ? browser
+  : (typeof chrome !== 'undefined' ? chrome : null);
+const installPanelTitle = document.getElementById('install-panel-title');
+const installPanelCopy = document.getElementById('install-panel-copy');
+const releasePanelTitle = document.getElementById('release-panel-title');
+const releasePanelCopy = document.getElementById('release-panel-copy');
+const setupCopy = document.getElementById('setup-copy');
+const firefoxSetup = document.getElementById('firefox-setup');
+const chromiumSetup = document.getElementById('chromium-setup');
+const copyPrefButton = document.getElementById('copy-pref');
+const openInstallPageButton = document.getElementById('open-install-page');
 
 var latticeConfigApi = typeof LatticeConfig !== 'undefined' && LatticeConfig.defaults
   ? LatticeConfig
@@ -49,13 +62,31 @@ var latticeSetupHelpers = typeof LatticeSetupHelpers !== 'undefined'
       }
     };
 
+function detectBrowserFamily() {
+  const source = String(navigator.userAgent || '').toLowerCase();
+  if (source.indexOf('firefox') !== -1) {
+    return 'firefox';
+  }
+  if (
+    source.indexOf('chrome') !== -1 ||
+    source.indexOf('chromium') !== -1 ||
+    source.indexOf('edg/') !== -1 ||
+    source.indexOf('opr/') !== -1
+  ) {
+    return 'chromium';
+  }
+  return 'unknown';
+}
+
+const browserFamily = detectBrowserFamily();
+
 function setReleaseNotice(copy, htmlUrl) {
   document.getElementById('release-copy').textContent = copy;
   const notice = document.getElementById('release-notice');
   notice.hidden = false;
   const button = document.getElementById('view-release');
   button.onclick = function() {
-    browser.tabs.create({ url: htmlUrl });
+    browserApi.tabs.create({ url: htmlUrl });
   };
 }
 
@@ -74,11 +105,15 @@ async function checkForLatestRelease(showUpToDateMessage) {
     if (!release) {
       throw new Error('No lattice-ext release found');
     }
-    const manifestVersion = browser.runtime.getManifest().version;
+    const manifestVersion = browserApi.runtime.getManifest().version;
     const releaseVersion = latticeSetupHelpers.parseGithubReleaseVersion(release.tag_name);
     if (latticeSetupHelpers.compareVersions(releaseVersion, manifestVersion) > 0) {
       setReleaseNotice(
-        'Version ' + releaseVersion + ' is available on GitHub. You are running extension version ' + manifestVersion + '.',
+        (browserFamily === 'chromium' ? 'Chromium preview build ' : 'Version ') +
+          releaseVersion +
+          ' is available on GitHub. You are running extension version ' +
+          manifestVersion +
+          '.',
         release.html_url || latestExtensionReleaseFallback
       );
       return;
@@ -99,25 +134,38 @@ async function checkForLatestRelease(showUpToDateMessage) {
   }
 }
 
-document.getElementById('copy-pref').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(prefKey);
-  } catch (_err) {
-    const area = document.createElement('textarea');
-    area.value = prefKey;
-    document.body.appendChild(area);
-    area.select();
-    document.execCommand('copy');
-    document.body.removeChild(area);
-  }
-});
+if (browserFamily === 'chromium') {
+  installPanelTitle.textContent = 'Chromium preview';
+  installPanelCopy.textContent = 'Use the unpacked Chromium build from GitHub Releases. Direct website installs of unsigned .crx files are usually blocked.';
+  releasePanelTitle.textContent = 'Latest Chromium preview';
+  releasePanelCopy.textContent = 'We can check the latest packaged Chromium release on GitHub and point you at it if this preview build is behind.';
+  setupCopy.innerHTML = "Chromium needs the extension to control the local proxy and still needs Lattice's local HTTPS certificate authority trusted before <code>https://name.loom</code> will load cleanly.";
+  firefoxSetup.hidden = true;
+  chromiumSetup.hidden = false;
+  copyPrefButton.hidden = true;
+} else {
+  copyPrefButton.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(prefKey);
+    } catch (_err) {
+      const area = document.createElement('textarea');
+      area.value = prefKey;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      document.body.removeChild(area);
+    }
+  });
+}
 
 document.getElementById('download-ca').addEventListener('click', () => {
-  browser.tabs.create({ url: latticeConfigApi.caCertUrl(latticeConfigApi.defaults()) });
+  browserApi.tabs.create({ url: latticeConfigApi.caCertUrl(latticeConfigApi.defaults()) });
 });
 
-document.getElementById('open-amo').addEventListener('click', () => {
-  browser.tabs.create({ url: amoUrl });
+openInstallPageButton.addEventListener('click', () => {
+  browserApi.tabs.create({
+    url: browserFamily === 'chromium' ? latestExtensionReleaseDownloads : amoUrl
+  });
 });
 
 document.getElementById('check-release').addEventListener('click', () => {
@@ -125,11 +173,11 @@ document.getElementById('check-release').addEventListener('click', () => {
 });
 
 document.getElementById('done-test').addEventListener('click', async () => {
-  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+  const tabs = await browserApi.tabs.query({ active: true, currentWindow: true });
   if (tabs.length > 0 && tabs[0].id) {
-    browser.tabs.update(tabs[0].id, { url: 'https://benjf.loom' });
+    browserApi.tabs.update(tabs[0].id, { url: 'https://benjf.loom' });
   } else {
-    browser.tabs.create({ url: 'https://benjf.loom' });
+    browserApi.tabs.create({ url: 'https://benjf.loom' });
   }
 });
 
