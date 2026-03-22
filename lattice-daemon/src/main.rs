@@ -212,7 +212,9 @@ async fn run_daemon(
             dht::add_bootstrap_peers(&mut kademlia, &config.bootstrap_peers);
             let block_fetch = block_fetch::new_behaviour();
             let mdns = if config.mdns_enabled {
-                Some(mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?)
+                let mut mdns_config = mdns::Config::default();
+                mdns_config.query_interval = Duration::from_secs(30);
+                Some(mdns::tokio::Behaviour::new(mdns_config, peer_id)?)
             } else {
                 None
             };
@@ -446,6 +448,13 @@ async fn run_daemon(
     let mut pending_block_requests: HashMap<block_fetch::OutboundRequestId, PendingBlockRequest> =
         HashMap::new();
 
+    // Re-bootstrap Kademlia periodically so the routing table stays populated.
+    // The early boot fires after 30s (giving initial connections time to
+    // establish), then every 5 minutes thereafter.
+    let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(5 * 60));
+    bootstrap_interval.tick().await; // consume the first immediate tick
+    let mut early_bootstrap = std::pin::pin!(tokio::time::sleep(Duration::from_secs(30)));
+
     loop {
         tokio::select! {
             () = wait_for_shutdown(&mut shutdown_signal) => {
@@ -480,6 +489,14 @@ async fn run_daemon(
                         &app_registry,
                     );
                 }
+            }
+            _ = bootstrap_interval.tick() => {
+                let _ = swarm.behaviour_mut().kademlia.bootstrap();
+            }
+            _ = &mut early_bootstrap => {
+                let _ = swarm.behaviour_mut().kademlia.bootstrap();
+                // Reset to far future so this branch never fires again.
+                early_bootstrap.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(u32::MAX as u64));
             }
             event = swarm.select_next_some() => {
                 handle_swarm_event(
