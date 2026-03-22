@@ -366,3 +366,98 @@ jobs:
           git add "$subdir"
           git commit -m "Publish APT repo for ${GITHUB_REF_NAME}"
           git push origin "$branch"
+
+  publish-aur:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Download x86_64 artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: lattice-linux-x86_64
+          path: release-assets
+
+      - name: Update AUR package
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_KEY:-}" ]; then
+            echo "Skipping AUR publish; AUR_SSH_KEY is not configured."
+            exit 0
+          fi
+
+          version="${GITHUB_REF_NAME#lattice-v}"
+          sha256="$(cat release-assets/lattice-linux-x86_64.tar.gz.sha256)"
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur\n' >> ~/.ssh/config
+
+          git clone ssh://aur@aur.archlinux.org/lattice-net-bin.git /tmp/aur-pkg
+          cd /tmp/aur-pkg
+
+          # Overwrite PKGBUILD with version and hash substituted
+          sed \
+            -e "s/^pkgver=.*/pkgver=${version}/" \
+            -e "s/^pkgrel=.*/pkgrel=1/" \
+            "$GITHUB_WORKSPACE/packaging/aur/lattice-net-bin/PKGBUILD" > PKGBUILD
+          # Fix sha256sums line to use the release hash
+          python3 -c "
+          import re, sys
+          txt = open('PKGBUILD').read()
+          txt = re.sub(
+              r\"sha256sums=\\([^)]*\\)\",
+              \"sha256sums=(\\n  '${sha256}'\\n)\",
+              txt,
+          )
+          open('PKGBUILD', 'w').write(txt)
+          "
+
+          cp "$GITHUB_WORKSPACE/packaging/aur/lattice-net-bin/lattice-daemon.service" .
+          cp "$GITHUB_WORKSPACE/packaging/aur/lattice-net-bin/lattice-net-bin.install" .
+          cp "$GITHUB_WORKSPACE/packaging/aur/lattice-net-bin/restart-daemon-if-active.sh" .
+
+          # Generate .SRCINFO (makepkg unavailable on ubuntu runners)
+          python3 -c "
+          v, s = '${version}', '${sha256}'
+          lines = [
+              'pkgbase = lattice-net-bin',
+              '\tpkgdesc = Peer-to-peer web protocol CLI and daemon (prebuilt release)',
+              f'\tpkgver = {v}',
+              '\tpkgrel = 1',
+              '\turl = https://github.com/fordz0/lattice',
+              '\tinstall = lattice-net-bin.install',
+              '\tarch = x86_64',
+              '\tlicense = GPL3',
+              '\tdepends = glibc',
+              '\tdepends = gcc-libs',
+              '\tdepends = systemd',
+              '\tprovides = lattice-net',
+              '\tconflicts = lattice-net',
+              '\tconflicts = lattice-net-git',
+              '\toptions = !debug',
+              f'\tsource = https://github.com/fordz0/lattice/releases/download/lattice-v{v}/lattice-linux-x86_64.tar.gz',
+              f'\tsha256sums = {s}',
+              '',
+              'pkgname = lattice-net-bin',
+          ]
+          open('.SRCINFO', 'w').write('\n'.join(lines) + '\n')
+          "
+
+          git config user.name "fordz0"
+          git config user.email "ben@pengu1n.dev"
+          git add -A
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "AUR package already up to date."
+            exit 0
+          fi
+          git commit -m "Update to ${version}"
+          git push

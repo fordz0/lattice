@@ -1,5 +1,5 @@
 pkgname=lattice-net-bin
-pkgver=0.1.7
+pkgver=0.1.9
 pkgrel=1
 pkgdesc="Peer-to-peer web protocol CLI and daemon (prebuilt release)"
 arch=('x86_64')
@@ -14,7 +14,7 @@ source=(
   "https://github.com/fordz0/lattice/releases/download/lattice-v${pkgver}/lattice-linux-x86_64.tar.gz"
 )
 sha256sums=(
-  '2ec4c9e1d59decb71da10f863eaf7b640ab5edae3d8492c9e72918acbb5e747a'
+  '22738ecdc873456652c98ba5c11ca39c174fe44cd274b46d3a4da9a6b8599ab7'
 )
 
 package() {
