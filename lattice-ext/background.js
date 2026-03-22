@@ -435,10 +435,16 @@ browserApi.runtime.onMessage.addListener(function(message, sender) {
   }
 
   if (message.type === 'trustSite') {
+    if (!sender || !sender.url || !siteNameFromUrl(sender.url)) {
+      return Promise.resolve({ status: 'err', error: 'forbidden sender' });
+    }
     return applyTrustChange(message.siteName, true, !!message.pin);
   }
 
   if (message.type === 'untrustSite') {
+    if (!sender || !sender.url || !siteNameFromUrl(sender.url)) {
+      return Promise.resolve({ status: 'err', error: 'forbidden sender' });
+    }
     return applyTrustChange(message.siteName, false, !!message.unpin);
   }
 

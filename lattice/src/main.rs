@@ -39,6 +39,7 @@ const MACOS_APP_LABEL_PREFIX: &str = "dev.benjf.lattice.app";
 
 #[derive(Parser)]
 #[command(name = "lattice")]
+#[command(version)]
 #[command(about = "CLI client for lattice-daemon JSON-RPC")]
 struct Cli {
     #[arg(long, global = true, default_value_t = rpc::DEFAULT_RPC_PORT)]
@@ -134,6 +135,7 @@ enum Command {
         app_id: String,
     },
     Apps,
+    Version,
 }
 
 #[derive(Subcommand)]
@@ -531,6 +533,9 @@ async fn run() -> Result<()> {
         }
         Command::Apps => {
             list_installed_apps()?;
+        }
+        Command::Version => {
+            println!("lattice {}", env!("CARGO_PKG_VERSION"));
         }
     }
 

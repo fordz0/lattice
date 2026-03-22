@@ -13,6 +13,7 @@ clap = { version = "4", features = ["derive"] }
 directories = "5"
 ed25519-dalek = "2"
 hex = "0.4"
+http = "1"
 infer = "0.19"
 jsonrpsee = { version = "0.24", features = ["server", "http-client"] }
 lattice-core = { path = "../lattice-core" }

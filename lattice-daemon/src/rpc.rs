@@ -5,7 +5,11 @@ use jsonrpsee::types::ErrorObjectOwned;
 use jsonrpsee::RpcModule;
 use lattice_core::moderation::ModerationRule;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 const RESERVED_PREFIXES: &[&str] = &["name:", "site:", "block:"];
 const MAX_PUT_KEY_BYTES: usize = 256;
@@ -370,12 +374,85 @@ struct PublishSiteResponse {
     error: Option<String>,
 }
 
+/// Returns true if the Origin header (if present) is from a local or
+/// extension source.  Requests with no Origin (CLI, curl) are allowed.
+/// Requests from remote web origins (e.g. https://evil.com) are rejected
+/// to prevent browser-based cross-origin RPC abuse.
+fn is_allowed_rpc_origin(origin: &str) -> bool {
+    if origin.is_empty() {
+        return true;
+    }
+    let lower = origin.to_ascii_lowercase();
+    if lower.starts_with("http://127.0.0.1")
+        || lower.starts_with("http://localhost")
+        || lower.starts_with("http://[::1]")
+        || lower.starts_with("https://127.0.0.1")
+        || lower.starts_with("https://localhost")
+        || lower.starts_with("https://[::1]")
+    {
+        return true;
+    }
+    // Browser extension origins
+    if lower.starts_with("moz-extension://")
+        || lower.starts_with("chrome-extension://")
+        || lower.starts_with("safari-web-extension://")
+    {
+        return true;
+    }
+    // .loom sites served by the local daemon
+    if lower.ends_with(".loom") || lower.contains(".loom:") {
+        return true;
+    }
+    false
+}
+
+static CLAIM_RATE: LazyLock<Mutex<VecDeque<Instant>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static PUBLISH_RATE: LazyLock<Mutex<VecDeque<Instant>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+
+fn check_rate_limit(
+    window: &Mutex<VecDeque<Instant>>,
+    max_per_minute: usize,
+) -> Result<(), String> {
+    let mut times = window.lock().unwrap();
+    let cutoff = Instant::now() - Duration::from_secs(60);
+    while times.front().map_or(false, |t| *t < cutoff) {
+        times.pop_front();
+    }
+    if times.len() >= max_per_minute {
+        return Err("rate limit exceeded, try again later".to_string());
+    }
+    times.push_back(Instant::now());
+    Ok(())
+}
+
 pub async fn start_rpc_server(
     port: u16,
     command_tx: mpsc::Sender<RpcCommand>,
 ) -> Result<ServerHandle> {
     let addr = format!("127.0.0.1:{port}");
-    let server = ServerBuilder::default().build(&addr).await?;
+
+    // Restrict cross-origin access: only allow localhost, browser extensions,
+    // and .loom origins.  Browsers enforce CORS preflight for JSON-RPC POST
+    // requests (Content-Type: application/json), so a malicious page on a
+    // remote origin will be blocked before the request reaches any RPC method.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(
+            |origin: &http::HeaderValue, _: &http::request::Parts| {
+                origin
+                    .to_str()
+                    .map_or(false, is_allowed_rpc_origin)
+            },
+        ))
+        .allow_methods([http::Method::POST])
+        .allow_headers([http::header::CONTENT_TYPE]);
+
+    let middleware = tower::ServiceBuilder::new().layer(cors);
+    let server = ServerBuilder::default()
+        .set_http_middleware(middleware)
+        .build(&addr)
+        .await?;
 
     let mut module = RpcModule::new(command_tx);
 
@@ -463,6 +540,9 @@ pub async fn start_rpc_server(
     })?;
 
     module.register_async_method("publish_site", |params, ctx, _| async move {
+        if let Err(err) = check_rate_limit(&PUBLISH_RATE, 10) {
+            return Err(internal_error(err));
+        }
         let PublishSiteParams { name, site_dir } = params.parse()?;
         let (resp_tx, resp_rx) = oneshot::channel();
 
@@ -553,6 +633,9 @@ pub async fn start_rpc_server(
     })?;
 
     module.register_async_method("claim_name", |params, ctx, _| async move {
+        if let Err(err) = check_rate_limit(&CLAIM_RATE, 5) {
+            return Err(internal_error(err));
+        }
         let ClaimNameParams { name, pubkey_hex } = params.parse()?;
         let (resp_tx, resp_rx) = oneshot::channel();
 

@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NameRecord {
@@ -27,8 +28,8 @@ impl NameRecord {
     }
 
     pub fn sign(&self, name: &str, signing_key: &SigningKey) -> String {
-        let payload = self.signing_payload(name);
-        let sig: Signature = signing_key.sign(payload.as_bytes());
+        let payload = self.canonical_signing_payload(name);
+        let sig: Signature = signing_key.sign(&payload);
         hex::encode(sig.to_bytes())
     }
 
@@ -49,11 +50,30 @@ impl NameRecord {
             return false;
         };
         let sig = Signature::from_bytes(&sig_array);
-        let payload = self.signing_payload(name);
-        verifying_key.verify(payload.as_bytes(), &sig).is_ok()
+
+        // Try canonical JSON payload first, fall back to legacy format for
+        // records signed before the migration.
+        let canonical = self.canonical_signing_payload(name);
+        if verifying_key.verify(&canonical, &sig).is_ok() {
+            return true;
+        }
+        let legacy = self.legacy_signing_payload(name);
+        verifying_key.verify(legacy.as_bytes(), &sig).is_ok()
     }
 
-    fn signing_payload(&self, name: &str) -> String {
+    /// Canonical signing payload using sorted-key JSON via serde_json.
+    fn canonical_signing_payload(&self, name: &str) -> Vec<u8> {
+        let mut map = BTreeMap::new();
+        map.insert("claimed_at", serde_json::Value::from(self.claimed_at));
+        map.insert("heartbeat_at", serde_json::Value::from(self.heartbeat_at));
+        map.insert("key", serde_json::Value::from(self.key.as_str()));
+        map.insert("name", serde_json::Value::from(name));
+        serde_json::to_vec(&map).expect("BTreeMap serialization cannot fail")
+    }
+
+    /// Legacy hand-rolled format for backward compatibility with existing
+    /// records on the network.
+    fn legacy_signing_payload(&self, name: &str) -> String {
         format!(
             r#"{{"claimed_at":{},"heartbeat_at":{},"key":"{}","name":"{}"}}"#,
             self.claimed_at, self.heartbeat_at, self.key, name

@@ -2038,6 +2038,7 @@ dependencies = [
  "directories 5.0.1",
  "ed25519-dalek",
  "hex",
+ "http",
  "infer",
  "jsonrpsee",
  "lattice-core",

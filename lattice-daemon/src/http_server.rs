@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::warn;
 
 use lattice_site::manifest::{verify_manifest, FileEntry, SiteManifest};
@@ -57,7 +57,27 @@ fn build_app(state: AppState) -> Router {
         .route("/", any(serve_site))
         .route("/*path", any(serve_site))
         .with_state(state)
-        .layer(CorsLayer::new().allow_origin(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::predicate(|origin, _| {
+                    let Ok(s) = origin.to_str() else {
+                        return false;
+                    };
+                    let lower = s.to_ascii_lowercase();
+                    lower.starts_with("http://127.0.0.1")
+                        || lower.starts_with("http://localhost")
+                        || lower.starts_with("http://[::1]")
+                        || lower.starts_with("https://127.0.0.1")
+                        || lower.starts_with("https://localhost")
+                        || lower.starts_with("https://[::1]")
+                        || lower.ends_with(".loom")
+                        || lower.contains(".loom:")
+                        || lower.starts_with("moz-extension://")
+                        || lower.starts_with("chrome-extension://")
+                }))
+                .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, header::RANGE, header::ACCEPT]),
+        )
 }
 
 fn build_proxy_client() -> Result<reqwest::Client> {
@@ -786,11 +806,16 @@ fn file_response(
     let content_type = HeaderValue::from_str(mime_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     headers.insert(header::CONTENT_TYPE, content_type);
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        HeaderName::from_static("x-lattice-origin"),
+        HeaderValue::from_static("lattice"),
+    );
 
     let len_header = HeaderValue::from_str(&content_length.to_string())
         .unwrap_or_else(|_| HeaderValue::from_static("0"));
@@ -814,8 +839,8 @@ fn range_not_satisfiable(total_size: u64) -> Response {
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
     headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
     );
     if let Ok(value) = HeaderValue::from_str(&format!("bytes */{total_size}")) {
         headers.insert(header::CONTENT_RANGE, value);

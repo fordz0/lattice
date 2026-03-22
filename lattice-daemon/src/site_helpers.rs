@@ -316,7 +316,7 @@ pub fn parse_verified_name_record(name: &str, value: &str) -> Option<NameRecord>
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    if record.heartbeat_at > now.saturating_add(300) {
+    if record.heartbeat_at > now.saturating_add(30) {
         return None;
     }
     Some(record)

@@ -96,6 +96,47 @@ struct SignedRequestPayload<'a> {
     body: Value,
 }
 
+/// Returns true if the Origin (if present) is acceptable for state-changing
+/// requests.  Absent origins (CLI, non-browser) are allowed.  Only .loom
+/// origins, localhost, and extension origins pass.
+fn is_allowed_origin(origin: &str) -> bool {
+    if origin.is_empty() {
+        return true;
+    }
+    let lower = origin.to_ascii_lowercase();
+    lower.starts_with("http://127.0.0.1")
+        || lower.starts_with("http://localhost")
+        || lower.starts_with("http://[::1]")
+        || lower.starts_with("https://127.0.0.1")
+        || lower.starts_with("https://localhost")
+        || lower.starts_with("https://[::1]")
+        || lower.ends_with(".loom")
+        || lower.contains(".loom:")
+        || lower.starts_with("moz-extension://")
+        || lower.starts_with("chrome-extension://")
+}
+
+/// Axum middleware that rejects POST/DELETE requests from disallowed origins.
+async fn origin_guard(
+    headers: HeaderMap,
+    method: Method,
+    request: AxumRequest,
+    next: axum::middleware::Next,
+) -> Response {
+    if method == Method::POST || method == Method::DELETE {
+        if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+            if !is_allowed_origin(origin) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "forbidden origin" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
+
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(ui_index))
@@ -166,6 +207,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/f/{fray}/sync/publish", post(publish_fray))
         .route("/api/f/{fray}/sync/pull", post(pull_fray))
+        .layer(axum::middleware::from_fn(origin_guard))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .with_state(state)
 }
