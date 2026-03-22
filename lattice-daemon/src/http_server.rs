@@ -614,63 +614,78 @@ fn slice_file_range(bytes: &[u8], range: ByteRange) -> std::result::Result<Body,
     Ok(Body::from(Bytes::copy_from_slice(&bytes[start..=end])))
 }
 
+const BLOCK_FETCH_RETRIES: u32 = 2;
+const BLOCK_FETCH_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 async fn fetch_block_bytes(
     rpc_tx: &mpsc::Sender<RpcCommand>,
     site_name: &str,
     block_hash: &str,
 ) -> std::result::Result<Vec<u8>, Response> {
     HTTP_BLOCK_FETCH_TOTAL.fetch_add(1, Ordering::Relaxed);
-    let (resp_tx, resp_rx) = oneshot::channel();
-    let send_result = timeout(
-        RPC_SEND_TIMEOUT,
-        rpc_tx.send(RpcCommand::GetBlock {
-            hash: block_hash.to_string(),
-            site_key: Some(format!("site:{site_name}")),
-            respond_to: resp_tx,
-        }),
-    )
-    .await;
 
-    match send_result {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => {
-            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error"));
+    for attempt in 0..=BLOCK_FETCH_RETRIES {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let send_result = timeout(
+            RPC_SEND_TIMEOUT,
+            rpc_tx.send(RpcCommand::GetBlock {
+                hash: block_hash.to_string(),
+                site_key: Some(format!("site:{site_name}")),
+                respond_to: resp_tx,
+            }),
+        )
+        .await;
+
+        match send_result {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error"));
+            }
+            Err(_) => {
+                HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"));
+            }
         }
-        Err(_) => {
-            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"));
+
+        match timeout(RPC_RESPONSE_TIMEOUT, resp_rx).await {
+            Err(_) => {
+                HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"));
+            }
+            Ok(Ok(Some(encoded))) => {
+                let stored_bytes = match hex::decode(encoded.trim()) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        return Err(plain(StatusCode::BAD_GATEWAY, "invalid block encoding"));
+                    }
+                };
+                return Ok(stored_bytes);
+            }
+            Ok(Ok(None)) => {
+                if attempt < BLOCK_FETCH_RETRIES {
+                    tokio::time::sleep(BLOCK_FETCH_RETRY_DELAY).await;
+                    continue;
+                }
+                HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                return Err(plain_owned(
+                    StatusCode::NOT_FOUND,
+                    format!("block missing: {block_hash}"),
+                ));
+            }
+            Ok(Err(_)) => {
+                HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error"));
+            }
         }
     }
 
-    let encoded = match timeout(RPC_RESPONSE_TIMEOUT, resp_rx).await {
-        Err(_) => {
-            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(plain(StatusCode::GATEWAY_TIMEOUT, "lattice daemon timeout"));
-        }
-        Ok(Ok(Some(encoded))) => encoded,
-        Ok(Ok(None)) => {
-            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(plain_owned(
-                StatusCode::NOT_FOUND,
-                format!("block missing: {block_hash}"),
-            ));
-        }
-        Ok(Err(_)) => {
-            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(plain(StatusCode::BAD_GATEWAY, "lattice daemon error"));
-        }
-    };
-
-    let stored_bytes = match hex::decode(encoded.trim()) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return Err(plain(StatusCode::BAD_GATEWAY, "invalid block encoding"));
-        }
-    };
-
-    Ok(stored_bytes)
+    HTTP_BLOCK_FETCH_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    Err(plain_owned(
+        StatusCode::NOT_FOUND,
+        format!("block missing: {block_hash}"),
+    ))
 }
 
 fn file_block_hashes(file: &FileEntry) -> Vec<String> {

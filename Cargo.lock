@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "lattice"
-version = "0.1.10"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-daemon"
-version = "0.1.10"
+version = "0.1.12"
 dependencies = [
  "aes-gcm",
  "anyhow",
