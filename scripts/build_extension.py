@@ -28,6 +28,24 @@ def build_manifest(target: str) -> dict:
         manifest["background"] = {
             "service_worker": "background.js",
         }
+        # Chrome MV3 does not support webRequestBlocking; replace with
+        # declarativeNetRequest for the HTTP→HTTPS .loom redirect.
+        perms = manifest.get("permissions", [])
+        for removed in ("webRequest", "webRequestBlocking"):
+            if removed in perms:
+                perms.remove(removed)
+        if "declarativeNetRequest" not in perms:
+            perms.append("declarativeNetRequest")
+        manifest["permissions"] = perms
+        manifest["declarative_net_request"] = {
+            "rule_resources": [
+                {
+                    "id": "loom_https_upgrade",
+                    "enabled": True,
+                    "path": "declarative_net_request_rules.json",
+                }
+            ]
+        }
     return manifest
 
 

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix
   xmlns="http://wixtoolset.org/schemas/v4/wxs"
-  xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+  xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
   <Package
     Name="Lattice"
     Manufacturer="benjf"
@@ -16,6 +17,7 @@
     <Property Id="ARPHELPLINK" Value="https://lattice.benjf.dev/getting-started" />
     <Property Id="ARPREADME" Value="https://github.com/fordz0/lattice" />
     <Property Id="ARPCONTACT" Value="https://github.com/fordz0/lattice/issues" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)assets\License.rtf" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -31,6 +33,22 @@
         </Component>
         <Component Id="LatticeDaemonExeComponent" Guid="*">
           <File Id="LatticeDaemonExe" Name="lattice-daemon.exe" Source="$(var.SourceDir)\lattice-daemon.exe" KeyPath="yes" />
+          <fw:FirewallException
+            Id="LatticeDaemonTcpIn"
+            Name="Lattice Daemon (TCP)"
+            Description="Allow inbound TCP connections for Lattice peer-to-peer networking"
+            Protocol="tcp"
+            Port="7779"
+            Scope="any"
+            Profile="all" />
+          <fw:FirewallException
+            Id="LatticeDaemonUdpIn"
+            Name="Lattice Daemon (UDP/QUIC)"
+            Description="Allow inbound UDP connections for Lattice QUIC transport and mDNS discovery"
+            Protocol="udp"
+            Port="7779"
+            Scope="any"
+            Profile="all" />
           <ServiceInstall
             Id="LatticeDaemonServiceInstall"
             Name="lattice-daemon"

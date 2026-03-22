@@ -51,25 +51,29 @@ if (Test-Path $localExtensionRoot) {
     Remove-Item -Recurse -Force $localExtensionRoot
 }
 
-$uiExtensionList = ""
+$requiredExtensions = @("WixToolset.UI.wixext", "WixToolset.Firewall.wixext")
+$extensionList = ""
 try {
-    $uiExtensionList = Invoke-Wix -Arguments @('extension', 'list', '-g')
+    $extensionList = Invoke-Wix -Arguments @('extension', 'list', '-g')
 } catch {
-    $uiExtensionList = ""
+    $extensionList = ""
 }
 
-if ($uiExtensionList -notmatch "WixToolset\.UI\.wixext/$([regex]::Escape($wixPackageVersion))") {
-    try {
-        Invoke-Wix -Arguments @('extension', 'remove', '-g', 'WixToolset.UI.wixext') | Out-Null
-    } catch {
+foreach ($ext in $requiredExtensions) {
+    if ($extensionList -notmatch "$([regex]::Escape($ext))/$([regex]::Escape($wixPackageVersion))") {
+        try {
+            Invoke-Wix -Arguments @('extension', 'remove', '-g', $ext) | Out-Null
+        } catch {
+        }
+        Invoke-Wix -Arguments @('extension', 'add', '-g', "$ext/$wixPackageVersion") | Out-Null
     }
-    Invoke-Wix -Arguments @('extension', 'add', '-g', "WixToolset.UI.wixext/$wixPackageVersion") | Out-Null
 }
 
 Invoke-Wix -Arguments @(
     'build',
     '-arch', 'x64',
     '-ext', "WixToolset.UI.wixext/$wixPackageVersion",
+    '-ext', "WixToolset.Firewall.wixext/$wixPackageVersion",
     '-d', "SourceDir=$resolvedSource",
     '-d', "Version=$Version",
     $wxsPath,

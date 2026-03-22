@@ -23,7 +23,7 @@ where
         .with_quic()
         .with_relay_client(noise::Config::new, yamux::Config::default)?
         .with_behaviour(|key, relay_client| behaviour_builder(key, relay_client))?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
         .build();
 
     Ok(swarm)

@@ -20,6 +20,17 @@ class BuildExtensionTests(unittest.TestCase):
                 self.assertNotIn("browser_specific_settings", manifest)
                 self.assertEqual(manifest["manifest_version"], 3)
                 self.assertEqual(manifest["background"], {"service_worker": "background.js"})
+                # Chrome MV3 must use declarativeNetRequest, not webRequestBlocking
+                perms = manifest["permissions"]
+                self.assertNotIn("webRequestBlocking", perms)
+                self.assertNotIn("webRequest", perms)
+                self.assertIn("declarativeNetRequest", perms)
+                self.assertIn("declarative_net_request", manifest)
+                rules = manifest["declarative_net_request"]["rule_resources"]
+                self.assertEqual(len(rules), 1)
+                self.assertEqual(rules[0]["id"], "loom_https_upgrade")
+                # Verify the rules file is included in the archive
+                self.assertIn("declarative_net_request_rules.json", archive.namelist())
 
     def test_firefox_build_keeps_gecko_settings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

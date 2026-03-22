@@ -464,28 +464,35 @@ browserApi.runtime.onMessage.addListener(function(message, sender) {
   return undefined;
 });
 
-// Upgrade plain HTTP .loom navigation to HTTPS while keeping the .loom hostname in the URL bar.
-if (typeof browserApi.webRequest !== 'undefined') {
-  browserApi.webRequest.onBeforeRequest.addListener(
-    function(requestInfo) {
-      try {
-        var url = new URL(requestInfo.url);
-        if (url.protocol === 'http:' && isLoomHost(url.hostname)) {
-          url.protocol = 'https:';
-          return { redirectUrl: url.toString() };
+// Upgrade plain HTTP .loom navigation to HTTPS while keeping the .loom hostname
+// in the URL bar.  Firefox supports blocking webRequest; Chromium MV3 uses
+// declarativeNetRequest rules (declarative_net_request_rules.json) instead.
+if (typeof browserApi.webRequest !== 'undefined' && browserApi.webRequest.onBeforeRequest) {
+  try {
+    browserApi.webRequest.onBeforeRequest.addListener(
+      function(requestInfo) {
+        try {
+          var url = new URL(requestInfo.url);
+          if (url.protocol === 'http:' && isLoomHost(url.hostname)) {
+            url.protocol = 'https:';
+            return { redirectUrl: url.toString() };
+          }
+        } catch (_e) {
+          // Ignore parse errors and continue.
         }
-      } catch (_e) {
-        // Ignore parse errors and continue.
-      }
 
-      return {};
-    },
-    {
-      urls: ['http://*.loom/*', 'https://*.loom/*'],
-      types: ['main_frame', 'sub_frame']
-    },
-    ['blocking']
-  );
+        return {};
+      },
+      {
+        urls: ['http://*.loom/*', 'https://*.loom/*'],
+        types: ['main_frame', 'sub_frame']
+      },
+      ['blocking']
+    );
+  } catch (_e) {
+    // Chromium MV3 does not support blocking webRequest; the redirect is
+    // handled by declarativeNetRequest rules bundled in the extension.
+  }
 }
 
 // Route all .loom HTTP(S) requests through the local Lattice proxy.
