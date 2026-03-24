@@ -37,7 +37,7 @@ use lattice_daemon::store::{unix_ts, LocalRecordStore};
 
 use crate::fetch::{
     self, handle_block_fetch_event, handle_get_providers_result, BlockConsumer, GetSiteQuery,
-    GetSiteTask, PendingBlockRequest, PendingProviderQuery,
+    GetSiteTask, PendingBlockRequest, PendingProviderQuery, SiteProviderCache,
 };
 use crate::{
     LatticeBehaviour, GET_RECORD_MAX_ATTEMPTS, MAX_CONCURRENT_GET_SITE, MAX_CONCURRENT_PUBLISH,
@@ -277,6 +277,7 @@ fn handle_get_site_query_result(
     moderation_engine: &ModerationEngine,
     local_record_store: &LocalRecordStore,
     session_block_cache: &mut SessionBlockCache,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     match query {
         GetSiteQuery::Manifest { task_id } => {
@@ -465,6 +466,7 @@ fn handle_get_site_query_result(
                 moderation_engine,
                 local_record_store,
                 session_block_cache,
+                site_provider_cache,
             );
         }
     }
@@ -498,6 +500,7 @@ pub fn handle_rpc_command(
     >,
     owned_names: &Arc<Mutex<HashSet<String>>>,
     app_registry: &AppRegistry,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     match cmd {
         RpcCommand::NodeInfo { respond_to } => {
@@ -767,6 +770,7 @@ pub fn handle_rpc_command(
                     hash,
                     site_key,
                     consumer,
+                    site_provider_cache,
                 );
             } else if let Some(value) = session_block_cache
                 .get(&hash)
@@ -1262,6 +1266,7 @@ pub fn handle_swarm_event(
     mime_policy_strict: bool,
     local_record_store: &LocalRecordStore,
     local_records: &mut HashMap<String, Vec<u8>>,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     match event {
         libp2p::swarm::SwarmEvent::ConnectionEstablished {
@@ -2000,6 +2005,7 @@ pub fn handle_swarm_event(
                         moderation_engine,
                         local_record_store,
                         session_block_cache,
+                        site_provider_cache,
                     );
                 }
             }
@@ -2011,6 +2017,7 @@ pub fn handle_swarm_event(
                     pending_provider_queries,
                     pending_block_requests,
                     get_site_tasks,
+                    site_provider_cache,
                 );
             }
             kad::QueryResult::StartProviding(result) => match result {
@@ -2033,6 +2040,7 @@ pub fn handle_swarm_event(
                 moderation_engine,
                 local_record_store,
                 session_block_cache,
+                site_provider_cache,
             );
         }
         libp2p::swarm::SwarmEvent::Behaviour(crate::LatticeBehaviourEvent::Identify(

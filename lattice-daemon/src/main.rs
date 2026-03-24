@@ -447,6 +447,7 @@ async fn run_daemon(
     let mut pending_provider_queries: HashMap<kad::QueryId, PendingProviderQuery> = HashMap::new();
     let mut pending_block_requests: HashMap<block_fetch::OutboundRequestId, PendingBlockRequest> =
         HashMap::new();
+    let mut site_provider_cache = fetch::SiteProviderCache::new();
 
     // Re-bootstrap Kademlia periodically so the routing table stays populated.
     // The early boot fires after 30s (giving initial connections time to
@@ -487,6 +488,7 @@ async fn run_daemon(
                         &mut pending_block_requests,
                         &owned_names,
                         &app_registry,
+                        &mut site_provider_cache,
                     );
                 }
             }
@@ -530,6 +532,7 @@ async fn run_daemon(
                     mime_policy_strict,
                     &local_record_store,
                     &mut local_records,
+                    &mut site_provider_cache,
                 );
             }
         }

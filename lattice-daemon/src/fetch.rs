@@ -63,6 +63,35 @@ pub struct PendingProviderQuery {
     pub consumer: BlockConsumer,
 }
 
+/// Caches recently discovered providers for each site so that subsequent
+/// block lookups skip the expensive DHT `get_providers` round-trip.
+pub struct SiteProviderCache {
+    entries: HashMap<String, (Vec<libp2p::PeerId>, std::time::Instant)>,
+}
+
+impl SiteProviderCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Return cached providers if present and younger than 60 seconds.
+    pub fn get(&self, site_key: &str) -> Option<&[libp2p::PeerId]> {
+        self.entries.get(site_key).and_then(|(peers, ts)| {
+            if ts.elapsed() < std::time::Duration::from_secs(60) && !peers.is_empty() {
+                Some(peers.as_slice())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn insert(&mut self, site_key: String, peers: Vec<libp2p::PeerId>) {
+        self.entries.insert(site_key, (peers, std::time::Instant::now()));
+    }
+}
+
 pub struct PendingBlockRequest {
     pub site_key: String,
     pub site_name: String,
@@ -117,6 +146,7 @@ pub fn start_block_lookup(
     hash: String,
     site_key: String,
     consumer: BlockConsumer,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     if let Some(site_name) = site_name_from_site_key(&site_key) {
         if let Some(rule) = hide_block_rule(moderation_engine, site_name, &hash) {
@@ -147,6 +177,7 @@ pub fn start_block_lookup(
             pending_block_requests,
             moderation_engine,
             swarm,
+            site_provider_cache,
         );
         return;
     }
@@ -165,6 +196,7 @@ pub fn start_block_lookup(
             pending_block_requests,
             moderation_engine,
             swarm,
+            site_provider_cache,
         );
         return;
     }
@@ -177,6 +209,35 @@ pub fn start_block_lookup(
         );
         return;
     };
+
+    // Use cached providers if available to skip the expensive DHT query.
+    if let Some(cached_peers) = site_provider_cache.get(&site_key) {
+        let mut remaining_peers: Vec<_> = cached_peers
+            .iter()
+            .filter(|peer| *peer != swarm.local_peer_id())
+            .cloned()
+            .collect();
+        if let Some(peer) = remaining_peers.pop() {
+            let request_id = swarm.behaviour_mut().block_fetch.send_request(
+                &peer,
+                BlockFetchRequest {
+                    block_hash: hash.clone(),
+                    site_key: site_key.clone(),
+                },
+            );
+            pending_block_requests.insert(
+                request_id,
+                PendingBlockRequest {
+                    site_key,
+                    site_name,
+                    hash,
+                    remaining_peers,
+                    consumer,
+                },
+            );
+            return;
+        }
+    }
 
     let query_id =
         lattice_daemon::dht::get_providers(&mut swarm.behaviour_mut().kademlia, site_key.clone());
@@ -198,6 +259,7 @@ pub fn handle_get_providers_result(
     pending_provider_queries: &mut HashMap<kad::QueryId, PendingProviderQuery>,
     pending_block_requests: &mut HashMap<block_fetch::OutboundRequestId, PendingBlockRequest>,
     get_site_tasks: &mut HashMap<u64, GetSiteTask>,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     let Some(pending) = pending_provider_queries.remove(&id) else {
         return;
@@ -209,6 +271,8 @@ pub fn handle_get_providers_result(
                 .into_iter()
                 .filter(|peer| peer != swarm.local_peer_id())
                 .collect::<Vec<_>>();
+            // Cache providers so subsequent blocks skip the DHT round-trip.
+            site_provider_cache.insert(pending.site_key.clone(), remaining_peers.clone());
             if let Some(peer) = remaining_peers.pop() {
                 let request_id = swarm.behaviour_mut().block_fetch.send_request(
                     &peer,
@@ -274,6 +338,7 @@ pub fn handle_resolved_block(
     pending_block_requests: &mut HashMap<block_fetch::OutboundRequestId, PendingBlockRequest>,
     moderation_engine: &ModerationEngine,
     swarm: &mut Swarm<LatticeBehaviour>,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     match consumer {
         BlockConsumer::Rpc { respond_to } => {
@@ -292,6 +357,7 @@ pub fn handle_resolved_block(
                 session_block_cache,
                 moderation_engine,
                 local_record_store,
+                site_provider_cache,
             );
         }
     }
@@ -307,6 +373,7 @@ pub fn handle_block_fetch_event(
     moderation_engine: &ModerationEngine,
     local_record_store: &LocalRecordStore,
     session_block_cache: &mut SessionBlockCache,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     match event {
         request_response::Event::Message { message, .. } => match message {
@@ -491,6 +558,7 @@ pub fn handle_block_fetch_event(
                         pending_block_requests,
                         moderation_engine,
                         swarm,
+                        site_provider_cache,
                     );
                 } else if let Some(pending) =
                     try_next_block_provider(swarm, pending_block_requests, pending)
@@ -533,6 +601,7 @@ pub fn drive_get_site_task(
     moderation_engine: &ModerationEngine,
     local_record_store: &LocalRecordStore,
     session_block_cache: &mut SessionBlockCache,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     loop {
         let next_block_hash = match next_task_block_hash(&mut task) {
@@ -591,6 +660,7 @@ pub fn drive_get_site_task(
                         next_block_hash,
                         site_key,
                         BlockConsumer::SiteTask { task_id },
+                        site_provider_cache,
                     );
                     return;
                 }
@@ -616,6 +686,7 @@ pub fn handle_site_task_block_bytes(
     session_block_cache: &mut SessionBlockCache,
     moderation_engine: &ModerationEngine,
     local_record_store: &LocalRecordStore,
+    site_provider_cache: &mut SiteProviderCache,
 ) {
     let Some(mut task) = get_site_tasks.remove(&task_id) else {
         return;
@@ -636,6 +707,7 @@ pub fn handle_site_task_block_bytes(
         moderation_engine,
         local_record_store,
         session_block_cache,
+        site_provider_cache,
     );
 }
 
