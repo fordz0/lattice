@@ -44,9 +44,17 @@
           <fw:FirewallException
             Id="LatticeDaemonUdpIn"
             Name="Lattice Daemon (UDP/QUIC)"
-            Description="Allow inbound UDP connections for Lattice QUIC transport and mDNS discovery"
+            Description="Allow inbound UDP connections for Lattice QUIC transport"
             Protocol="udp"
             Port="7779"
+            Scope="any"
+            Profile="all" />
+          <fw:FirewallException
+            Id="LatticeDaemonMdns"
+            Name="Lattice Daemon (mDNS)"
+            Description="Allow mDNS for local peer discovery"
+            Protocol="udp"
+            Port="5353"
             Scope="any"
             Profile="all" />
           <ServiceInstall
