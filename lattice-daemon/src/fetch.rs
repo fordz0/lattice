@@ -616,6 +616,14 @@ pub fn drive_get_site_task(
                         return;
                     }
                 };
+                // Announce ourselves as a provider so other nodes can
+                // fetch these blocks from us even if the original
+                // publisher goes offline.
+                let site_key = site_manifest_key(&task.requested_name);
+                let _ = lattice_daemon::dht::start_providing(
+                    &mut swarm.behaviour_mut().kademlia,
+                    site_key,
+                );
                 let response = GetSiteResponse {
                     name: manifest.name.clone(),
                     version: manifest.version,
