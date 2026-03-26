@@ -1,4 +1,9 @@
 (function() {
+  var browser = (typeof globalThis.browser !== 'undefined')
+    ? globalThis.browser
+    : (typeof chrome !== 'undefined' ? chrome : null);
+  if (!browser || !browser.runtime) { return; }
+
   var overlayExpanded = null;
   var currentState = null;
 
