@@ -2,6 +2,7 @@ use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use lattice_core::moderation::{ModerationEngine, ModerationRule, RuleAction};
 use lattice_daemon::app_registry::{AppRegistry, LocalAppRegistration};
+use libp2p::kad::store::RecordStore;
 use libp2p::{autonat, identify, kad, mdns, relay, Swarm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -925,30 +926,39 @@ pub fn handle_rpc_command(
                 return;
             }
             let result = (|| -> Result<(), String> {
-                if pin {
-                    let manifest_json =
-                        cached_manifest_json(&mut swarm.behaviour_mut().kademlia, &name)
-                            .ok_or_else(|| "no cached site manifest found for site".to_string())?;
-                    let count = pin_cached_site_blocks(
-                        local_record_store,
-                        session_block_cache,
-                        &name,
-                        &manifest_json,
-                    )
-                    .map_err(|err| err.to_string())?;
-                    if count == 0 {
-                        return Err("no cached blocks found for site".to_string());
-                    }
-                    start_providing_site(
-                        &mut swarm.behaviour_mut().kademlia,
-                        moderation_engine,
-                        &name,
-                    )
-                    .map_err(|err| err.to_string())?;
-                }
                 local_record_store
                     .set_explicitly_trusted(&name, true)
                     .map_err(|err| err.to_string())?;
+                if pin {
+                    if let Some(manifest_json) =
+                        cached_manifest_json(&mut swarm.behaviour_mut().kademlia, &name)
+                    {
+                        match pin_cached_site_blocks(
+                            local_record_store,
+                            session_block_cache,
+                            &name,
+                            &manifest_json,
+                        ) {
+                            Ok(count) if count > 0 => {
+                                if let Err(err) = start_providing_site(
+                                    &mut swarm.behaviour_mut().kademlia,
+                                    moderation_engine,
+                                    &name,
+                                ) {
+                                    warn!(site = %name, error = %err, "trusted site but failed to start providing");
+                                }
+                            }
+                            Ok(_) => {
+                                warn!(site = %name, "trusted site but no blocks available to pin");
+                            }
+                            Err(err) => {
+                                warn!(site = %name, error = %err, "trusted site but failed to pin blocks");
+                            }
+                        }
+                    } else {
+                        warn!(site = %name, "trusted site but no cached manifest for pinning");
+                    }
+                }
                 Ok(())
             })();
             let _ = respond_to.send(result);
@@ -1230,6 +1240,44 @@ pub fn handle_rpc_command(
                     .map(|_| ())
                     {
                         warn!(key = %key, error = %err, "failed to start republish put_record");
+                    }
+                }
+            }
+        }
+        RpcCommand::RefreshStoredNameRecords => {
+            let mut name_records: Vec<(String, Vec<u8>)> = Vec::new();
+            for cow in swarm.behaviour_mut().kademlia.store_mut().records() {
+                let record = cow.as_ref();
+                let Some(key_str) = std::str::from_utf8(record.key.as_ref()).ok() else {
+                    continue;
+                };
+                let Some(name) = key_str.strip_prefix("name:") else {
+                    continue;
+                };
+                let Some(value_str) = std::str::from_utf8(&record.value).ok() else {
+                    continue;
+                };
+                if let Some(name_record) = parse_verified_name_record(name, value_str) {
+                    if !name_record.is_expired() {
+                        name_records.push((key_str.to_string(), record.value.clone()));
+                    }
+                }
+            }
+            if !name_records.is_empty() {
+                info!(
+                    count = name_records.len(),
+                    "refreshing stored name records on DHT"
+                );
+                for (key, value) in name_records {
+                    if let Err(err) = maybe_put_record(
+                        &mut swarm.behaviour_mut().kademlia,
+                        moderation_engine,
+                        key.clone(),
+                        value,
+                    )
+                    .map(|_| ())
+                    {
+                        warn!(key = %key, error = %err, "failed to refresh name record");
                     }
                 }
             }
