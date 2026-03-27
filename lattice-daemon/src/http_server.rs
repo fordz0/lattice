@@ -831,6 +831,10 @@ fn file_response(
         HeaderName::from_static("x-lattice-origin"),
         HeaderValue::from_static("lattice"),
     );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control_for_mime(mime_type)),
+    );
 
     let len_header = HeaderValue::from_str(&content_length.to_string())
         .unwrap_or_else(|_| HeaderValue::from_static("0"));
@@ -845,6 +849,17 @@ fn file_response(
     } else {
         (StatusCode::OK, headers, body).into_response()
     }
+}
+
+fn cache_control_for_mime(mime_type: &str) -> &'static str {
+    if mime_type.starts_with("text/html") || mime_type.starts_with("application/json") {
+        // Keep dynamic shells/data fresh while still allowing explicit reload semantics.
+        return "no-cache, no-store, must-revalidate";
+    }
+    if mime_type.starts_with("text/") {
+        return "no-cache";
+    }
+    "public, max-age=300"
 }
 
 fn range_not_satisfiable(total_size: u64) -> Response {

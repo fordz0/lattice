@@ -363,6 +363,9 @@ function applyTrustChange(siteName, trust, pinOrUnpin) {
     : { name: siteName, unpin: !!pinOrUnpin };
 
   return rpcRequest(method, params).then(function(result) {
+    if (result && result.status === 'err') {
+      throw new Error(result.error || 'trust update failed');
+    }
     return getSiteState(siteName).then(function(state) {
       return broadcastSiteState(siteName, state).then(function() {
         return refreshActiveTabUI().then(function() {

@@ -355,3 +355,21 @@ test('browser action click re-shows the inline overlay for loom tabs', async () 
   assert.equal(sent[0].payload.siteName, 'lattice');
   assert.equal(sent[0].payload.state.overlayHidden, false);
 });
+
+test('trustSite rejects when daemon returns status err', async () => {
+  const { listeners } = loadBackgroundWithFetch(function(_url, options) {
+    const request = JSON.parse(options.body);
+    if (request.method === 'trust_site') {
+      return Promise.resolve(okJson({ status: 'err', error: 'no cached blocks found for site' }));
+    }
+    return Promise.resolve(okJson(null));
+  });
+
+  await assert.rejects(
+    listeners.message(
+      { type: 'trustSite', siteName: 'lattice', pin: true },
+      { url: 'https://lattice.loom/', tab: { id: 7, url: 'https://lattice.loom/' } },
+    ),
+    /no cached blocks found for site/,
+  );
+});

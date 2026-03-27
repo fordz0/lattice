@@ -263,11 +263,18 @@
       compactButton.style.background = palette.tone;
       compactButton.addEventListener('click', function() {
         compactButton.disabled = true;
+        var label = compactButton.textContent;
+        compactButton.textContent = 'Updating\u2026';
         browser.runtime.sendMessage({
           type: 'trustSite',
           siteName: siteName,
           pin: true
+        }).then(function(result) {
+          if (result && result.status === 'err') {
+            throw new Error(result.error || 'trust update failed');
+          }
         }).catch(function() {
+          compactButton.textContent = label;
           compactButton.disabled = false;
         });
       });
@@ -313,11 +320,18 @@
       button.style.background = palette.tone;
       button.addEventListener('click', function() {
         button.disabled = true;
+        var label = button.textContent;
+        button.textContent = 'Updating\u2026';
         browser.runtime.sendMessage(
           explicitlyTrusted
             ? { type: 'untrustSite', siteName: siteName, unpin: false }
             : { type: 'trustSite', siteName: siteName, pin: true }
-        ).catch(function() {
+        ).then(function(result) {
+          if (result && result.status === 'err') {
+            throw new Error(result.error || 'trust update failed');
+          }
+        }).catch(function() {
+          button.textContent = label;
           button.disabled = false;
         });
       });

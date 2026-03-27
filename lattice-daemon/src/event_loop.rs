@@ -51,7 +51,9 @@ pub struct PendingTextQuery {
 }
 
 pub struct PendingManifestQuery {
+    pub name: String,
     pub key: String,
+    pub fallback_manifest_json: Option<String>,
     pub attempts: u8,
     pub respond_to: oneshot::Sender<Option<GetSiteManifestResponse>>,
 }
@@ -133,6 +135,44 @@ fn publish_name_ownership(
         Err(kad::GetRecordError::NotFound { .. }) => Ok(PublishNameOwnership::Unclaimed),
         Err(err) => Err(format!("failed to resolve name ownership: {err}")),
     }
+}
+
+fn build_site_manifest_response(
+    local_record_store: &LocalRecordStore,
+    moderation_engine: &ModerationEngine,
+    key: &str,
+    site_name: &str,
+    manifest_json: String,
+) -> Option<GetSiteManifestResponse> {
+    let publisher_b64 = site_manifest_publisher_b64(&manifest_json);
+    if let Some(rule) = site_manifest_suppression_rule(
+        moderation_engine,
+        key,
+        publisher_b64.as_deref(),
+    ) {
+        warn!(
+            rule_id = %rule.id,
+            matched_publisher = ?publisher_b64,
+            site = %site_name,
+            action = %action_name(&rule.action),
+            "site manifest suppressed by publisher moderation rule"
+        );
+        return None;
+    }
+
+    let trust = site_manifest_trust_state(local_record_store, site_name, &manifest_json)
+        .unwrap_or(TrustState {
+            status: "first_seen".to_string(),
+            explicitly_trusted: false,
+            first_seen_at: None,
+            previous_key: None,
+        });
+    let pinned = local_record_store.is_site_pinned(site_name).unwrap_or(false);
+    Some(GetSiteManifestResponse {
+        manifest_json,
+        trust,
+        pinned,
+    })
 }
 
 fn current_dht_site_version(
@@ -683,49 +723,15 @@ pub fn handle_rpc_command(
                 let _ = respond_to.send(None);
                 return;
             }
-            if let Some(value) = lattice_daemon::site_helpers::local_record_value(
-                &mut swarm.behaviour_mut().kademlia,
-                &key,
-            )
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            {
-                let publisher_b64 = site_manifest_publisher_b64(&value);
-                if let Some(rule) = site_manifest_suppression_rule(
-                    moderation_engine,
-                    &key,
-                    publisher_b64.as_deref(),
-                ) {
-                    warn!(
-                        rule_id = %rule.id,
-                        matched_publisher = ?publisher_b64,
-                        site = %name,
-                        action = %action_name(&rule.action),
-                        "site manifest suppressed by publisher moderation rule"
-                    );
-                    let _ = respond_to.send(None);
-                    return;
-                }
-                let trust = site_manifest_trust_state(local_record_store, &name, &value).unwrap_or(
-                    TrustState {
-                        status: "first_seen".to_string(),
-                        explicitly_trusted: false,
-                        first_seen_at: None,
-                        previous_key: None,
-                    },
-                );
-                let pinned = local_record_store.is_site_pinned(&name).unwrap_or(false);
-                let _ = respond_to.send(Some(GetSiteManifestResponse {
-                    manifest_json: value,
-                    trust,
-                    pinned,
-                }));
-                return;
-            }
+            let fallback_manifest_json =
+                cached_manifest_json(&mut swarm.behaviour_mut().kademlia, &name);
             let query_id = dht::get_record(&mut swarm.behaviour_mut().kademlia, key.clone());
             pending_get_manifest.insert(
                 query_id,
                 PendingManifestQuery {
+                    name,
                     key,
+                    fallback_manifest_json,
                     attempts: 1,
                     respond_to,
                 },
@@ -1635,41 +1641,26 @@ pub fn handle_swarm_event(
                                 let _ = pending.respond_to.send(None);
                                 return;
                             }
-                            let value = String::from_utf8(record.record.value).ok();
-                            let response = value.and_then(|manifest_json| {
-                                let site_name =
-                                    pending.key.strip_prefix("site:").unwrap_or_default().to_string();
-                                let publisher_b64 = site_manifest_publisher_b64(&manifest_json);
-                                if let Some(rule) = site_manifest_suppression_rule(
-                                    moderation_engine,
-                                    &pending.key,
-                                    publisher_b64.as_deref(),
-                                ) {
-                                    warn!(
-                                        rule_id = %rule.id,
-                                        matched_publisher = ?publisher_b64,
-                                        site = %site_name,
-                                        action = %action_name(&rule.action),
-                                        "remote site manifest suppressed by publisher moderation rule"
+                            let response = String::from_utf8(record.record.value)
+                                .ok()
+                                .and_then(|manifest_json| {
+                                    let resp = build_site_manifest_response(
+                                        local_record_store,
+                                        moderation_engine,
+                                        &pending.key,
+                                        &pending.name,
+                                        manifest_json.clone(),
                                     );
-                                    return None;
-                                }
-                                let trust = site_manifest_trust_state(
-                                    local_record_store,
-                                    &site_name,
-                                    &manifest_json,
-                                )
-                                .unwrap_or(TrustState {
-                                    status: "first_seen".to_string(),
-                                    explicitly_trusted: false,
-                                    first_seen_at: None,
-                                    previous_key: None,
+                                    if resp.is_some() {
+                                        remember_local_record(
+                                            local_record_store,
+                                            local_records,
+                                            pending.key.clone(),
+                                            manifest_json.into_bytes(),
+                                        );
+                                    }
+                                    resp
                                 });
-                                let pinned = local_record_store
-                                    .is_site_pinned(&site_name)
-                                    .unwrap_or(false);
-                                Some(GetSiteManifestResponse { manifest_json, trust, pinned })
-                            });
                             let _ = pending.respond_to.send(response);
                         }
                         Ok(_) => {
@@ -1681,7 +1672,18 @@ pub fn handle_swarm_event(
                                 );
                                 pending_get_manifest.insert(query_id, pending);
                             } else {
-                                let _ = pending.respond_to.send(None);
+                                let response = pending.fallback_manifest_json.and_then(
+                                    |manifest_json| {
+                                        build_site_manifest_response(
+                                            local_record_store,
+                                            moderation_engine,
+                                            &pending.key,
+                                            &pending.name,
+                                            manifest_json,
+                                        )
+                                    },
+                                );
+                                let _ = pending.respond_to.send(response);
                             }
                         }
                         Err(err) => {
@@ -1700,7 +1702,18 @@ pub fn handle_swarm_event(
                                 pending_get_manifest.insert(query_id, pending);
                             } else {
                                 warn!(error = %err, key = %pending.key, "kademlia get_record for site manifest failed");
-                                let _ = pending.respond_to.send(None);
+                                let response = pending.fallback_manifest_json.and_then(
+                                    |manifest_json| {
+                                        build_site_manifest_response(
+                                            local_record_store,
+                                            moderation_engine,
+                                            &pending.key,
+                                            &pending.name,
+                                            manifest_json,
+                                        )
+                                    },
+                                );
+                                let _ = pending.respond_to.send(response);
                             }
                         }
                     }
