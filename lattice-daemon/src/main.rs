@@ -426,6 +426,18 @@ async fn run_daemon(
         }
     });
 
+    let name_refresh_rpc_tx = rpc_tx.clone();
+    tokio::spawn(async move {
+        // Wait for the node to bootstrap and populate its store before first refresh.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        loop {
+            let _ = name_refresh_rpc_tx
+                .send(RpcCommand::RefreshStoredNameRecords)
+                .await;
+            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
+
     let mut pending_put: HashMap<kad::QueryId, PendingPut> = HashMap::new();
     let mut pending_get_text: HashMap<kad::QueryId, PendingTextQuery> = HashMap::new();
     let mut pending_get_manifest: HashMap<kad::QueryId, PendingManifestQuery> = HashMap::new();

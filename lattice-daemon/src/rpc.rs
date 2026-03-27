@@ -245,6 +245,7 @@ pub enum RpcCommand {
         respond_to: oneshot::Sender<Result<PublishSiteOk, String>>,
     },
     RepublishLocalRecords,
+    RefreshStoredNameRecords,
 }
 
 #[derive(Debug, Deserialize)]
